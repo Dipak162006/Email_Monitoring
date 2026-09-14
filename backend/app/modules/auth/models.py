@@ -7,6 +7,7 @@ from app.core.database import Base
 if TYPE_CHECKING:
     from app.modules.companies.models import CompanyUser
     from app.modules.email_accounts.models import EmailAccountAccess
+    from app.modules.emails.models import Email
 
 
 class User(Base):
@@ -46,6 +47,10 @@ class User(Base):
         "EmailAccountAccess",
         back_populates="user",
         cascade="all, delete-orphan",
+    )
+    sent_emails: Mapped[List["Email"]] = relationship(
+        "Email",
+        back_populates="user",
     )
 
     def __repr__(self) -> str:

@@ -14,6 +14,7 @@ from app.core.database import Base
 import app.modules.auth.models  # noqa: F401 - ensure models are registered
 import app.modules.companies.models  # noqa: F401 - ensure models are registered
 import app.modules.email_accounts.models  # noqa: F401 - ensure models are registered
+import app.modules.emails.models  # noqa: F401 - ensure models are registered
 
 config = context.config
 

@@ -8,6 +8,7 @@ from app.core.database import Base
 if TYPE_CHECKING:
     from app.modules.auth.models import User
     from app.modules.companies.models import Company
+    from app.modules.emails.models import Email
 
 
 class EmailProvider(str, enum.Enum):
@@ -87,6 +88,11 @@ class EmailAccount(Base):
     company: Mapped["Company"] = relationship("Company", back_populates="email_accounts")
     user_access: Mapped[List["EmailAccountAccess"]] = relationship(
         "EmailAccountAccess",
+        back_populates="email_account",
+        cascade="all, delete-orphan",
+    )
+    emails: Mapped[List["Email"]] = relationship(
+        "Email",
         back_populates="email_account",
         cascade="all, delete-orphan",
     )
