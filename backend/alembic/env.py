@@ -12,6 +12,7 @@ if str(backend_dir) not in sys.path:
 from app.core.config import settings
 from app.core.database import Base
 import app.modules.auth.models  # noqa: F401 - ensure models are registered
+import app.modules.companies.models  # noqa: F401 - ensure models are registered
 
 config = context.config
 

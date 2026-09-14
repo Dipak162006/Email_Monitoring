@@ -1,8 +1,11 @@
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy import Boolean, DateTime, Integer, String, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.modules.companies.models import CompanyUser
 
 
 class User(Base):
@@ -29,6 +32,13 @@ class User(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+    # Company memberships
+    company_memberships: Mapped[List["CompanyUser"]] = relationship(
+        "CompanyUser",
+        back_populates="user",
+        cascade="all, delete-orphan",
     )
 
     def __repr__(self) -> str:
