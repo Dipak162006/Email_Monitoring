@@ -8,7 +8,7 @@ from app.core.database import Base
 if TYPE_CHECKING:
     from app.modules.auth.models import User
     from app.modules.companies.models import Company
-    from app.modules.emails.models import Email
+    from app.modules.emails.models import Email, EmailThread
 
 
 class EmailProvider(str, enum.Enum):
@@ -94,6 +94,11 @@ class EmailAccount(Base):
     )
     emails: Mapped[List["Email"]] = relationship(
         "Email",
+        back_populates="email_account",
+        cascade="all, delete-orphan",
+    )
+    threads: Mapped[List["EmailThread"]] = relationship(
+        "EmailThread",
         back_populates="email_account",
         cascade="all, delete-orphan",
     )

@@ -42,6 +42,14 @@ class EmailSendRequest(BaseModel):
         default=None,
         description="Optional Reply-To header address",
     )
+    in_reply_to: Optional[str] = Field(
+        default=None,
+        description="Optional Message-ID of parent email when replying",
+    )
+    thread_id: Optional[int] = Field(
+        default=None,
+        description="Optional conversation thread ID when replying",
+    )
 
     @field_validator("to", "cc", "bcc", mode="before")
     @classmethod
@@ -68,10 +76,12 @@ class EmailRead(BaseModel):
     id: int
     company_id: int
     email_account_id: int
+    thread_id: Optional[int] = None
     user_id: Optional[int] = None
     message_id: Optional[str] = None
     imap_uid: Optional[str] = None
     in_reply_to: Optional[str] = None
+    references_header: Optional[str] = None
     direction: EmailDirection
     status: EmailStatus
     sender: str
@@ -112,4 +122,35 @@ class EmailSyncResult(BaseModel):
     malformed_skipped: int = Field(description="Number of malformed messages safely skipped")
     synced_at: datetime = Field(description="Timestamp when sync was executed")
     error_message: Optional[str] = Field(default=None, description="Safe error details if sync failed or had partial errors")
+
+
+class EmailThreadRead(BaseModel):
+    """Summary representation of a conversation thread."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    company_id: int
+    email_account_id: int
+    subject: str
+    snippet: Optional[str] = None
+    message_count: int
+    has_reply: bool
+    last_message_at: datetime
+    is_read: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class EmailThreadDetail(EmailThreadRead):
+    """Detailed conversation thread including its chronologically ordered messages."""
+    emails: List[EmailRead] = []
+
+
+class ThreadListResponse(BaseModel):
+    """Paginated list of conversation threads."""
+    threads: List[EmailThreadRead]
+    total: int
+    limit: int
+    offset: int
+
 

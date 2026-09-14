@@ -9,8 +9,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.auth.models import User
 from app.modules.email_accounts.models import EmailAccount
-from app.modules.emails.models import Email, EmailDirection, EmailStatus
+from app.modules.emails.models import Email, EmailDirection, EmailStatus, EmailThread
 from app.modules.emails.schemas import EmailSendRequest
+from app.modules.emails.thread_service import EmailThreadService
 from app.services.smtp.adapter import BaseSMTPAdapter, StandardSMTPAdapter
 from app.services.smtp.exceptions import (
     SMTPAuthenticationError,
@@ -36,11 +37,12 @@ class EmailService:
     def build_mime_message(
         account: EmailAccount,
         send_req: EmailSendRequest,
-    ) -> Tuple[EmailMessage, str, List[str]]:
+        parent_email: Optional[Email] = None,
+    ) -> Tuple[EmailMessage, str, List[str], Optional[str], Optional[str]]:
         """Construct a standardized MIME EmailMessage instance from account settings and send request.
         
         Returns:
-            Tuple containing (EmailMessage, generated_message_id, envelope_recipients_list)
+            Tuple containing (EmailMessage, generated_message_id, envelope_recipients_list, in_reply_to, references)
         """
         msg = EmailMessage()
 
@@ -72,6 +74,24 @@ class EmailService:
         msg["Message-ID"] = message_id
         msg["Date"] = email.utils.formatdate(localtime=True)
 
+        # Threading Headers (In-Reply-To and References)
+        in_reply_to_val = send_req.in_reply_to or (parent_email.message_id if parent_email else None)
+        references_val: Optional[str] = None
+        if in_reply_to_val:
+            msg["In-Reply-To"] = in_reply_to_val
+            # Construct References from parent's references + parent's message_id without duplicates
+            parent_refs: List[str] = []
+            if parent_email and parent_email.references_header:
+                parent_refs = EmailThreadService.extract_message_ids(parent_email.references_header)
+            elif parent_email and parent_email.in_reply_to:
+                parent_refs = EmailThreadService.extract_message_ids(parent_email.in_reply_to)
+
+            combined_refs = list(parent_refs)
+            if in_reply_to_val not in combined_refs:
+                combined_refs.append(in_reply_to_val)
+            references_val = " ".join(combined_refs)
+            msg["References"] = references_val
+
         # 4. Message Bodies (Text and/or HTML)
         if send_req.body_text and send_req.body_html:
             msg.set_content(send_req.body_text)
@@ -87,7 +107,7 @@ class EmailService:
             if r not in all_recipients:
                 all_recipients.append(r)
 
-        return msg, message_id, all_recipients
+        return msg, message_id, all_recipients, in_reply_to_val, references_val
 
     async def send_email(
         self,
@@ -113,14 +133,29 @@ class EmailService:
                 detail="Email account does not have an SMTP host configured.",
             )
 
-        # 2. Build MIME Message
-        mime_msg, message_id, envelope_recipients = self.build_mime_message(account, send_req)
+        # 2. Resolve or Create Conversation Thread
+        thread, parent_email = await EmailThreadService.resolve_or_create_outgoing_thread(
+            db=db,
+            account=account,
+            requested_thread_id=send_req.thread_id,
+            in_reply_to=send_req.in_reply_to,
+            subject=send_req.subject,
+            body_text=send_req.body_text,
+            body_html=send_req.body_html,
+        )
+
+        # 3. Build MIME Message
+        mime_msg, message_id, envelope_recipients, in_reply_to_val, references_val = self.build_mime_message(
+            account=account,
+            send_req=send_req,
+            parent_email=parent_email,
+        )
         to_list = [str(r) for r in send_req.to]
         cc_list = [str(r) for r in send_req.cc] if send_req.cc else None
         bcc_list = [str(r) for r in send_req.bcc] if send_req.bcc else None
         sender_str = str(mime_msg["From"])
 
-        # 3. Attempt SMTP Transmission
+        # 4. Attempt SMTP Transmission
         try:
             await self.smtp_adapter.send(
                 account=account,
@@ -132,8 +167,11 @@ class EmailService:
             email_record = Email(
                 company_id=account.company_id,
                 email_account_id=account.id,
+                thread_id=thread.id,
                 user_id=current_user.id if current_user else None,
                 message_id=message_id,
+                in_reply_to=in_reply_to_val,
+                references_header=references_val,
                 direction=EmailDirection.OUTGOING.value,
                 status=EmailStatus.SENT.value,
                 sender=sender_str,
@@ -148,10 +186,11 @@ class EmailService:
                 sent_at=datetime.now(timezone.utc),
                 error_message=None,
             )
+            EmailThreadService.attach_email_to_thread(thread, email_record)
             db.add(email_record)
             await db.commit()
             await db.refresh(email_record)
-            logger.info("Successfully sent and logged email id=%d (Message-ID: %s)", email_record.id, message_id)
+            logger.info("Successfully sent and logged email id=%d (Message-ID: %s, Thread-ID: %d)", email_record.id, message_id, thread.id)
             return email_record
 
         except Exception as exc:
@@ -163,8 +202,11 @@ class EmailService:
             failed_email_record = Email(
                 company_id=account.company_id,
                 email_account_id=account.id,
+                thread_id=thread.id,
                 user_id=current_user.id if current_user else None,
                 message_id=message_id,
+                in_reply_to=in_reply_to_val,
+                references_header=references_val,
                 direction=EmailDirection.OUTGOING.value,
                 status=EmailStatus.FAILED.value,
                 sender=sender_str,
@@ -179,6 +221,7 @@ class EmailService:
                 sent_at=None,
                 error_message=safe_error_msg,
             )
+            EmailThreadService.attach_email_to_thread(thread, failed_email_record)
             db.add(failed_email_record)
             await db.commit()
             await db.refresh(failed_email_record)

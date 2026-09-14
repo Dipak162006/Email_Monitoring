@@ -6,8 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.email_accounts.models import EmailAccount
-from app.modules.emails.models import Email, EmailDirection, EmailStatus
+from app.modules.emails.models import Email, EmailDirection, EmailStatus, EmailThread
 from app.modules.emails.schemas import EmailSyncResult
+from app.modules.emails.thread_service import EmailThreadService
 from app.services.imap.adapter import BaseIMAPAdapter, StandardIMAPAdapter
 from app.services.imap.exceptions import (
     IMAPAuthenticationError,
@@ -118,10 +119,25 @@ class EmailSyncService:
                 duplicates_skipped += 1
                 continue
 
-            # 4. Insert New Incoming Email
+            # 4. Resolve or Create Conversation Thread
+            thread, is_reply_to_outgoing = await EmailThreadService.resolve_or_create_incoming_thread(
+                db=db,
+                account=account,
+                message_id=parsed.message_id,
+                in_reply_to=parsed.in_reply_to,
+                references_header=parsed.references_header,
+                subject=parsed.subject,
+                body_text=parsed.body_text,
+                body_html=parsed.body_html,
+                email_date=parsed.date,
+                is_read=False,
+            )
+
+            # 5. Insert New Incoming Email
             email_record = Email(
                 company_id=account.company_id,
                 email_account_id=account.id,
+                thread_id=thread.id,
                 user_id=None,
                 message_id=parsed.message_id,
                 imap_uid=parsed.imap_uid,
@@ -142,6 +158,11 @@ class EmailSyncService:
                 sent_at=parsed.date,
                 received_at=datetime.now(timezone.utc),
                 error_message=None,
+            )
+            EmailThreadService.attach_email_to_thread(
+                thread=thread,
+                email=email_record,
+                is_reply_to_outgoing=is_reply_to_outgoing,
             )
             db.add(email_record)
             new_messages += 1
