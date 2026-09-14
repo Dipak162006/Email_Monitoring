@@ -94,6 +94,8 @@ class EmailRead(BaseModel):
     body_html: Optional[str] = None
     is_read: bool
     is_starred: bool
+    is_deleted: bool = False
+    deleted_at: Optional[datetime] = None
     sent_at: Optional[datetime] = None
     received_at: Optional[datetime] = None
     error_message: Optional[str] = None
@@ -152,5 +154,34 @@ class ThreadListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# ---------------------------------------------------------------------------
+# M8 Mailbox Schemas
+# ---------------------------------------------------------------------------
+
+VALID_FOLDERS = frozenset({"inbox", "sent", "drafts", "bounced", "responses", "trash"})
+
+
+class EmailListResponse(BaseModel):
+    """Paginated list of emails."""
+    emails: List[EmailRead]
+    total: int
+    limit: int
+    offset: int
+
+
+class EmailReadUpdate(BaseModel):
+    """Request body for explicitly setting an email's read/unread state."""
+    model_config = ConfigDict(extra="forbid")
+
+    is_read: bool = Field(..., description="Set to true to mark read, false to mark unread")
+
+
+class EmailStarUpdate(BaseModel):
+    """Request body for explicitly setting an email's starred/unstarred state."""
+    model_config = ConfigDict(extra="forbid")
+
+    is_starred: bool = Field(..., description="Set to true to star the email, false to unstar")
 
 

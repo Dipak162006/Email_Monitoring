@@ -111,6 +111,8 @@ class Email(Base):
     # Mailbox Flags
     is_read: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_starred: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Delivery & Error Tracking
     sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

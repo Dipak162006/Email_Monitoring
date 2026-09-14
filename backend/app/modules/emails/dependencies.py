@@ -62,3 +62,53 @@ async def verify_user_can_send_from_account(
 # Reusable alias for general account access (sending, syncing, viewing)
 verify_user_can_access_account = verify_user_can_send_from_account
 
+
+async def verify_user_can_access_email(
+    db: AsyncSession,
+    current_user: User,
+    email_id: int,
+):
+    """Verify that current authenticated user belongs to the company owning the email
+    and has permission to access the associated email account.
+    """
+    from app.modules.emails.service import EmailService
+
+    email = await EmailService.get_email(db, email_id)
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Email not found.",
+        )
+
+    membership = await CompanyService.get_user_membership(
+        db=db,
+        company_id=email.company_id,
+        user_id=current_user.id,
+    )
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this email.",
+        )
+
+    account = await EmailAccountService.get_email_account(db, email.email_account_id)
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Associated email account not found.",
+        )
+
+    has_access = await EmailAccountService.check_user_access(
+        db=db,
+        account=account,
+        user_id=current_user.id,
+        user_role=membership.role,
+    )
+    if not has_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this email.",
+        )
+
+    return email
+
