@@ -5,6 +5,7 @@ from app.core.config import settings
 from app.core.redis import get_redis_client
 from app.modules.auth.routes import router as auth_router
 from app.modules.companies.routes import router as companies_router
+from app.modules.email_accounts.routes import router as email_accounts_router
 from app.modules.health.routes import router as health_router
 
 
@@ -43,6 +44,7 @@ def create_application() -> FastAPI:
     # Include application routes
     app.include_router(auth_router, prefix=settings.API_V1_STR)
     app.include_router(companies_router, prefix=settings.API_V1_STR)
+    app.include_router(email_accounts_router, prefix=settings.API_V1_STR)
     app.include_router(health_router, prefix=settings.API_V1_STR)
     app.include_router(health_router)
 

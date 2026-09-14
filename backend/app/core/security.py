@@ -65,3 +65,32 @@ def decode_access_token(token: str) -> dict:
         algorithms=[settings.ALGORITHM],
         options={"require": ["sub", "exp", "iat"]},
     )
+
+
+def _get_fernet():
+    """Derive a 32-byte Fernet key deterministically from settings.ENCRYPTION_KEY."""
+    import base64
+    import hashlib
+    from cryptography.fernet import Fernet
+    key_bytes = hashlib.sha256(settings.ENCRYPTION_KEY.encode("utf-8")).digest()
+    fernet_key = base64.urlsafe_b64encode(key_bytes)
+    return Fernet(fernet_key)
+
+
+def encrypt_credential(plaintext: Optional[str]) -> Optional[str]:
+    """Reversibly encrypt a sensitive credential (e.g. SMTP/IMAP password) for storage at rest."""
+    if not plaintext:
+        return None
+    fernet = _get_fernet()
+    return fernet.encrypt(plaintext.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_credential(ciphertext: Optional[str]) -> Optional[str]:
+    """Decrypt a stored credential for backend SMTP/IMAP protocol usage."""
+    if not ciphertext:
+        return None
+    try:
+        fernet = _get_fernet()
+        return fernet.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+    except Exception:
+        return None

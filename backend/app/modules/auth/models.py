@@ -6,6 +6,7 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.modules.companies.models import CompanyUser
+    from app.modules.email_accounts.models import EmailAccountAccess
 
 
 class User(Base):
@@ -37,6 +38,12 @@ class User(Base):
     # Company memberships
     company_memberships: Mapped[List["CompanyUser"]] = relationship(
         "CompanyUser",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    # Email account access permissions
+    email_account_access: Mapped[List["EmailAccountAccess"]] = relationship(
+        "EmailAccountAccess",
         back_populates="user",
         cascade="all, delete-orphan",
     )

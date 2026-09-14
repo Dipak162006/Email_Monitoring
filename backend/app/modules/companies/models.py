@@ -7,6 +7,7 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.modules.auth.models import User
+    from app.modules.email_accounts.models import EmailAccount
 
 
 class CompanyRole(str, enum.Enum):
@@ -42,6 +43,11 @@ class Company(Base):
     # Relationships
     members: Mapped[List["CompanyUser"]] = relationship(
         "CompanyUser",
+        back_populates="company",
+        cascade="all, delete-orphan",
+    )
+    email_accounts: Mapped[List["EmailAccount"]] = relationship(
+        "EmailAccount",
         back_populates="company",
         cascade="all, delete-orphan",
     )
