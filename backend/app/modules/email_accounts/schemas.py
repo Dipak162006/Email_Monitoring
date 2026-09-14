@@ -73,6 +73,7 @@ class EmailAccountRead(BaseModel):
     has_imap_password: bool = Field(description="Indicates whether an IMAP password is encrypted and stored")
 
     is_active: bool
+    last_synced_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 

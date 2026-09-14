@@ -57,3 +57,8 @@ async def verify_user_can_send_from_account(
         )
 
     return account
+
+
+# Reusable alias for general account access (sending, syncing, viewing)
+verify_user_can_access_account = verify_user_can_send_from_account
+

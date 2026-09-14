@@ -6,6 +6,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -44,6 +45,10 @@ class Email(Base):
     and timestamps for auditability, threading, and mailbox tracking.
     """
     __tablename__ = "emails"
+    __table_args__ = (
+        Index("ix_emails_account_uid", "email_account_id", "imap_uid", unique=True),
+        Index("ix_emails_account_message_id", "email_account_id", "message_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
     company_id: Mapped[int] = mapped_column(
@@ -67,6 +72,7 @@ class Email(Base):
 
     # Identifiers & Threading Headers
     message_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    imap_uid: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     in_reply_to: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     references_header: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 

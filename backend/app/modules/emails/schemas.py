@@ -70,6 +70,7 @@ class EmailRead(BaseModel):
     email_account_id: int
     user_id: Optional[int] = None
     message_id: Optional[str] = None
+    imap_uid: Optional[str] = None
     in_reply_to: Optional[str] = None
     direction: EmailDirection
     status: EmailStatus
@@ -88,3 +89,27 @@ class EmailRead(BaseModel):
     error_message: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+
+class EmailSyncRequest(BaseModel):
+    """Optional parameters for triggering an IMAP synchronization run."""
+    model_config = ConfigDict(extra="forbid")
+
+    folder: str = Field(default="INBOX", max_length=100, description="IMAP mailbox folder to synchronize")
+    max_messages: int = Field(default=50, ge=1, le=500, description="Maximum number of recent messages to inspect")
+
+
+class EmailSyncResult(BaseModel):
+    """Summary of an IMAP mailbox synchronization operation."""
+    model_config = ConfigDict(from_attributes=True)
+
+    email_account_id: int
+    status: str = Field(description="Overall sync status: SUCCESS, PARTIAL, or FAILED")
+    folder: str = Field(description="Synchronized IMAP mailbox folder")
+    total_discovered: int = Field(description="Number of messages inspected on the IMAP server")
+    new_messages: int = Field(description="Number of new incoming emails parsed and stored")
+    duplicates_skipped: int = Field(description="Number of already-existing emails skipped")
+    malformed_skipped: int = Field(description="Number of malformed messages safely skipped")
+    synced_at: datetime = Field(description="Timestamp when sync was executed")
+    error_message: Optional[str] = Field(default=None, description="Safe error details if sync failed or had partial errors")
+

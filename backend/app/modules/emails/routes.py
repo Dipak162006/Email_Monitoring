@@ -1,12 +1,14 @@
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.models import User
 from app.modules.companies.service import CompanyService
-from app.modules.emails.dependencies import verify_user_can_send_from_account
-from app.modules.emails.schemas import EmailRead, EmailSendRequest
+from app.modules.emails.dependencies import verify_user_can_access_account, verify_user_can_send_from_account
+from app.modules.emails.schemas import EmailRead, EmailSendRequest, EmailSyncRequest, EmailSyncResult
 from app.modules.emails.service import EmailService
+from app.modules.emails.sync_service import EmailSyncService
 
 router = APIRouter(tags=["Emails"])
 
@@ -106,3 +108,62 @@ async def get_email_by_id(
         )
 
     return EmailRead.model_validate(email_record)
+
+
+@router.post(
+    "/email-accounts/{account_id}/sync",
+    response_model=EmailSyncResult,
+    status_code=status.HTTP_200_OK,
+    summary="Trigger on-demand IMAP synchronization for an authorized email account",
+)
+async def sync_email_account(
+    account_id: int,
+    sync_req: Optional[EmailSyncRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSyncResult:
+    """Synchronize incoming messages from IMAP server into local database."""
+    account = await verify_user_can_access_account(
+        db=db,
+        current_user=current_user,
+        account_id=account_id,
+    )
+    req = sync_req or EmailSyncRequest()
+    sync_service = EmailSyncService()
+    return await sync_service.sync_mailbox(
+        db=db,
+        account=account,
+        folder=req.folder,
+        max_messages=req.max_messages,
+    )
+
+
+@router.post(
+    "/companies/{company_id}/email-accounts/{account_id}/sync",
+    response_model=EmailSyncResult,
+    status_code=status.HTTP_200_OK,
+    summary="Trigger on-demand IMAP synchronization scoped to a company",
+)
+async def sync_company_email_account(
+    company_id: int,
+    account_id: int,
+    sync_req: Optional[EmailSyncRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSyncResult:
+    """Synchronize incoming messages scoped to a specific company ID."""
+    account = await verify_user_can_access_account(
+        db=db,
+        current_user=current_user,
+        account_id=account_id,
+        company_id=company_id,
+    )
+    req = sync_req or EmailSyncRequest()
+    sync_service = EmailSyncService()
+    return await sync_service.sync_mailbox(
+        db=db,
+        account=account,
+        folder=req.folder,
+        max_messages=req.max_messages,
+    )
+

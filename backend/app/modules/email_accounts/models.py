@@ -72,6 +72,7 @@ class EmailAccount(Base):
     imap_password_encrypted: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

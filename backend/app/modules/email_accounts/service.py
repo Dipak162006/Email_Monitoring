@@ -36,6 +36,7 @@ class EmailAccountService:
             imap_username=account.imap_username,
             has_imap_password=bool(account.imap_password_encrypted),
             is_active=account.is_active,
+            last_synced_at=account.last_synced_at,
             created_at=account.created_at,
             updated_at=account.updated_at,
         )
