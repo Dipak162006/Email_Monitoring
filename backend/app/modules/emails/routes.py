@@ -13,8 +13,11 @@ from app.modules.emails.dependencies import (
     verify_user_can_access_email,
     verify_user_can_send_from_account,
 )
+from app.modules.emails.draft_service import EmailDraftService
 from app.modules.emails.mailbox_service import EmailMailboxService
 from app.modules.emails.schemas import (
+    EmailDraftCreate,
+    EmailDraftUpdate,
     EmailListResponse,
     EmailRead,
     EmailReadUpdate,
@@ -95,6 +98,224 @@ async def send_company_email(
         send_req=send_req,
     )
     return EmailRead.model_validate(email_record)
+
+
+# -----------------------------------------------------------------------------
+# M9 Compose & Draft Management API
+# -----------------------------------------------------------------------------
+
+@router.post(
+    "/emails/drafts",
+    response_model=EmailRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new draft email across authorized email accounts",
+)
+async def create_draft(
+    draft_in: EmailDraftCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Create a new work-in-progress draft message."""
+    draft = await EmailDraftService.create_draft(
+        db=db,
+        current_user=current_user,
+        draft_in=draft_in,
+    )
+    return EmailRead.model_validate(draft)
+
+
+@router.post(
+    "/companies/{company_id}/emails/drafts",
+    response_model=EmailRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new draft email scoped to a specific company",
+)
+async def create_company_draft(
+    company_id: int,
+    draft_in: EmailDraftCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Create a new draft message scoped to a company ID."""
+    draft = await EmailDraftService.create_draft(
+        db=db,
+        current_user=current_user,
+        draft_in=draft_in,
+        company_id=company_id,
+    )
+    return EmailRead.model_validate(draft)
+
+
+@router.get(
+    "/emails/drafts/{draft_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve an active draft by ID",
+)
+async def get_draft_by_id(
+    draft_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Fetch an active draft message ensuring account authorization."""
+    draft = await EmailDraftService.get_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+    )
+    return EmailRead.model_validate(draft)
+
+
+@router.get(
+    "/companies/{company_id}/emails/drafts/{draft_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve an active draft by ID scoped to a company",
+)
+async def get_company_draft_by_id(
+    company_id: int,
+    draft_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Fetch an active draft message scoped to a company."""
+    draft = await EmailDraftService.get_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        company_id=company_id,
+    )
+    return EmailRead.model_validate(draft)
+
+
+@router.put(
+    "/emails/drafts/{draft_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Update an existing draft message or autosave changes",
+)
+async def update_draft(
+    draft_id: int,
+    draft_update: EmailDraftUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Update fields of an active draft message."""
+    draft = await EmailDraftService.update_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        draft_update=draft_update,
+    )
+    return EmailRead.model_validate(draft)
+
+
+@router.put(
+    "/companies/{company_id}/emails/drafts/{draft_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Update an existing draft message scoped to a company",
+)
+async def update_company_draft(
+    company_id: int,
+    draft_id: int,
+    draft_update: EmailDraftUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Update fields of a draft scoped to a specific company."""
+    draft = await EmailDraftService.update_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        draft_update=draft_update,
+        company_id=company_id,
+    )
+    return EmailRead.model_validate(draft)
+
+
+@router.delete(
+    "/emails/drafts/{draft_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Discard a draft message (soft-delete to Trash)",
+)
+async def discard_draft(
+    draft_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Discard a draft by soft-deleting it to Trash."""
+    draft = await EmailDraftService.discard_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+    )
+    return EmailRead.model_validate(draft)
+
+
+@router.delete(
+    "/companies/{company_id}/emails/drafts/{draft_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Discard a draft message scoped to a company",
+)
+async def discard_company_draft(
+    company_id: int,
+    draft_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Discard a draft scoped to a company by soft-deleting it."""
+    draft = await EmailDraftService.discard_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        company_id=company_id,
+    )
+    return EmailRead.model_validate(draft)
+
+
+@router.post(
+    "/emails/drafts/{draft_id}/send",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Validate and transmit an existing draft via SMTP",
+)
+async def send_draft(
+    draft_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Send an existing draft message via SMTP with concurrency protection."""
+    sent_email = await EmailDraftService.send_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+    )
+    return EmailRead.model_validate(sent_email)
+
+
+@router.post(
+    "/companies/{company_id}/emails/drafts/{draft_id}/send",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Validate and transmit a draft scoped to a company via SMTP",
+)
+async def send_company_draft(
+    company_id: int,
+    draft_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Send an existing draft scoped to a company via SMTP with concurrency protection."""
+    sent_email = await EmailDraftService.send_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        company_id=company_id,
+    )
+    return EmailRead.model_validate(sent_email)
 
 
 # -----------------------------------------------------------------------------

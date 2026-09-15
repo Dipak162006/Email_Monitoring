@@ -185,3 +185,122 @@ class EmailStarUpdate(BaseModel):
     is_starred: bool = Field(..., description="Set to true to star the email, false to unstar")
 
 
+# ---------------------------------------------------------------------------
+# M9 Compose and Draft Schemas
+# ---------------------------------------------------------------------------
+
+class EmailDraftCreate(BaseModel):
+    """Schema for creating a work-in-progress draft email message."""
+    model_config = ConfigDict(extra="forbid")
+
+    email_account_id: int = Field(
+        ...,
+        description="Database ID of the company-owned EmailAccount to send from",
+    )
+    to: Optional[List[EmailStr]] = Field(
+        default_factory=list,
+        description="Optional list of destination email addresses (empty for new drafts)",
+    )
+    cc: Optional[List[EmailStr]] = Field(
+        default=None,
+        description="Optional list of carbon copy (CC) recipients",
+    )
+    bcc: Optional[List[EmailStr]] = Field(
+        default=None,
+        description="Optional list of blind carbon copy (BCC) recipients",
+    )
+    subject: Optional[str] = Field(
+        default="",
+        max_length=998,
+        description="Email subject line",
+    )
+    body_text: Optional[str] = Field(
+        default=None,
+        description="Plain text representation of the draft body",
+    )
+    body_html: Optional[str] = Field(
+        default=None,
+        description="Rich HTML representation of the draft body",
+    )
+    reply_to: Optional[EmailStr] = Field(
+        default=None,
+        description="Optional Reply-To header address",
+    )
+    in_reply_to: Optional[str] = Field(
+        default=None,
+        description="Optional Message-ID of parent email when drafting a reply",
+    )
+    thread_id: Optional[int] = Field(
+        default=None,
+        description="Optional conversation thread ID when drafting a reply",
+    )
+
+    @field_validator("to", "cc", "bcc", mode="before")
+    @classmethod
+    def coerce_recipients_list(cls, value: Any) -> Any:
+        """Allow a single string email address to be passed as a recipient list, and handle None."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [value.strip()]
+        return value
+
+
+class EmailDraftUpdate(BaseModel):
+    """Schema for updating an existing work-in-progress draft message."""
+    model_config = ConfigDict(extra="forbid")
+
+    email_account_id: Optional[int] = Field(
+        default=None,
+        description="Optional new EmailAccount ID to switch the From address",
+    )
+    to: Optional[List[EmailStr]] = Field(
+        default=None,
+        description="Optional updated list of destination email addresses",
+    )
+    cc: Optional[List[EmailStr]] = Field(
+        default=None,
+        description="Optional updated list of carbon copy (CC) recipients",
+    )
+    bcc: Optional[List[EmailStr]] = Field(
+        default=None,
+        description="Optional updated list of blind carbon copy (BCC) recipients",
+    )
+    subject: Optional[str] = Field(
+        default=None,
+        max_length=998,
+        description="Optional updated email subject line",
+    )
+    body_text: Optional[str] = Field(
+        default=None,
+        description="Optional updated plain text body",
+    )
+    body_html: Optional[str] = Field(
+        default=None,
+        description="Optional updated rich HTML body",
+    )
+    reply_to: Optional[EmailStr] = Field(
+        default=None,
+        description="Optional updated Reply-To header address",
+    )
+    in_reply_to: Optional[str] = Field(
+        default=None,
+        description="Optional updated Message-ID of parent email",
+    )
+    thread_id: Optional[int] = Field(
+        default=None,
+        description="Optional updated conversation thread ID",
+    )
+
+    @field_validator("to", "cc", "bcc", mode="before")
+    @classmethod
+    def coerce_recipients_list(cls, value: Any) -> Any:
+        """Allow a single string email address to be passed as a recipient list."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = [value.strip()]
+        return value
+
+
+
