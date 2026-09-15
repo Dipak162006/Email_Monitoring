@@ -25,12 +25,18 @@ from app.modules.emails.schemas import (
     EmailStarUpdate,
     EmailSyncRequest,
     EmailSyncResult,
+    EmailTemplateActiveToggle,
+    EmailTemplateCreate,
+    EmailTemplateListResponse,
+    EmailTemplateRead,
+    EmailTemplateUpdate,
     EmailThreadDetail,
     EmailThreadRead,
     ThreadListResponse,
 )
 from app.modules.emails.service import EmailService
 from app.modules.emails.sync_service import EmailSyncService
+from app.modules.emails.template_service import EmailTemplateService
 from app.modules.emails.thread_service import EmailThreadService
 
 router = APIRouter(tags=["Emails"])
@@ -948,5 +954,420 @@ async def get_company_thread_by_id(
         )
 
     return await get_thread_by_id(thread_id=thread_id, current_user=current_user, db=db)
+
+
+# -----------------------------------------------------------------------------
+# M10 Email Templates API
+# -----------------------------------------------------------------------------
+
+@router.post(
+    "/emails/templates",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new reusable email template",
+)
+@router.post(
+    "/templates",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+async def create_template(
+    template_in: EmailTemplateCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailTemplateRead:
+    """Create a new reusable email template for authorized company and/or email account."""
+    template = await EmailTemplateService.create_template(
+        db=db,
+        current_user=current_user,
+        template_in=template_in,
+    )
+    return EmailTemplateRead.model_validate(template)
+
+
+@router.post(
+    "/companies/{company_id}/emails/templates",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new reusable email template scoped to a company",
+)
+@router.post(
+    "/companies/{company_id}/templates",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+async def create_company_template(
+    company_id: int,
+    template_in: EmailTemplateCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailTemplateRead:
+    """Create a new reusable email template scoped to a specific company ID."""
+    template = await EmailTemplateService.create_template(
+        db=db,
+        current_user=current_user,
+        template_in=template_in,
+        company_id=company_id,
+    )
+    return EmailTemplateRead.model_validate(template)
+
+
+@router.get(
+    "/emails/templates",
+    response_model=EmailTemplateListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List email templates available to the authorized user",
+)
+@router.get(
+    "/templates",
+    response_model=EmailTemplateListResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def list_templates(
+    company_id: Optional[int] = Query(None, description="Filter templates by company ID"),
+    email_account_id: Optional[int] = Query(None, description="Filter templates by email account ID"),
+    is_active: Optional[bool] = Query(None, description="Filter by active status"),
+    limit: int = Query(50, ge=1, le=100, description="Page size"),
+    offset: int = Query(0, ge=0, description="Page offset"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailTemplateListResponse:
+    """List email templates accessible to the user with optional filters."""
+    templates, total = await EmailTemplateService.list_templates(
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+        email_account_id=email_account_id,
+        is_active=is_active,
+        limit=limit,
+        offset=offset,
+    )
+    return EmailTemplateListResponse(
+        templates=[EmailTemplateRead.model_validate(t) for t in templates],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/companies/{company_id}/emails/templates",
+    response_model=EmailTemplateListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List email templates scoped to a specific company",
+)
+@router.get(
+    "/companies/{company_id}/templates",
+    response_model=EmailTemplateListResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def list_company_templates(
+    company_id: int,
+    email_account_id: Optional[int] = Query(None, description="Filter templates by email account ID"),
+    is_active: Optional[bool] = Query(None, description="Filter by active status"),
+    limit: int = Query(50, ge=1, le=100, description="Page size"),
+    offset: int = Query(0, ge=0, description="Page offset"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailTemplateListResponse:
+    """List email templates scoped strictly to a specific company ID."""
+    return await list_templates(
+        company_id=company_id,
+        email_account_id=email_account_id,
+        is_active=is_active,
+        limit=limit,
+        offset=offset,
+        current_user=current_user,
+        db=db,
+    )
+
+
+@router.get(
+    "/emails/templates/{template_id}",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_200_OK,
+    summary="Get an email template by ID",
+)
+@router.get(
+    "/templates/{template_id}",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def get_template_by_id(
+    template_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailTemplateRead:
+    """Fetch an email template by ID ensuring company and account authorization."""
+    template = await EmailTemplateService.get_template(
+        db=db,
+        current_user=current_user,
+        template_id=template_id,
+    )
+    return EmailTemplateRead.model_validate(template)
+
+
+@router.get(
+    "/companies/{company_id}/emails/templates/{template_id}",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_200_OK,
+    summary="Get an email template by ID scoped to a company",
+)
+@router.get(
+    "/companies/{company_id}/templates/{template_id}",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def get_company_template_by_id(
+    company_id: int,
+    template_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailTemplateRead:
+    """Fetch an email template by ID scoped to a company."""
+    template = await EmailTemplateService.get_template(
+        db=db,
+        current_user=current_user,
+        template_id=template_id,
+        company_id=company_id,
+    )
+    return EmailTemplateRead.model_validate(template)
+
+
+@router.put(
+    "/emails/templates/{template_id}",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_200_OK,
+    summary="Update an existing email template",
+)
+@router.put(
+    "/templates/{template_id}",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def update_template(
+    template_id: int,
+    template_update: EmailTemplateUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailTemplateRead:
+    """Update fields of an existing email template."""
+    template = await EmailTemplateService.update_template(
+        db=db,
+        current_user=current_user,
+        template_id=template_id,
+        template_update=template_update,
+    )
+    return EmailTemplateRead.model_validate(template)
+
+
+@router.put(
+    "/companies/{company_id}/emails/templates/{template_id}",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_200_OK,
+    summary="Update an existing email template scoped to a company",
+)
+@router.put(
+    "/companies/{company_id}/templates/{template_id}",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def update_company_template(
+    company_id: int,
+    template_id: int,
+    template_update: EmailTemplateUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailTemplateRead:
+    """Update fields of an email template scoped to a company."""
+    template = await EmailTemplateService.update_template(
+        db=db,
+        current_user=current_user,
+        template_id=template_id,
+        template_update=template_update,
+        company_id=company_id,
+    )
+    return EmailTemplateRead.model_validate(template)
+
+
+@router.delete(
+    "/emails/templates/{template_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an email template",
+)
+@router.delete(
+    "/templates/{template_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    include_in_schema=False,
+)
+async def delete_template(
+    template_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Delete an email template using standard deletion."""
+    await EmailTemplateService.delete_template(
+        db=db,
+        current_user=current_user,
+        template_id=template_id,
+    )
+
+
+@router.delete(
+    "/companies/{company_id}/emails/templates/{template_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an email template scoped to a company",
+)
+@router.delete(
+    "/companies/{company_id}/templates/{template_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    include_in_schema=False,
+)
+async def delete_company_template(
+    company_id: int,
+    template_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Delete an email template scoped to a specific company."""
+    await EmailTemplateService.delete_template(
+        db=db,
+        current_user=current_user,
+        template_id=template_id,
+        company_id=company_id,
+    )
+
+
+@router.patch(
+    "/emails/templates/{template_id}/active",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_200_OK,
+    summary="Toggle or update the active status of an email template",
+)
+@router.patch(
+    "/templates/{template_id}/active",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def toggle_template_active(
+    template_id: int,
+    active_in: Optional[EmailTemplateActiveToggle] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailTemplateRead:
+    """Toggle or set the active status of an email template."""
+    is_active = active_in.is_active if active_in is not None else None
+    template = await EmailTemplateService.toggle_active(
+        db=db,
+        current_user=current_user,
+        template_id=template_id,
+        is_active=is_active,
+    )
+    return EmailTemplateRead.model_validate(template)
+
+
+@router.patch(
+    "/companies/{company_id}/emails/templates/{template_id}/active",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_200_OK,
+    summary="Toggle or update active status of a template scoped to a company",
+)
+@router.patch(
+    "/companies/{company_id}/templates/{template_id}/active",
+    response_model=EmailTemplateRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def toggle_company_template_active(
+    company_id: int,
+    template_id: int,
+    active_in: Optional[EmailTemplateActiveToggle] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailTemplateRead:
+    """Toggle or set the active status of a company-scoped email template."""
+    is_active = active_in.is_active if active_in is not None else None
+    template = await EmailTemplateService.toggle_active(
+        db=db,
+        current_user=current_user,
+        template_id=template_id,
+        is_active=is_active,
+        company_id=company_id,
+    )
+    return EmailTemplateRead.model_validate(template)
+
+
+# -----------------------------------------------------------------------------
+# M10 Template -> Draft Integration API
+# -----------------------------------------------------------------------------
+
+@router.post(
+    "/emails/drafts/{draft_id}/apply-template/{template_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Apply a reusable email template to an existing draft",
+)
+@router.post(
+    "/drafts/{draft_id}/apply-template/{template_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def apply_template_to_draft(
+    draft_id: int,
+    template_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Apply an active email template to an existing draft email.
+    
+    Populates subject, body_text, and body_html while preserving recipients and thread references.
+    """
+    draft = await EmailTemplateService.apply_template_to_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        template_id=template_id,
+    )
+    return EmailRead.model_validate(draft)
+
+
+@router.post(
+    "/companies/{company_id}/emails/drafts/{draft_id}/apply-template/{template_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Apply a template to an existing draft scoped to a company",
+)
+@router.post(
+    "/companies/{company_id}/drafts/{draft_id}/apply-template/{template_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def apply_company_template_to_draft(
+    company_id: int,
+    draft_id: int,
+    template_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Apply an active email template to an existing draft email scoped to a company."""
+    draft = await EmailTemplateService.apply_template_to_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        template_id=template_id,
+        company_id=company_id,
+    )
+    return EmailRead.model_validate(draft)
 
 

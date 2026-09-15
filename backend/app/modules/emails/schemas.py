@@ -303,4 +303,128 @@ class EmailDraftUpdate(BaseModel):
         return value
 
 
+# -----------------------------------------------------------------------------
+# M10 Email Templates Schemas
+# -----------------------------------------------------------------------------
+
+class EmailTemplateCreate(BaseModel):
+    """Schema for creating a reusable email template."""
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="Name of the template",
+    )
+    subject: Optional[str] = Field(
+        default="",
+        max_length=998,
+        description="Template email subject line",
+    )
+    body_text: Optional[str] = Field(
+        default=None,
+        description="Plain text representation of the template body",
+    )
+    body_html: Optional[str] = Field(
+        default=None,
+        description="Rich HTML representation of the template body",
+    )
+    email_account_id: Optional[int] = Field(
+        default=None,
+        description="Optional EmailAccount ID if template is scoped to an account",
+    )
+    is_active: bool = Field(
+        default=True,
+        description="Whether the template is active and usable",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Template name cannot be empty or whitespace.")
+        return stripped
+
+
+class EmailTemplateUpdate(BaseModel):
+    """Schema for updating an existing email template."""
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description="Updated template name",
+    )
+    subject: Optional[str] = Field(
+        default=None,
+        max_length=998,
+        description="Updated template email subject line",
+    )
+    body_text: Optional[str] = Field(
+        default=None,
+        description="Updated plain text body",
+    )
+    body_html: Optional[str] = Field(
+        default=None,
+        description="Updated rich HTML body",
+    )
+    email_account_id: Optional[int] = Field(
+        default=None,
+        description="Updated EmailAccount ID",
+    )
+    is_active: Optional[bool] = Field(
+        default=None,
+        description="Updated active status",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            stripped = v.strip()
+            if not stripped:
+                raise ValueError("Template name cannot be empty or whitespace.")
+            return stripped
+        return v
+
+
+class EmailTemplateActiveToggle(BaseModel):
+    """Schema for toggling template active status."""
+    model_config = ConfigDict(extra="forbid")
+
+    is_active: bool = Field(
+        ...,
+        description="Active status of the template",
+    )
+
+
+class EmailTemplateRead(BaseModel):
+    """Safe schema for reading persisted email templates."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    company_id: int
+    email_account_id: Optional[int] = None
+    user_id: Optional[int] = None
+    name: str
+    subject: str
+    body_text: Optional[str] = None
+    body_html: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class EmailTemplateListResponse(BaseModel):
+    """Paginated list response of email templates."""
+    templates: List[EmailTemplateRead]
+    total: int
+    limit: int
+    offset: int
+
+
+
 

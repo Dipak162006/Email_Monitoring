@@ -194,3 +194,58 @@ class EmailThread(Base):
     def __repr__(self) -> str:
         return f"<EmailThread id={self.id} subject='{self.subject[:30]}' messages={self.message_count} has_reply={self.has_reply}>"
 
+
+class EmailTemplate(Base):
+    """Database representation of an email template.
+    
+    Templates represent reusable subject, text, and HTML content that can be
+    applied to draft emails within an authorized company and/or email account.
+    """
+    __tablename__ = "email_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    company_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("companies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    email_account_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("email_accounts.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    user_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    subject: Mapped[str] = mapped_column(String(998), default="", nullable=False)
+    body_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    body_html: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    company: Mapped["Company"] = relationship("Company")
+    email_account: Mapped[Optional["EmailAccount"]] = relationship("EmailAccount")
+    user: Mapped[Optional["User"]] = relationship("User")
+
+    def __repr__(self) -> str:
+        return f"<EmailTemplate id={self.id} name='{self.name}' company_id={self.company_id} active={self.is_active}>"
+
