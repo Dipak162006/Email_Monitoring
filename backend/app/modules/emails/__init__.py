@@ -34,6 +34,7 @@ from app.modules.emails.schemas import (
     SignatureUpdate,
     ThreadListResponse,
 )
+from app.modules.emails.monitoring_service import EmailMonitoringService
 from app.modules.emails.service import EmailService
 from app.modules.emails.signature_service import SignatureService
 from app.modules.emails.sync_service import EmailSyncService
@@ -71,6 +72,7 @@ __all__ = [
     "EmailThreadRead",
     "EmailThreadDetail",
     "ThreadListResponse",
+    "EmailMonitoringService",
     "EmailService",
     "SignatureService",
     "AttachmentService",

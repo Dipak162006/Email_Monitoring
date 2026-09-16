@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.email_accounts.models import EmailAccount
 from app.modules.emails.models import Email, EmailDirection, EmailStatus, EmailThread
+from app.modules.emails.monitoring_service import EmailMonitoringService
 from app.modules.emails.schemas import EmailSyncResult
 from app.modules.emails.thread_service import EmailThreadService
 from app.services.imap.adapter import BaseIMAPAdapter, StandardIMAPAdapter
@@ -119,19 +120,57 @@ class EmailSyncService:
                 duplicates_skipped += 1
                 continue
 
-            # 4. Resolve or Create Conversation Thread
-            thread, is_reply_to_outgoing = await EmailThreadService.resolve_or_create_incoming_thread(
-                db=db,
-                account=account,
-                message_id=parsed.message_id,
-                in_reply_to=parsed.in_reply_to,
-                references_header=parsed.references_header,
-                subject=parsed.subject,
-                body_text=parsed.body_text,
-                body_html=parsed.body_html,
-                email_date=parsed.date,
-                is_read=False,
-            )
+            # 4. Resolve Thread, Detect Bounces and Auto-Replies
+            matched_bounced_email = None
+            if parsed.is_bounce:
+                matched_bounced_email = await EmailMonitoringService.match_and_process_bounce(
+                    db=db,
+                    account=account,
+                    parsed=parsed,
+                )
+
+            # Resolve or create conversation thread
+            thread = None
+            is_reply_to_outgoing = False
+
+            if matched_bounced_email and matched_bounced_email.thread_id:
+                thread_stmt = select(EmailThread).where(EmailThread.id == matched_bounced_email.thread_id)
+                t_res = await db.execute(thread_stmt)
+                thread = t_res.scalars().first()
+
+            if not thread:
+                thread, is_reply = await EmailThreadService.resolve_or_create_incoming_thread(
+                    db=db,
+                    account=account,
+                    message_id=parsed.message_id,
+                    in_reply_to=parsed.in_reply_to,
+                    references_header=parsed.references_header,
+                    subject=parsed.subject,
+                    body_text=parsed.body_text,
+                    body_html=parsed.body_html,
+                    email_date=parsed.date,
+                    is_read=False,
+                )
+                if not parsed.is_bounce and EmailMonitoringService.is_genuine_reply(parsed):
+                    is_reply_to_outgoing = is_reply
+                else:
+                    is_reply_to_outgoing = False
+            else:
+                # Attached to matched bounced email thread; bounce notifications never count as replies
+                is_reply_to_outgoing = False
+
+            # Determine incoming email status and diagnostic
+            incoming_status = EmailStatus.BOUNCED.value if parsed.is_bounce else EmailStatus.RECEIVED.value
+            incoming_error = None
+            if parsed.is_bounce:
+                parts = []
+                if parsed.bounce_status:
+                    parts.append(f"Status: {parsed.bounce_status}")
+                if parsed.bounce_diagnostic:
+                    parts.append(f"Diagnostic: {parsed.bounce_diagnostic}")
+                elif parsed.bounce_action:
+                    parts.append(f"Action: {parsed.bounce_action}")
+                incoming_error = " | ".join(parts) if parts else "Delivery failed: Bounce notification received"
 
             # 5. Insert New Incoming Email
             email_record = Email(
@@ -144,7 +183,7 @@ class EmailSyncService:
                 in_reply_to=parsed.in_reply_to,
                 references_header=parsed.references_header,
                 direction=EmailDirection.INCOMING.value,
-                status=EmailStatus.RECEIVED.value,
+                status=incoming_status,
                 sender=parsed.sender,
                 recipients=parsed.recipients,
                 cc=parsed.cc,
@@ -157,7 +196,7 @@ class EmailSyncService:
                 is_starred=False,
                 sent_at=parsed.date,
                 received_at=datetime.now(timezone.utc),
-                error_message=None,
+                error_message=incoming_error,
             )
             EmailThreadService.attach_email_to_thread(
                 thread=thread,
