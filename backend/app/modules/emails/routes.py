@@ -1,6 +1,6 @@
 from datetime import datetime
-from typing import List, Optional
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from typing import Any, Dict, List, Optional, Union
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
@@ -31,6 +31,7 @@ from app.modules.emails.schemas import (
     EmailSignatureRead,
     EmailSignatureUpdate,
     EmailStarUpdate,
+    EmailSyncJobResponse,
     EmailSyncRequest,
     EmailSyncResult,
     EmailTemplateActiveToggle,
@@ -43,6 +44,7 @@ from app.modules.emails.schemas import (
     ThreadListResponse,
 )
 from app.modules.emails.service import EmailService
+from app.workers.tasks import sync_email_account_task
 from app.modules.emails.signature_service import SignatureService
 from app.modules.emails.sync_service import EmailSyncService
 from app.modules.emails.template_service import EmailTemplateService
@@ -704,16 +706,18 @@ async def permanent_delete_email(
 
 @router.post(
     "/email-accounts/{account_id}/sync",
-    response_model=EmailSyncResult,
+    response_model=Union[EmailSyncResult, EmailSyncJobResponse],
     status_code=status.HTTP_200_OK,
     summary="Trigger on-demand IMAP synchronization for an authorized email account",
 )
 async def sync_email_account(
     account_id: int,
     sync_req: Optional[EmailSyncRequest] = None,
+    background: bool = Query(default=False, description="Enqueue synchronization in Celery background worker"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> EmailSyncResult:
+    response: Response = None,
+) -> Union[EmailSyncResult, EmailSyncJobResponse]:
     """Synchronize incoming messages from IMAP server into local database."""
     account = await verify_user_can_access_account(
         db=db,
@@ -721,6 +725,24 @@ async def sync_email_account(
         account_id=account_id,
     )
     req = sync_req or EmailSyncRequest()
+    is_background = background or req.background
+
+    if is_background:
+        task = sync_email_account_task.delay(
+            account_id=account.id,
+            folder=req.folder,
+            max_messages=req.max_messages,
+        )
+        if response is not None:
+            response.status_code = status.HTTP_202_ACCEPTED
+        return EmailSyncJobResponse(
+            task_id=task.id,
+            status="QUEUED",
+            email_account_id=account.id,
+            folder=req.folder,
+            message="Email synchronization queued in background.",
+        )
+
     sync_service = EmailSyncService()
     return await sync_service.sync_mailbox(
         db=db,
@@ -732,7 +754,7 @@ async def sync_email_account(
 
 @router.post(
     "/companies/{company_id}/email-accounts/{account_id}/sync",
-    response_model=EmailSyncResult,
+    response_model=Union[EmailSyncResult, EmailSyncJobResponse],
     status_code=status.HTTP_200_OK,
     summary="Trigger on-demand IMAP synchronization scoped to a company",
 )
@@ -740,9 +762,11 @@ async def sync_company_email_account(
     company_id: int,
     account_id: int,
     sync_req: Optional[EmailSyncRequest] = None,
+    background: bool = Query(default=False, description="Enqueue synchronization in Celery background worker"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> EmailSyncResult:
+    response: Response = None,
+) -> Union[EmailSyncResult, EmailSyncJobResponse]:
     """Synchronize incoming messages scoped to a specific company ID."""
     account = await verify_user_can_access_account(
         db=db,
@@ -751,6 +775,24 @@ async def sync_company_email_account(
         company_id=company_id,
     )
     req = sync_req or EmailSyncRequest()
+    is_background = background or req.background
+
+    if is_background:
+        task = sync_email_account_task.delay(
+            account_id=account.id,
+            folder=req.folder,
+            max_messages=req.max_messages,
+        )
+        if response is not None:
+            response.status_code = status.HTTP_202_ACCEPTED
+        return EmailSyncJobResponse(
+            task_id=task.id,
+            status="QUEUED",
+            email_account_id=account.id,
+            folder=req.folder,
+            message="Email synchronization queued in background.",
+        )
+
     sync_service = EmailSyncService()
     return await sync_service.sync_mailbox(
         db=db,
@@ -758,6 +800,32 @@ async def sync_company_email_account(
         folder=req.folder,
         max_messages=req.max_messages,
     )
+
+
+@router.get(
+    "/email-accounts/sync-jobs/{task_id}",
+    summary="Get status of a background synchronization job",
+)
+async def get_sync_job_status(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Retrieve status and result of an asynchronous background sync job."""
+    from celery.result import AsyncResult
+    from app.workers.celery_app import celery_app
+
+    result = AsyncResult(task_id, app=celery_app)
+    response_data: Dict[str, Any] = {
+        "task_id": task_id,
+        "status": result.status,
+    }
+    if result.ready():
+        if result.successful():
+            response_data["result"] = result.result
+        else:
+            response_data["error"] = str(result.result)
+    return response_data
+
 
 
 # -----------------------------------------------------------------------------

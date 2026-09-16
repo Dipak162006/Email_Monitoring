@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
+    CELERY_TASK_ALWAYS_EAGER: bool = False
+    SYNC_INTERVAL_MINUTES: int = 5
+    MAX_SYNC_RETRIES: int = 3
+    SYNC_RETRY_BACKOFF_SECONDS: int = 60
 
     # File Storage
     UPLOAD_DIR: str = "./uploads"

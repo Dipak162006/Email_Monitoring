@@ -118,6 +118,7 @@ class EmailSyncRequest(BaseModel):
 
     folder: str = Field(default="INBOX", max_length=100, description="IMAP mailbox folder to synchronize")
     max_messages: int = Field(default=50, ge=1, le=500, description="Maximum number of recent messages to inspect")
+    background: bool = Field(default=False, description="Whether to execute synchronization asynchronously via Celery")
 
 
 class EmailSyncResult(BaseModel):
@@ -133,6 +134,19 @@ class EmailSyncResult(BaseModel):
     malformed_skipped: int = Field(description="Number of malformed messages safely skipped")
     synced_at: datetime = Field(description="Timestamp when sync was executed")
     error_message: Optional[str] = Field(default=None, description="Safe error details if sync failed or had partial errors")
+    task_id: Optional[str] = Field(default=None, description="Celery task identifier if executed in background")
+
+
+class EmailSyncJobResponse(BaseModel):
+    """Response returned when IMAP synchronization is queued as a background task."""
+    model_config = ConfigDict(from_attributes=True)
+
+    task_id: str = Field(description="Celery task identifier")
+    status: str = Field(default="QUEUED", description="Current status of the background task")
+    email_account_id: int = Field(description="Target email account identifier")
+    folder: str = Field(default="INBOX", description="Target mailbox folder")
+    message: str = Field(default="Email synchronization queued in background.", description="Status summary message")
+
 
 
 class EmailThreadRead(BaseModel):
