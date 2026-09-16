@@ -79,3 +79,28 @@
     font-family: 'JetBrains Mono', monospace;
   }
 }
+
+@layer utilities {
+  /* Hide scrollbar for Chrome, Safari and Opera */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Hide scrollbar for IE, Edge and Firefox */
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Global page-level scrollbar suppression on auth views */
+  html:has(.auth-layout),
+  body:has(.auth-layout) {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  html:has(.auth-layout)::-webkit-scrollbar,
+  body:has(.auth-layout)::-webkit-scrollbar {
+    display: none;
+  }
+}
+
