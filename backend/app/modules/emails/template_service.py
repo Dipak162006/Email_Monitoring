@@ -370,6 +370,7 @@ class EmailTemplateService:
         draft_id: int,
         template_id: int,
         company_id: Optional[int] = None,
+        signature_id: Optional[int] = None,
     ) -> Email:
         """Apply a reusable template to an existing draft email.
         
@@ -456,6 +457,38 @@ class EmailTemplateService:
         draft.subject = template.subject or ""
         draft.body_text = template.body_text
         draft.body_html = template.body_html
+
+        # 8. M11 Signature Integration: Apply selected or default signature
+        from app.modules.emails.signature_service import SignatureService
+        target_sig = None
+        if signature_id is not None:
+            target_sig = await SignatureService.get_signature(
+                db=db,
+                current_user=current_user,
+                signature_id=signature_id,
+                company_id=draft.company_id,
+            )
+            if target_sig.company_id != draft.company_id or target_sig.email_account_id != draft.email_account_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Signature does not belong to this draft's email account.",
+                )
+        else:
+            target_sig = await SignatureService.get_default_signature(
+                db=db,
+                current_user=current_user,
+                account_id=draft.email_account_id,
+                company_id=draft.company_id,
+            )
+
+        if target_sig:
+            updated_text, updated_html = SignatureService.apply_signature_to_content(
+                draft.body_text,
+                draft.body_html,
+                target_sig,
+            )
+            draft.body_text = updated_text
+            draft.body_html = updated_html
 
         # Ensure draft remains DRAFT
         draft.status = EmailStatus.DRAFT.value

@@ -22,6 +22,10 @@ from app.modules.emails.schemas import (
     EmailRead,
     EmailReadUpdate,
     EmailSendRequest,
+    EmailSignatureCreate,
+    EmailSignatureListResponse,
+    EmailSignatureRead,
+    EmailSignatureUpdate,
     EmailStarUpdate,
     EmailSyncRequest,
     EmailSyncResult,
@@ -35,6 +39,7 @@ from app.modules.emails.schemas import (
     ThreadListResponse,
 )
 from app.modules.emails.service import EmailService
+from app.modules.emails.signature_service import SignatureService
 from app.modules.emails.sync_service import EmailSyncService
 from app.modules.emails.template_service import EmailTemplateService
 from app.modules.emails.thread_service import EmailThreadService
@@ -1325,18 +1330,21 @@ async def toggle_company_template_active(
 async def apply_template_to_draft(
     draft_id: int,
     template_id: int,
+    signature_id: Optional[int] = Query(default=None, description="Optional signature ID to apply after template"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> EmailRead:
     """Apply an active email template to an existing draft email.
     
     Populates subject, body_text, and body_html while preserving recipients and thread references.
+    Optionally applies selected or default signature.
     """
     draft = await EmailTemplateService.apply_template_to_draft(
         db=db,
         current_user=current_user,
         draft_id=draft_id,
         template_id=template_id,
+        signature_id=signature_id,
     )
     return EmailRead.model_validate(draft)
 
@@ -1357,6 +1365,7 @@ async def apply_company_template_to_draft(
     company_id: int,
     draft_id: int,
     template_id: int,
+    signature_id: Optional[int] = Query(default=None, description="Optional signature ID to apply after template"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> EmailRead:
@@ -1366,6 +1375,608 @@ async def apply_company_template_to_draft(
         current_user=current_user,
         draft_id=draft_id,
         template_id=template_id,
+        company_id=company_id,
+        signature_id=signature_id,
+    )
+    return EmailRead.model_validate(draft)
+
+
+# -----------------------------------------------------------------------------
+# M11 Email Signatures API
+# -----------------------------------------------------------------------------
+
+@router.post(
+    "/signatures",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new email signature",
+)
+@router.post(
+    "/emails/signatures",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+async def create_signature(
+    signature_in: EmailSignatureCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureRead:
+    """Create a new email signature for an authorized EmailAccount."""
+    signature = await SignatureService.create_signature(
+        db=db,
+        current_user=current_user,
+        signature_in=signature_in,
+    )
+    return EmailSignatureRead.model_validate(signature)
+
+
+@router.post(
+    "/email-accounts/{account_id}/signatures",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a signature scoped to an email account",
+)
+async def create_account_signature(
+    account_id: int,
+    signature_in: EmailSignatureCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureRead:
+    """Create a signature directly scoped to an email account ID."""
+    signature = await SignatureService.create_signature(
+        db=db,
+        current_user=current_user,
+        signature_in=signature_in,
+        account_id=account_id,
+    )
+    return EmailSignatureRead.model_validate(signature)
+
+
+@router.post(
+    "/companies/{company_id}/signatures",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a signature scoped to a company",
+)
+@router.post(
+    "/companies/{company_id}/emails/signatures",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+async def create_company_signature(
+    company_id: int,
+    signature_in: EmailSignatureCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureRead:
+    """Create a new email signature scoped to a specific company."""
+    signature = await SignatureService.create_signature(
+        db=db,
+        current_user=current_user,
+        signature_in=signature_in,
+        company_id=company_id,
+    )
+    return EmailSignatureRead.model_validate(signature)
+
+
+@router.post(
+    "/companies/{company_id}/email-accounts/{account_id}/signatures",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a signature scoped to a company and email account",
+)
+async def create_company_account_signature(
+    company_id: int,
+    account_id: int,
+    signature_in: EmailSignatureCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureRead:
+    """Create a signature scoped to both company ID and account ID."""
+    signature = await SignatureService.create_signature(
+        db=db,
+        current_user=current_user,
+        signature_in=signature_in,
+        company_id=company_id,
+        account_id=account_id,
+    )
+    return EmailSignatureRead.model_validate(signature)
+
+
+@router.get(
+    "/signatures",
+    response_model=EmailSignatureListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List email signatures accessible to current user",
+)
+@router.get(
+    "/emails/signatures",
+    response_model=EmailSignatureListResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def list_signatures(
+    email_account_id: Optional[int] = Query(None, description="Filter signatures by EmailAccount ID"),
+    company_id: Optional[int] = Query(None, description="Filter signatures by Company ID"),
+    limit: int = Query(50, ge=1, le=100, description="Max signatures to return"),
+    offset: int = Query(0, ge=0, description="Number of signatures to skip"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureListResponse:
+    """List email signatures for authorized accounts/companies."""
+    signatures, total = await SignatureService.list_signatures(
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+        account_id=email_account_id,
+        limit=limit,
+        offset=offset,
+    )
+    return EmailSignatureListResponse(
+        signatures=[EmailSignatureRead.model_validate(s) for s in signatures],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/email-accounts/{account_id}/signatures",
+    response_model=EmailSignatureListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List signatures for a specific email account",
+)
+async def list_account_signatures(
+    account_id: int,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureListResponse:
+    """List signatures scoped to an email account."""
+    signatures, total = await SignatureService.list_signatures(
+        db=db,
+        current_user=current_user,
+        account_id=account_id,
+        limit=limit,
+        offset=offset,
+    )
+    return EmailSignatureListResponse(
+        signatures=[EmailSignatureRead.model_validate(s) for s in signatures],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/companies/{company_id}/signatures",
+    response_model=EmailSignatureListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List signatures scoped to a company",
+)
+@router.get(
+    "/companies/{company_id}/emails/signatures",
+    response_model=EmailSignatureListResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def list_company_signatures(
+    company_id: int,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureListResponse:
+    """List signatures scoped to a company."""
+    signatures, total = await SignatureService.list_signatures(
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+        limit=limit,
+        offset=offset,
+    )
+    return EmailSignatureListResponse(
+        signatures=[EmailSignatureRead.model_validate(s) for s in signatures],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/signatures/default",
+    response_model=Optional[EmailSignatureRead],
+    status_code=status.HTTP_200_OK,
+    summary="Get default signature for an email account",
+)
+async def get_default_signature(
+    email_account_id: int = Query(..., description="EmailAccount ID to query default signature for"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Optional[EmailSignatureRead]:
+    """Retrieve the effective default signature for an authorized EmailAccount."""
+    sig = await SignatureService.get_default_signature(
+        db=db,
+        current_user=current_user,
+        account_id=email_account_id,
+    )
+    return EmailSignatureRead.model_validate(sig) if sig else None
+
+
+@router.get(
+    "/email-accounts/{account_id}/signatures/default",
+    response_model=Optional[EmailSignatureRead],
+    status_code=status.HTTP_200_OK,
+    summary="Get default signature for an email account path",
+)
+async def get_account_default_signature(
+    account_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Optional[EmailSignatureRead]:
+    """Retrieve the default signature for an email account specified by path."""
+    sig = await SignatureService.get_default_signature(
+        db=db,
+        current_user=current_user,
+        account_id=account_id,
+    )
+    return EmailSignatureRead.model_validate(sig) if sig else None
+
+
+@router.get(
+    "/signatures/{signature_id}",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve an email signature by ID",
+)
+@router.get(
+    "/emails/signatures/{signature_id}",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def get_signature_by_id(
+    signature_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureRead:
+    """Retrieve a single signature ensuring user authorization."""
+    sig = await SignatureService.get_signature(
+        db=db,
+        current_user=current_user,
+        signature_id=signature_id,
+    )
+    return EmailSignatureRead.model_validate(sig)
+
+
+@router.get(
+    "/companies/{company_id}/signatures/{signature_id}",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve an email signature scoped to a company",
+)
+@router.get(
+    "/companies/{company_id}/emails/signatures/{signature_id}",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def get_company_signature_by_id(
+    company_id: int,
+    signature_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureRead:
+    """Retrieve a single signature scoped to a company."""
+    sig = await SignatureService.get_signature(
+        db=db,
+        current_user=current_user,
+        signature_id=signature_id,
+        company_id=company_id,
+    )
+    return EmailSignatureRead.model_validate(sig)
+
+
+@router.put(
+    "/signatures/{signature_id}",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    summary="Update an email signature",
+)
+@router.patch(
+    "/signatures/{signature_id}",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+@router.put(
+    "/emails/signatures/{signature_id}",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def update_signature(
+    signature_id: int,
+    signature_in: EmailSignatureUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureRead:
+    """Update fields of an active email signature."""
+    sig = await SignatureService.update_signature(
+        db=db,
+        current_user=current_user,
+        signature_id=signature_id,
+        signature_in=signature_in,
+    )
+    return EmailSignatureRead.model_validate(sig)
+
+
+@router.put(
+    "/companies/{company_id}/signatures/{signature_id}",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    summary="Update a signature scoped to a company",
+)
+@router.patch(
+    "/companies/{company_id}/signatures/{signature_id}",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def update_company_signature(
+    company_id: int,
+    signature_id: int,
+    signature_in: EmailSignatureUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureRead:
+    """Update a signature scoped to a company."""
+    sig = await SignatureService.update_signature(
+        db=db,
+        current_user=current_user,
+        signature_id=signature_id,
+        signature_in=signature_in,
+        company_id=company_id,
+    )
+    return EmailSignatureRead.model_validate(sig)
+
+
+@router.delete(
+    "/signatures/{signature_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an email signature",
+)
+@router.delete(
+    "/emails/signatures/{signature_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    include_in_schema=False,
+)
+async def delete_signature(
+    signature_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Delete an email signature."""
+    await SignatureService.delete_signature(
+        db=db,
+        current_user=current_user,
+        signature_id=signature_id,
+    )
+
+
+@router.delete(
+    "/companies/{company_id}/signatures/{signature_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an email signature scoped to a company",
+)
+@router.delete(
+    "/companies/{company_id}/emails/signatures/{signature_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    include_in_schema=False,
+)
+async def delete_company_signature(
+    company_id: int,
+    signature_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Delete a signature scoped to a company."""
+    await SignatureService.delete_signature(
+        db=db,
+        current_user=current_user,
+        signature_id=signature_id,
+        company_id=company_id,
+    )
+
+
+@router.post(
+    "/signatures/{signature_id}/set-default",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    summary="Set signature as default for its email account",
+)
+@router.put(
+    "/signatures/{signature_id}/set-default",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+@router.patch(
+    "/signatures/{signature_id}/set-default",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+@router.patch(
+    "/signatures/{signature_id}/default",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def set_default_signature(
+    signature_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureRead:
+    """Set the specified signature as the default for its associated account."""
+    sig = await SignatureService.set_default_signature(
+        db=db,
+        current_user=current_user,
+        signature_id=signature_id,
+    )
+    return EmailSignatureRead.model_validate(sig)
+
+
+@router.post(
+    "/companies/{company_id}/signatures/{signature_id}/set-default",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    summary="Set signature as default scoped to a company",
+)
+@router.put(
+    "/companies/{company_id}/signatures/{signature_id}/set-default",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+@router.patch(
+    "/companies/{company_id}/signatures/{signature_id}/set-default",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def set_company_default_signature(
+    company_id: int,
+    signature_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureRead:
+    """Set signature as default scoped to a company."""
+    sig = await SignatureService.set_default_signature(
+        db=db,
+        current_user=current_user,
+        signature_id=signature_id,
+        company_id=company_id,
+    )
+    return EmailSignatureRead.model_validate(sig)
+
+
+# -----------------------------------------------------------------------------
+# M11 Draft Signature Application Endpoints
+# -----------------------------------------------------------------------------
+
+@router.post(
+    "/emails/drafts/{draft_id}/apply-signature/{signature_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Apply an authorized signature to an existing draft",
+)
+@router.post(
+    "/drafts/{draft_id}/apply-signature/{signature_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def apply_signature_to_draft(
+    draft_id: int,
+    signature_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Apply an authorized signature to an existing draft email."""
+    draft = await SignatureService.apply_signature_to_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        signature_id=signature_id,
+    )
+    return EmailRead.model_validate(draft)
+
+
+@router.post(
+    "/emails/drafts/{draft_id}/apply-signature",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Apply the default signature for the draft's account",
+)
+@router.post(
+    "/drafts/{draft_id}/apply-signature",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def apply_default_signature_to_draft(
+    draft_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Apply the default signature of the draft's email account to the draft."""
+    draft = await SignatureService.apply_signature_to_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        signature_id=None,
+    )
+    return EmailRead.model_validate(draft)
+
+
+@router.post(
+    "/companies/{company_id}/emails/drafts/{draft_id}/apply-signature/{signature_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Apply a signature to a draft scoped to a company",
+)
+@router.post(
+    "/companies/{company_id}/drafts/{draft_id}/apply-signature/{signature_id}",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def apply_company_signature_to_draft(
+    company_id: int,
+    draft_id: int,
+    signature_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Apply a signature to a draft scoped to a company."""
+    draft = await SignatureService.apply_signature_to_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        signature_id=signature_id,
+        company_id=company_id,
+    )
+    return EmailRead.model_validate(draft)
+
+
+@router.post(
+    "/companies/{company_id}/emails/drafts/{draft_id}/apply-signature",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    summary="Apply default signature to a draft scoped to a company",
+)
+@router.post(
+    "/companies/{company_id}/drafts/{draft_id}/apply-signature",
+    response_model=EmailRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def apply_company_default_signature_to_draft(
+    company_id: int,
+    draft_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailRead:
+    """Apply default signature to a draft scoped to a company."""
+    draft = await SignatureService.apply_signature_to_draft(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        signature_id=None,
         company_id=company_id,
     )
     return EmailRead.model_validate(draft)

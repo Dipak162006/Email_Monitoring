@@ -138,7 +138,37 @@ class EmailDraftService:
         # 3. Derive Authoritative From Address
         sender_display = formataddr((account.name, account.email_address)) if account.name else account.email_address
 
-        # 4. Construct Email in DRAFT status
+        # 4. Resolve Signature (explicit or default for account)
+        from app.modules.emails.signature_service import SignatureService
+        target_sig = None
+        if draft_in.signature_id is not None:
+            target_sig = await SignatureService.get_signature(
+                db=db,
+                current_user=current_user,
+                signature_id=draft_in.signature_id,
+                company_id=account.company_id,
+            )
+            if target_sig.company_id != account.company_id or target_sig.email_account_id != account.id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Signature does not belong to the selected email account.",
+                )
+        else:
+            target_sig = await SignatureService.get_default_signature(
+                db=db,
+                current_user=current_user,
+                account_id=account.id,
+                company_id=account.company_id,
+            )
+
+        body_text_val = draft_in.body_text
+        body_html_val = draft_in.body_html
+        if target_sig:
+            body_text_val, body_html_val = SignatureService.apply_signature_to_content(
+                body_text_val, body_html_val, target_sig
+            )
+
+        # 5. Construct Email in DRAFT status
         to_recipients = [str(addr) for addr in draft_in.to] if draft_in.to else []
         cc_recipients = [str(addr) for addr in draft_in.cc] if draft_in.cc else None
         bcc_recipients = [str(addr) for addr in draft_in.bcc] if draft_in.bcc else None
@@ -157,8 +187,8 @@ class EmailDraftService:
             bcc=bcc_recipients,
             reply_to=str(draft_in.reply_to) if draft_in.reply_to else None,
             subject=draft_in.subject or "",
-            body_text=draft_in.body_text,
-            body_html=draft_in.body_html,
+            body_text=body_text_val,
+            body_html=body_html_val,
             is_read=True,
             is_starred=False,
             is_deleted=False,
@@ -380,6 +410,23 @@ class EmailDraftService:
             draft.body_html = draft_update.body_html
         if draft_update.reply_to is not None:
             draft.reply_to = str(draft_update.reply_to) if draft_update.reply_to else None
+
+        if draft_update.signature_id is not None:
+            from app.modules.emails.signature_service import SignatureService
+            target_sig = await SignatureService.get_signature(
+                db=db,
+                current_user=current_user,
+                signature_id=draft_update.signature_id,
+                company_id=draft.company_id,
+            )
+            if target_sig.company_id != draft.company_id or target_sig.email_account_id != draft.email_account_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Signature does not belong to this draft's email account.",
+                )
+            draft.body_text, draft.body_html = SignatureService.apply_signature_to_content(
+                draft.body_text, draft.body_html, target_sig
+            )
 
         await db.commit()
         await db.refresh(draft)

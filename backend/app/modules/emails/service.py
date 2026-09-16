@@ -133,6 +133,46 @@ class EmailService:
                 detail="Email account does not have an SMTP host configured.",
             )
 
+        # 1b. Resolve Signature (explicit or default for account)
+        from app.modules.emails.models import EmailSignature
+        from app.modules.emails.signature_service import SignatureService
+        target_sig = None
+        if send_req.signature_id is not None:
+            if current_user is not None:
+                target_sig = await SignatureService.get_signature(
+                    db=db,
+                    current_user=current_user,
+                    signature_id=send_req.signature_id,
+                    company_id=account.company_id,
+                )
+            else:
+                target_sig = await db.get(EmailSignature, send_req.signature_id)
+            if not target_sig or target_sig.company_id != account.company_id or target_sig.email_account_id != account.id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Signature does not belong to the selected email account.",
+                )
+        else:
+            if current_user is not None:
+                target_sig = await SignatureService.get_default_signature(
+                    db=db,
+                    current_user=current_user,
+                    account_id=account.id,
+                    company_id=account.company_id,
+                )
+            else:
+                stmt = select(EmailSignature).where(
+                    EmailSignature.email_account_id == account.id,
+                    EmailSignature.is_default == True,
+                )
+                res = await db.execute(stmt)
+                target_sig = res.scalars().first()
+
+        if target_sig:
+            send_req.body_text, send_req.body_html = SignatureService.apply_signature_to_content(
+                send_req.body_text, send_req.body_html, target_sig
+            )
+
         # 2. Resolve or Create Conversation Thread
         thread, parent_email = await EmailThreadService.resolve_or_create_outgoing_thread(
             db=db,

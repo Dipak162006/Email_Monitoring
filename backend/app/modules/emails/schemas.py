@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Any, List, Optional, Union
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from app.core.sanitizer import sanitize_html
 from app.modules.emails.models import EmailDirection, EmailStatus
 
 
@@ -49,6 +50,10 @@ class EmailSendRequest(BaseModel):
     thread_id: Optional[int] = Field(
         default=None,
         description="Optional conversation thread ID when replying",
+    )
+    signature_id: Optional[int] = Field(
+        default=None,
+        description="Optional EmailSignature ID to append to the message",
     )
 
     @field_validator("to", "cc", "bcc", mode="before")
@@ -234,6 +239,10 @@ class EmailDraftCreate(BaseModel):
         default=None,
         description="Optional conversation thread ID when drafting a reply",
     )
+    signature_id: Optional[int] = Field(
+        default=None,
+        description="Optional EmailSignature ID to append to the draft",
+    )
 
     @field_validator("to", "cc", "bcc", mode="before")
     @classmethod
@@ -290,6 +299,10 @@ class EmailDraftUpdate(BaseModel):
     thread_id: Optional[int] = Field(
         default=None,
         description="Optional updated conversation thread ID",
+    )
+    signature_id: Optional[int] = Field(
+        default=None,
+        description="Optional EmailSignature ID to apply to the draft",
     )
 
     @field_validator("to", "cc", "bcc", mode="before")
@@ -424,6 +437,129 @@ class EmailTemplateListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# -----------------------------------------------------------------------------
+# M11 Email Signatures Schemas
+# -----------------------------------------------------------------------------
+
+class EmailSignatureCreate(BaseModel):
+    """Schema for creating a new email signature."""
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="Friendly name for the signature",
+    )
+    email_account_id: Optional[int] = Field(
+        default=None,
+        description="Associated EmailAccount ID (required if not provided in URL path)",
+    )
+    body_text: Optional[str] = Field(
+        default=None,
+        description="Plain-text representation of the email signature",
+    )
+    body_html: Optional[str] = Field(
+        default=None,
+        description="Rich HTML representation of the email signature",
+    )
+    is_default: bool = Field(
+        default=False,
+        description="Whether this signature is the default for the associated account",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Signature name cannot be empty or whitespace.")
+        return stripped
+
+    @field_validator("body_html")
+    @classmethod
+    def validate_body_html(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            return sanitize_html(v)
+        return v
+
+
+class EmailSignatureUpdate(BaseModel):
+    """Schema for updating an existing email signature."""
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description="Updated friendly name for the signature",
+    )
+    email_account_id: Optional[int] = Field(
+        default=None,
+        description="Optionally reassign to another EmailAccount in the same company",
+    )
+    body_text: Optional[str] = Field(
+        default=None,
+        description="Updated plain-text representation of the signature",
+    )
+    body_html: Optional[str] = Field(
+        default=None,
+        description="Updated rich HTML representation of the signature",
+    )
+    is_default: Optional[bool] = Field(
+        default=None,
+        description="Set or unset default signature status for the associated account",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            stripped = v.strip()
+            if not stripped:
+                raise ValueError("Signature name cannot be empty or whitespace.")
+            return stripped
+        return v
+
+    @field_validator("body_html")
+    @classmethod
+    def validate_body_html(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            return sanitize_html(v)
+        return v
+
+
+class EmailSignatureRead(BaseModel):
+    """Safe schema for reading persisted email signatures."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    company_id: int
+    email_account_id: int
+    user_id: Optional[int] = None
+    name: str
+    body_text: Optional[str] = None
+    body_html: Optional[str] = None
+    is_default: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class EmailSignatureListResponse(BaseModel):
+    """Paginated list response of email signatures."""
+    signatures: List[EmailSignatureRead]
+    total: int
+    limit: int
+    offset: int
+
+
+# Schema Aliases
+SignatureCreate = EmailSignatureCreate
+SignatureUpdate = EmailSignatureUpdate
+SignatureRead = EmailSignatureRead
+SignatureListResponse = EmailSignatureListResponse
 
 
 

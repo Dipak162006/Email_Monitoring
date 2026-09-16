@@ -11,6 +11,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
@@ -248,4 +249,67 @@ class EmailTemplate(Base):
 
     def __repr__(self) -> str:
         return f"<EmailTemplate id={self.id} name='{self.name}' company_id={self.company_id} active={self.is_active}>"
+
+
+class EmailSignature(Base):
+    """Database representation of an email signature.
+    
+    A signature belongs to a Company and is associated with an EmailAccount.
+    It represents formatted text/HTML closing content appended to composed
+    or drafted outgoing emails.
+    """
+    __tablename__ = "email_signatures"
+    __table_args__ = (
+        Index(
+            "uq_email_signatures_account_default",
+            "email_account_id",
+            unique=True,
+            postgresql_where=text("is_default = true"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    company_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("companies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    email_account_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("email_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    body_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    body_html: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    company: Mapped["Company"] = relationship("Company")
+    email_account: Mapped["EmailAccount"] = relationship("EmailAccount")
+    user: Mapped[Optional["User"]] = relationship("User")
+
+    def __repr__(self) -> str:
+        return f"<EmailSignature id={self.id} name='{self.name}' account_id={self.email_account_id} default={self.is_default}>"
 
