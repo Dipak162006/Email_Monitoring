@@ -55,6 +55,10 @@ class EmailSendRequest(BaseModel):
         default=None,
         description="Optional EmailSignature ID to append to the message",
     )
+    attachment_ids: Optional[List[int]] = Field(
+        default=None,
+        description="Optional list of pre-uploaded EmailAttachment IDs to attach to the message",
+    )
 
     @field_validator("to", "cc", "bcc", mode="before")
     @classmethod
@@ -560,6 +564,36 @@ SignatureCreate = EmailSignatureCreate
 SignatureUpdate = EmailSignatureUpdate
 SignatureRead = EmailSignatureRead
 SignatureListResponse = EmailSignatureListResponse
+
+
+# -----------------------------------------------------------------------------
+# M12 Email Attachments Schemas
+# -----------------------------------------------------------------------------
+
+class EmailAttachmentRead(BaseModel):
+    """Safe schema for reading email attachment metadata."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    company_id: int
+    email_account_id: int
+    email_id: int
+    file_name: str
+    content_type: str
+    file_size: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class EmailAttachmentListResponse(BaseModel):
+    """List response of email attachments."""
+    attachments: List[EmailAttachmentRead]
+    total: int
+
+
+# Schema Aliases
+AttachmentRead = EmailAttachmentRead
+AttachmentListResponse = EmailAttachmentListResponse
 
 
 

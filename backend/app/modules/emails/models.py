@@ -137,6 +137,7 @@ class Email(Base):
     email_account: Mapped["EmailAccount"] = relationship("EmailAccount", back_populates="emails")
     user: Mapped[Optional["User"]] = relationship("User", back_populates="sent_emails")
     thread: Mapped[Optional["EmailThread"]] = relationship("EmailThread", back_populates="emails")
+    attachments: Mapped[List["EmailAttachment"]] = relationship("EmailAttachment", back_populates="email", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Email id={self.id} subject='{self.subject[:30]}' status={self.status} direction={self.direction}>"
@@ -312,4 +313,59 @@ class EmailSignature(Base):
 
     def __repr__(self) -> str:
         return f"<EmailSignature id={self.id} name='{self.name}' account_id={self.email_account_id} default={self.is_default}>"
+
+
+class EmailAttachment(Base):
+    """Database representation of an email attachment.
+    
+    Belongs to an Email (draft or sent message), an EmailAccount, and a Company.
+    Stores metadata including original filename, MIME type, file size,
+    and the secure relative storage path on disk.
+    """
+    __tablename__ = "email_attachments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    company_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("companies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    email_account_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("email_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    email_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("emails.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_path: Mapped[str] = mapped_column(String(500), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    company: Mapped["Company"] = relationship("Company")
+    email_account: Mapped["EmailAccount"] = relationship("EmailAccount")
+    email: Mapped["Email"] = relationship("Email", back_populates="attachments")
+
+    def __repr__(self) -> str:
+        return f"<EmailAttachment id={self.id} file_name='{self.file_name}' size={self.file_size} email_id={self.email_id}>"
 

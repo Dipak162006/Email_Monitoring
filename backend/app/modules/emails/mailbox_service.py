@@ -264,6 +264,10 @@ class EmailMailboxService:
                 detail="Email is not in trash. Only emails in trash can be permanently deleted.",
             )
 
+        email_id = email.id
+        from app.modules.emails.attachment_service import AttachmentService
+        await AttachmentService.cleanup_attachments_for_email(db, email_id)
+
         thread_id = email.thread_id
         await db.delete(email)
         await db.flush()

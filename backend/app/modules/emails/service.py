@@ -173,6 +173,18 @@ class EmailService:
                 send_req.body_text, send_req.body_html, target_sig
             )
 
+        # 1c. Resolve and Validate Attachments for Direct Send
+        from app.modules.emails.attachment_service import AttachmentService
+        validated_attachments = []
+        if send_req.attachment_ids:
+            validated_attachments = await AttachmentService.validate_and_load_attachments_for_send(
+                db=db,
+                attachment_ids=send_req.attachment_ids,
+                company_id=account.company_id,
+                account_id=account.id,
+                current_user=current_user,
+            )
+
         # 2. Resolve or Create Conversation Thread
         thread, parent_email = await EmailThreadService.resolve_or_create_outgoing_thread(
             db=db,
@@ -190,6 +202,11 @@ class EmailService:
             send_req=send_req,
             parent_email=parent_email,
         )
+
+        # 3b. Attach files if present
+        if validated_attachments:
+            await AttachmentService.attach_to_mime_message(mime_msg, validated_attachments)
+
         to_list = [str(r) for r in send_req.to]
         cc_list = [str(r) for r in send_req.cc] if send_req.cc else None
         bcc_list = [str(r) for r in send_req.bcc] if send_req.bcc else None
@@ -228,6 +245,12 @@ class EmailService:
             )
             EmailThreadService.attach_email_to_thread(thread, email_record)
             db.add(email_record)
+            await db.flush()
+
+            # Associate validated attachments with the resulting sent Email
+            for att in validated_attachments:
+                att.email_id = email_record.id
+
             await db.commit()
             await db.refresh(email_record)
             logger.info("Successfully sent and logged email id=%d (Message-ID: %s, Thread-ID: %d)", email_record.id, message_id, thread.id)
@@ -263,6 +286,12 @@ class EmailService:
             )
             EmailThreadService.attach_email_to_thread(thread, failed_email_record)
             db.add(failed_email_record)
+            await db.flush()
+
+            # Associate validated attachments with the failed audit Email
+            for att in validated_attachments:
+                att.email_id = failed_email_record.id
+
             await db.commit()
             await db.refresh(failed_email_record)
 

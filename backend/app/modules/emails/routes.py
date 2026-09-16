@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.modules.auth.dependencies import get_current_user
@@ -8,6 +9,7 @@ from app.modules.auth.models import User
 from app.modules.companies.models import CompanyRole
 from app.modules.companies.service import CompanyService
 from app.modules.email_accounts.service import EmailAccountService
+from app.modules.emails.attachment_service import AttachmentService
 from app.modules.emails.dependencies import (
     verify_user_can_access_account,
     verify_user_can_access_email,
@@ -16,6 +18,8 @@ from app.modules.emails.dependencies import (
 from app.modules.emails.draft_service import EmailDraftService
 from app.modules.emails.mailbox_service import EmailMailboxService
 from app.modules.emails.schemas import (
+    EmailAttachmentListResponse,
+    EmailAttachmentRead,
     EmailDraftCreate,
     EmailDraftUpdate,
     EmailListResponse,
@@ -1980,5 +1984,230 @@ async def apply_company_default_signature_to_draft(
         company_id=company_id,
     )
     return EmailRead.model_validate(draft)
+
+
+# -----------------------------------------------------------------------------
+# M12 Email Attachments Endpoints
+# -----------------------------------------------------------------------------
+
+@router.post(
+    "/emails/drafts/{draft_id}/attachments",
+    response_model=EmailAttachmentRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload an attachment to a draft email",
+)
+@router.post(
+    "/drafts/{draft_id}/attachments",
+    response_model=EmailAttachmentRead,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+@router.post(
+    "/companies/{company_id}/emails/drafts/{draft_id}/attachments",
+    response_model=EmailAttachmentRead,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+@router.post(
+    "/companies/{company_id}/drafts/{draft_id}/attachments",
+    response_model=EmailAttachmentRead,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+async def upload_draft_attachment(
+    draft_id: int,
+    file: UploadFile = File(...),
+    company_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailAttachmentRead:
+    """Upload a file attachment and associate it with an existing draft."""
+    attachment = await AttachmentService.upload_draft_attachment(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        upload_file=file,
+        company_id=company_id,
+    )
+    return EmailAttachmentRead.model_validate(attachment)
+
+
+@router.get(
+    "/emails/drafts/{draft_id}/attachments",
+    response_model=EmailAttachmentListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List all attachments associated with a draft email",
+)
+@router.get(
+    "/drafts/{draft_id}/attachments",
+    response_model=EmailAttachmentListResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+@router.get(
+    "/companies/{company_id}/emails/drafts/{draft_id}/attachments",
+    response_model=EmailAttachmentListResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+@router.get(
+    "/companies/{company_id}/drafts/{draft_id}/attachments",
+    response_model=EmailAttachmentListResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def list_draft_attachments(
+    draft_id: int,
+    company_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailAttachmentListResponse:
+    """List all attachments associated with an editable draft."""
+    items, total = await AttachmentService.list_draft_attachments(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        company_id=company_id,
+    )
+    return EmailAttachmentListResponse(
+        attachments=[EmailAttachmentRead.model_validate(i) for i in items],
+        total=total,
+    )
+
+
+@router.delete(
+    "/emails/drafts/{draft_id}/attachments/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an attachment from a draft email",
+)
+@router.delete(
+    "/drafts/{draft_id}/attachments/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    include_in_schema=False,
+)
+@router.delete(
+    "/companies/{company_id}/emails/drafts/{draft_id}/attachments/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    include_in_schema=False,
+)
+@router.delete(
+    "/companies/{company_id}/drafts/{draft_id}/attachments/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    include_in_schema=False,
+)
+async def delete_draft_attachment(
+    draft_id: int,
+    attachment_id: int,
+    company_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Remove an attachment from an editable draft and delete its file from storage."""
+    await AttachmentService.delete_draft_attachment(
+        db=db,
+        current_user=current_user,
+        draft_id=draft_id,
+        attachment_id=attachment_id,
+        company_id=company_id,
+    )
+
+
+@router.get(
+    "/emails/{email_id}/attachments",
+    response_model=EmailAttachmentListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List all attachments associated with an email",
+)
+@router.get(
+    "/companies/{company_id}/emails/{email_id}/attachments",
+    response_model=EmailAttachmentListResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def list_email_attachments(
+    email_id: int,
+    company_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailAttachmentListResponse:
+    """List all attachments associated with any authorized email message."""
+    items, total = await AttachmentService.list_email_attachments(
+        db=db,
+        current_user=current_user,
+        email_id=email_id,
+        company_id=company_id,
+    )
+    return EmailAttachmentListResponse(
+        attachments=[EmailAttachmentRead.model_validate(i) for i in items],
+        total=total,
+    )
+
+
+@router.get(
+    "/emails/{email_id}/attachments/{attachment_id}",
+    response_model=EmailAttachmentRead,
+    status_code=status.HTTP_200_OK,
+    summary="Get attachment metadata",
+)
+@router.get(
+    "/companies/{company_id}/emails/{email_id}/attachments/{attachment_id}",
+    response_model=EmailAttachmentRead,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def get_attachment_metadata(
+    email_id: int,
+    attachment_id: int,
+    company_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailAttachmentRead:
+    """Retrieve metadata of a specific attachment."""
+    att = await AttachmentService.get_attachment(
+        db=db,
+        current_user=current_user,
+        attachment_id=attachment_id,
+        email_id=email_id,
+        company_id=company_id,
+    )
+    return EmailAttachmentRead.model_validate(att)
+
+
+@router.get(
+    "/emails/{email_id}/attachments/{attachment_id}/download",
+    status_code=status.HTTP_200_OK,
+    summary="Download an attachment file",
+)
+@router.get(
+    "/companies/{company_id}/emails/{email_id}/attachments/{attachment_id}/download",
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+@router.get(
+    "/attachments/{attachment_id}/download",
+    status_code=status.HTTP_200_OK,
+    summary="Download an attachment file by attachment ID",
+)
+async def download_attachment_file(
+    attachment_id: int,
+    email_id: Optional[int] = None,
+    company_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> FileResponse:
+    """Download the binary content of an authorized attachment."""
+    file_path, filename, content_type = await AttachmentService.get_attachment_for_download(
+        db=db,
+        current_user=current_user,
+        attachment_id=attachment_id,
+        email_id=email_id,
+        company_id=company_id,
+    )
+    return FileResponse(
+        path=file_path,
+        filename=filename,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 

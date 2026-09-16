@@ -703,6 +703,17 @@ class EmailDraftService:
         else:
             mime_msg.set_content(draft.body_text or "")
 
+        # 4b. Load and attach files if present
+        from app.modules.emails.attachment_service import AttachmentService
+        from app.modules.emails.models import EmailAttachment
+
+        att_stmt = select(EmailAttachment).where(EmailAttachment.email_id == draft_id).order_by(EmailAttachment.created_at.asc())
+        att_res = await db.execute(att_stmt)
+        draft_attachments = att_res.scalars().all()
+
+        if draft_attachments:
+            await AttachmentService.attach_to_mime_message(mime_msg, draft_attachments)
+
         all_recipients: List[str] = []
         for r in to_addrs + (cc_addrs or []) + (bcc_addrs or []):
             if r not in all_recipients:

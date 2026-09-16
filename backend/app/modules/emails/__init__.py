@@ -1,5 +1,7 @@
+from app.modules.emails.attachment_service import AttachmentService
 from app.modules.emails.models import (
     Email,
+    EmailAttachment,
     EmailDirection,
     EmailSignature,
     EmailStatus,
@@ -8,6 +10,10 @@ from app.modules.emails.models import (
 )
 from app.modules.emails.routes import router
 from app.modules.emails.schemas import (
+    AttachmentListResponse,
+    AttachmentRead,
+    EmailAttachmentListResponse,
+    EmailAttachmentRead,
     EmailRead,
     EmailSendRequest,
     EmailSignatureCreate,
@@ -36,11 +42,16 @@ from app.modules.emails.thread_service import EmailThreadService
 
 __all__ = [
     "Email",
+    "EmailAttachment",
     "EmailDirection",
     "EmailSignature",
     "EmailStatus",
     "EmailTemplate",
     "EmailThread",
+    "EmailAttachmentRead",
+    "EmailAttachmentListResponse",
+    "AttachmentRead",
+    "AttachmentListResponse",
     "EmailRead",
     "EmailSendRequest",
     "EmailSignatureCreate",
@@ -62,6 +73,7 @@ __all__ = [
     "ThreadListResponse",
     "EmailService",
     "SignatureService",
+    "AttachmentService",
     "EmailSyncService",
     "EmailTemplateService",
     "EmailThreadService",
