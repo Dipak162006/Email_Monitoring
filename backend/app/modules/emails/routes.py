@@ -15,9 +15,13 @@ from app.modules.emails.dependencies import (
     verify_user_can_access_email,
     verify_user_can_send_from_account,
 )
+from app.modules.emails.dashboard_service import DashboardService
 from app.modules.emails.draft_service import EmailDraftService
 from app.modules.emails.mailbox_service import EmailMailboxService
 from app.modules.emails.schemas import (
+    AccountHealthResponse,
+    DashboardActivityResponse,
+    DashboardStatsResponse,
     EmailAttachmentListResponse,
     EmailAttachmentRead,
     EmailDraftCreate,
@@ -2279,3 +2283,143 @@ async def download_attachment_file(
     )
 
 
+# -----------------------------------------------------------------------------
+# Dashboard Analytics Endpoints
+# -----------------------------------------------------------------------------
+
+@router.get(
+    "/emails/dashboard/stats",
+    response_model=DashboardStatsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve primary dashboard statistics and comparison rates",
+)
+async def get_dashboard_stats(
+    company_id: Optional[int] = Query(None, description="Optional company ID scope"),
+    email_account_id: Optional[int] = Query(None, description="Optional email account ID scope"),
+    date_from: Optional[datetime] = Query(None, description="Start date filter"),
+    date_to: Optional[datetime] = Query(None, description="End date filter"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DashboardStatsResponse:
+    """Retrieve operational email metrics (sent, bounced, responses, bounce rate) and period comparisons."""
+    return await DashboardService.get_dashboard_stats(
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+        email_account_id=email_account_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+
+@router.get(
+    "/companies/{company_id}/emails/dashboard/stats",
+    response_model=DashboardStatsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve company-scoped dashboard statistics and comparison rates",
+)
+async def get_company_dashboard_stats(
+    company_id: int,
+    email_account_id: Optional[int] = Query(None, description="Optional email account ID scope"),
+    date_from: Optional[datetime] = Query(None, description="Start date filter"),
+    date_to: Optional[datetime] = Query(None, description="End date filter"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DashboardStatsResponse:
+    """Retrieve operational email metrics scoped to a specific company ID."""
+    return await DashboardService.get_dashboard_stats(
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+        email_account_id=email_account_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+
+@router.get(
+    "/emails/dashboard/activity",
+    response_model=DashboardActivityResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve daily email activity trends for the selected date range",
+)
+async def get_dashboard_activity(
+    company_id: Optional[int] = Query(None, description="Optional company ID scope"),
+    email_account_id: Optional[int] = Query(None, description="Optional email account ID scope"),
+    date_from: Optional[datetime] = Query(None, description="Start date filter"),
+    date_to: Optional[datetime] = Query(None, description="End date filter"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DashboardActivityResponse:
+    """Retrieve daily volume points (sent, responses, bounced) for trend visualization."""
+    return await DashboardService.get_activity_trends(
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+        email_account_id=email_account_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+
+@router.get(
+    "/companies/{company_id}/emails/dashboard/activity",
+    response_model=DashboardActivityResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve company-scoped daily email activity trends",
+)
+async def get_company_dashboard_activity(
+    company_id: int,
+    email_account_id: Optional[int] = Query(None, description="Optional email account ID scope"),
+    date_from: Optional[datetime] = Query(None, description="Start date filter"),
+    date_to: Optional[datetime] = Query(None, description="End date filter"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DashboardActivityResponse:
+    """Retrieve company-scoped daily volume points (sent, responses, bounced)."""
+    return await DashboardService.get_activity_trends(
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+        email_account_id=email_account_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+
+@router.get(
+    "/emails/dashboard/account-health",
+    response_model=AccountHealthResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve account health and synchronization overview",
+)
+async def get_dashboard_account_health(
+    company_id: Optional[int] = Query(None, description="Optional company ID scope"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AccountHealthResponse:
+    """Retrieve health indicators and sync timestamps for accessible email accounts."""
+    return await DashboardService.get_account_health(
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+    )
+
+
+@router.get(
+    "/companies/{company_id}/emails/dashboard/account-health",
+    response_model=AccountHealthResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve company-scoped account health and synchronization overview",
+)
+async def get_company_dashboard_account_health(
+    company_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AccountHealthResponse:
+    """Retrieve company-scoped health indicators and sync timestamps."""
+    return await DashboardService.get_account_health(
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+    )

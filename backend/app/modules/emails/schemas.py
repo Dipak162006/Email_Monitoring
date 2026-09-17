@@ -610,5 +610,57 @@ AttachmentRead = EmailAttachmentRead
 AttachmentListResponse = EmailAttachmentListResponse
 
 
+# -----------------------------------------------------------------------------
+# Dashboard & Email Analytics Schemas
+# -----------------------------------------------------------------------------
+
+class DashboardStatsResponse(BaseModel):
+    """Aggregated email monitoring statistics with period comparisons."""
+    model_config = ConfigDict(from_attributes=True)
+
+    sent_count: int = Field(description="Total outgoing emails sent in the selected period")
+    bounced_count: int = Field(description="Total bounced emails in the selected period")
+    response_count: int = Field(description="Total customer response emails in the selected period")
+    bounce_rate: float = Field(description="Bounce rate percentage (bounced / sent * 100)")
+    sent_change_percent: Optional[float] = Field(default=None, description="Percentage change in sent emails vs previous equivalent period")
+    bounced_change_percent: Optional[float] = Field(default=None, description="Percentage change in bounced emails vs previous equivalent period")
+    response_change_percent: Optional[float] = Field(default=None, description="Percentage change in response volume vs previous equivalent period")
+    period_start: Optional[datetime] = Field(default=None, description="Start timestamp of the analyzed period")
+    period_end: Optional[datetime] = Field(default=None, description="End timestamp of the analyzed period")
 
 
+class DashboardActivityPoint(BaseModel):
+    """Daily activity volume point for email trends chart."""
+    date: str = Field(description="Date string in YYYY-MM-DD format")
+    label: str = Field(description="Display label, e.g. 'Mon', 'Tue', 'Fri'")
+    sent: int = Field(default=0, description="Number of sent emails on this day")
+    responses: int = Field(default=0, description="Number of incoming replies on this day")
+    bounced: int = Field(default=0, description="Number of bounced emails on this day")
+
+
+class DashboardActivityResponse(BaseModel):
+    """Time-series activity trends for the selected date range."""
+    points: List[DashboardActivityPoint] = Field(default_factory=list)
+    total_sent: int = Field(default=0)
+    total_responses: int = Field(default=0)
+    total_bounced: int = Field(default=0)
+
+
+class AccountHealthItem(BaseModel):
+    """Health and status indicator for a connected email account."""
+    id: int
+    name: str
+    email_address: str
+    provider: str
+    is_active: bool
+    last_synced_at: Optional[datetime] = None
+    status_label: str = Field(description="Status indicator label: 'Operational', 'Syncing', or 'Idle'")
+
+
+class AccountHealthResponse(BaseModel):
+    """Overview of connected email accounts health and synchronization states."""
+    total_accounts: int = Field(default=0)
+    active_accounts: int = Field(default=0)
+    syncing_accounts: int = Field(default=0)
+    last_synced_at: Optional[datetime] = None
+    accounts: List[AccountHealthItem] = Field(default_factory=list)
