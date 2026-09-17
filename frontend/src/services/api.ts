@@ -1,4 +1,11 @@
 import type { LoginCredentials, RegisterCredentials, Token, User } from "../types/auth";
+import type {
+  AccountHealthResponse,
+  DashboardActivityResponse,
+  DashboardFilterParams,
+  DashboardStats,
+} from "../types/dashboard";
+import type { EmailListResponse } from "../types/emails";
 export type { ApiError } from "../types/api";
 
 export interface ServiceStatus {
@@ -53,6 +60,30 @@ export class RequestError extends Error {
   }
 }
 
+type UnauthorizedCallback = () => void;
+let unauthorizedListener: UnauthorizedCallback | null = null;
+let isHandling401 = false;
+
+export function onUnauthorized(callback: UnauthorizedCallback | null): void {
+  unauthorizedListener = callback;
+}
+
+function handle401Unauthorized(): void {
+  if (isHandling401) return;
+  isHandling401 = true;
+  tokenStorage.clear();
+  if (unauthorizedListener) {
+    try {
+      unauthorizedListener();
+    } catch {
+      // Ignore listener errors
+    }
+  }
+  setTimeout(() => {
+    isHandling401 = false;
+  }, 1000);
+}
+
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = endpoint.startsWith("http") ? endpoint : `${API_BASE_URL}${endpoint}`;
   const headers = new Headers(options.headers || {});
@@ -89,8 +120,14 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
       // Response was not JSON
     }
 
+    // Intercept 401 Unauthorized for expired or invalid tokens on protected endpoints
+    if (response.status === 401 && !endpoint.includes("/auth/login") && !endpoint.includes("/auth/register")) {
+      handle401Unauthorized();
+    }
+
     throw new RequestError(response.status, errorMessage, errorDetail);
   }
+
 
   // Handle 204 No Content
   if (response.status === 204) {
@@ -129,6 +166,105 @@ export const authApi = {
   },
 };
 
+export const dashboardApi = {
+  getStats: async (params?: DashboardFilterParams): Promise<DashboardStats> => {
+    const searchParams = new URLSearchParams();
+    if (params?.companyId) searchParams.set("company_id", String(params.companyId));
+    if (params?.emailAccountId) searchParams.set("email_account_id", String(params.emailAccountId));
+    if (params?.dateFrom) searchParams.set("date_from", params.dateFrom);
+    if (params?.dateTo) searchParams.set("date_to", params.dateTo);
+    const qs = searchParams.toString();
+    const endpoint = params?.companyId
+      ? `/api/v1/companies/${params.companyId}/emails/dashboard/stats${qs ? `?${qs}` : ""}`
+      : `/api/v1/emails/dashboard/stats${qs ? `?${qs}` : ""}`;
+    return apiClient.get<DashboardStats>(endpoint);
+  },
+
+  getActivity: async (params?: DashboardFilterParams): Promise<DashboardActivityResponse> => {
+    const searchParams = new URLSearchParams();
+    if (params?.companyId) searchParams.set("company_id", String(params.companyId));
+    if (params?.emailAccountId) searchParams.set("email_account_id", String(params.emailAccountId));
+    if (params?.dateFrom) searchParams.set("date_from", params.dateFrom);
+    if (params?.dateTo) searchParams.set("date_to", params.dateTo);
+    const qs = searchParams.toString();
+    const endpoint = params?.companyId
+      ? `/api/v1/companies/${params.companyId}/emails/dashboard/activity${qs ? `?${qs}` : ""}`
+      : `/api/v1/emails/dashboard/activity${qs ? `?${qs}` : ""}`;
+    return apiClient.get<DashboardActivityResponse>(endpoint);
+  },
+
+  getAccountHealth: async (companyId?: number): Promise<AccountHealthResponse> => {
+    const endpoint = companyId
+      ? `/api/v1/companies/${companyId}/emails/dashboard/account-health`
+      : "/api/v1/emails/dashboard/account-health";
+    return apiClient.get<AccountHealthResponse>(endpoint);
+  },
+};
+
+export interface MailboxCounts {
+  inbox: number;
+  sent: number;
+  drafts: number;
+  responses: number;
+  bounced: number;
+  trash: number;
+}
+
+export const emailsApi = {
+  getRecentEmails: async (limit: number = 7, companyId?: number): Promise<EmailListResponse> => {
+    const searchParams = new URLSearchParams();
+    searchParams.set("limit", String(limit));
+    searchParams.set("sort", "newest");
+    if (companyId) searchParams.set("company_id", String(companyId));
+    return apiClient.get<EmailListResponse>(`/api/v1/emails?${searchParams.toString()}`);
+  },
+
+  getFolderCount: async (folder: string, companyId?: number): Promise<number> => {
+    const searchParams = new URLSearchParams();
+    searchParams.set("folder", folder);
+    searchParams.set("limit", "1");
+    if (companyId) searchParams.set("company_id", String(companyId));
+    const endpoint = companyId
+      ? `/api/v1/companies/${companyId}/emails?${searchParams.toString()}`
+      : `/api/v1/emails?${searchParams.toString()}`;
+    const res = await apiClient.get<EmailListResponse>(endpoint);
+    return res.total;
+  },
+
+  getMailboxCounts: async (companyId?: number): Promise<MailboxCounts> => {
+    const folders = ["inbox", "sent", "drafts", "responses", "bounced", "trash"] as const;
+    const countPromises = folders.map(async (folder) => {
+      try {
+        const count = await emailsApi.getFolderCount(folder, companyId);
+        return [folder, count] as const;
+      } catch {
+        return [folder, 0] as const;
+      }
+    });
+
+    const results = await Promise.all(countPromises);
+    const countsMap = Object.fromEntries(results) as Record<string, number>;
+
+    return {
+      inbox: countsMap.inbox ?? 0,
+      sent: countsMap.sent ?? 0,
+      drafts: countsMap.drafts ?? 0,
+      responses: countsMap.responses ?? 0,
+      bounced: countsMap.bounced ?? 0,
+      trash: countsMap.trash ?? 0,
+    };
+  },
+};
+
+
+export const emailAccountsApi = {
+  triggerSync: async (accountId: number, background: boolean = true): Promise<{ message?: string; status?: string }> => {
+    return apiClient.post<{ message?: string; status?: string }>(
+      `/api/v1/email-accounts/${accountId}/sync?background=${background}`
+    );
+  },
+};
+
 // Preserved existing health check functions
 export async function fetchHealth(): Promise<HealthResponse> {
   return apiClient.get<HealthResponse>("/api/v1/health");
@@ -137,3 +273,4 @@ export async function fetchHealth(): Promise<HealthResponse> {
 export async function fetchPing(): Promise<{ status: string }> {
   return apiClient.get<{ status: string }>("/api/v1/ping");
 }
+

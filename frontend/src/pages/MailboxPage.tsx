@@ -1,20 +1,61 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useState, useEffect } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Badge } from "../components/ui/Badge";
-import { Inbox, Send, FileEdit, Trash2, PenSquare, RefreshCw } from "lucide-react";
+import {
+  Inbox,
+  Send,
+  FileEdit,
+  Trash2,
+  PenSquare,
+  RefreshCw,
+  CornerDownLeft,
+  ShieldAlert,
+} from "lucide-react";
+import { emailsApi } from "../services/api";
 
 export function MailboxPage() {
-  const [activeFolder, setActiveFolder] = useState<string>("INBOX");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const folderParam = searchParams.get("folder")?.toUpperCase();
+
+  const { data: mailboxCounts, refetch: refetchCounts } = useQuery({
+    queryKey: ["mailbox-counts"],
+    queryFn: () => emailsApi.getMailboxCounts(),
+    staleTime: 30000,
+  });
+
+  const [activeFolder, setActiveFolder] = useState<string>(
+    folderParam && ["INBOX", "SENT", "RESPONSES", "BOUNCED", "DRAFTS", "TRASH"].includes(folderParam)
+      ? folderParam
+      : "INBOX"
+  );
+
+  useEffect(() => {
+    if (
+      folderParam &&
+      ["INBOX", "SENT", "RESPONSES", "BOUNCED", "DRAFTS", "TRASH"].includes(folderParam)
+    ) {
+      setActiveFolder(folderParam);
+    }
+  }, [folderParam]);
+
+  const handleFolderSelect = (folderId: string) => {
+    setActiveFolder(folderId);
+    setSearchParams({ folder: folderId.toLowerCase() });
+  };
 
   const folders = [
-    { id: "INBOX", label: "Inbox", icon: Inbox, count: 0 },
-    { id: "SENT", label: "Sent", icon: Send, count: 0 },
-    { id: "DRAFTS", label: "Drafts", icon: FileEdit, count: 0 },
-    { id: "TRASH", label: "Trash", icon: Trash2, count: 0 },
+    { id: "INBOX", label: "Inbox", icon: Inbox, count: mailboxCounts?.inbox ?? 0 },
+    { id: "SENT", label: "Sent", icon: Send, count: mailboxCounts?.sent ?? 0 },
+    { id: "RESPONSES", label: "Responses", icon: CornerDownLeft, count: mailboxCounts?.responses ?? 0 },
+    { id: "BOUNCED", label: "Bounced", icon: ShieldAlert, count: mailboxCounts?.bounced ?? 0 },
+    { id: "DRAFTS", label: "Drafts", icon: FileEdit, count: mailboxCounts?.drafts ?? 0 },
+    { id: "TRASH", label: "Trash", icon: Trash2, count: mailboxCounts?.trash ?? 0 },
   ];
+
 
   return (
     <div className="space-y-4">
@@ -25,10 +66,11 @@ export function MailboxPage() {
           <p className="text-xs text-slate-500">Monitor incoming messages and synchronized email threads</p>
         </div>
         <div className="flex items-center space-x-2">
-          <Button size="sm" variant="outline" className="gap-1.5">
+          <Button size="sm" variant="outline" onClick={() => refetchCounts()} className="gap-1.5">
             <RefreshCw className="h-3.5 w-3.5" />
             Sync Mailbox
           </Button>
+
           <Link to="/compose">
             <Button size="sm" className="gap-1.5">
               <PenSquare className="h-3.5 w-3.5" />
@@ -54,7 +96,7 @@ export function MailboxPage() {
               return (
                 <button
                   key={folder.id}
-                  onClick={() => setActiveFolder(folder.id)}
+                  onClick={() => handleFolderSelect(folder.id)}
                   type="button"
                   className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
                     isActive
