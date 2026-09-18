@@ -16,8 +16,10 @@ interface EmailRowProps {
   onToggleSelect: (id: number) => void;
   onToggleStar: (id: number, currentStarred: boolean) => void;
   onToggleRead: (id: number, currentRead: boolean) => void;
-  onDelete: (id: number) => void;
-  onArchive: (id: number) => void;
+  onDelete?: (id: number) => void;
+  onMoveToTrash?: (id: number) => void;
+  onPermanentDelete?: (id: number) => void;
+  onArchive?: (id: number) => void;
   onRestore?: (id: number) => void;
   onClick: (email: EmailItem) => void;
 }
@@ -73,6 +75,8 @@ export const EmailRow: React.FC<EmailRowProps> = ({
   onToggleStar,
   onToggleRead,
   onDelete,
+  onMoveToTrash,
+  onPermanentDelete,
   onArchive,
   onRestore,
   onClick,
@@ -220,37 +224,53 @@ export const EmailRow: React.FC<EmailRowProps> = ({
           {email.is_read ? <Mail className="h-4 w-4" /> : <MailOpen className="h-4 w-4" />}
         </button>
 
-        {email.is_deleted && onRestore ? (
-          <button
-            type="button"
-            onClick={() => onRestore(email.id)}
-            className="p-1 rounded text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 transition-colors"
-            title="Restore to Inbox"
-            aria-label="Restore email"
-          >
-            <RotateCcw className="h-4 w-4" />
-          </button>
+        {email.is_deleted ? (
+          <>
+            {onRestore && (
+              <button
+                type="button"
+                onClick={() => onRestore(email.id)}
+                className="p-1 rounded text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 transition-colors cursor-pointer"
+                title="Restore to Inbox"
+                aria-label="Restore email"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => (onPermanentDelete ? onPermanentDelete(email.id) : onDelete?.(email.id))}
+              className="p-1 rounded text-rose-600 hover:text-rose-800 hover:bg-rose-50 transition-colors cursor-pointer"
+              title="Delete Permanently"
+              aria-label="Delete email permanently"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </>
         ) : (
-          <button
-            type="button"
-            onClick={() => onArchive(email.id)}
-            className="p-1 rounded text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
-            title="Archive"
-            aria-label="Archive email"
-          >
-            <Archive className="h-4 w-4" />
-          </button>
+          <>
+            {onArchive && (
+              <button
+                type="button"
+                onClick={() => onArchive(email.id)}
+                className="p-1 rounded text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
+                title="Archive"
+                aria-label="Archive email"
+              >
+                <Archive className="h-4 w-4" />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => (onMoveToTrash ? onMoveToTrash(email.id) : onDelete?.(email.id))}
+              className="p-1 rounded text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+              title="Move to Trash"
+              aria-label="Move email to trash"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </>
         )}
-
-        <button
-          type="button"
-          onClick={() => onDelete(email.id)}
-          className="p-1 rounded text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors"
-          title="Delete"
-          aria-label="Delete email"
-        >
-          <Trash2 className="h-4 w-4" />
-        </button>
       </div>
     </div>
   );

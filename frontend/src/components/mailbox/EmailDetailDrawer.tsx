@@ -13,6 +13,7 @@ import {
   Code,
   FileText,
   RotateCcw,
+  Trash2,
 } from "lucide-react";
 import type { EmailItem } from "../../types/emails";
 import { emailsApi } from "../../services/api";
@@ -24,6 +25,8 @@ interface EmailDetailDrawerProps {
   email: EmailItem | null;
   onClose: () => void;
   onRestore?: (id: number) => void;
+  onPermanentDelete?: (id: number) => void;
+  onMoveToTrash?: (id: number) => void;
 }
 
 function formatEmailTime(dateString?: string | null): string {
@@ -46,7 +49,13 @@ function formatEmailTime(dateString?: string | null): string {
   return `${timeStr} (${relStr})`;
 }
 
-export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({ email, onClose, onRestore }) => {
+export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({
+  email,
+  onClose,
+  onRestore,
+  onPermanentDelete,
+  onMoveToTrash,
+}) => {
   const [viewMode, setViewMode] = useState<"html" | "text">("html");
 
   // Escape key handler
@@ -223,15 +232,29 @@ export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({ email, onC
         {/* Drawer Footer Actions (Always fixed and visible at the bottom of drawer) */}
         <div className="shrink-0 bg-white border-t border-slate-200 px-6 py-3.5 sm:py-4 flex items-center justify-between shadow-xs z-10">
           <div className="flex items-center gap-2.5">
-            {email.is_deleted && onRestore ? (
-              <button
-                type="button"
-                onClick={() => onRestore(email.id)}
-                className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                Restore to Inbox
-              </button>
+            {email.is_deleted ? (
+              <>
+                {onRestore && (
+                  <button
+                    type="button"
+                    onClick={() => onRestore(email.id)}
+                    className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Restore to Inbox
+                  </button>
+                )}
+                {onPermanentDelete && (
+                  <button
+                    type="button"
+                    onClick={() => onPermanentDelete(email.id)}
+                    className="px-4 py-2 rounded-lg bg-rose-50 border border-rose-200 hover:bg-rose-100 text-rose-700 text-xs font-semibold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Delete Permanently
+                  </button>
+                )}
+              </>
             ) : (
               <>
                 <Link to={`/compose?reply_to=${email.id}`}>
@@ -252,6 +275,17 @@ export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({ email, onC
                     Forward
                   </button>
                 </Link>
+                {onMoveToTrash && (
+                  <button
+                    type="button"
+                    onClick={() => onMoveToTrash(email.id)}
+                    className="px-3.5 py-2 rounded-lg bg-white border border-slate-200 hover:bg-rose-50 hover:border-rose-200 hover:text-rose-700 text-slate-700 text-xs font-semibold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                    title="Move to Trash"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Move to Trash
+                  </button>
+                )}
               </>
             )}
           </div>

@@ -24,12 +24,14 @@ interface MailboxToolbarProps {
   // Bulk Actions
   onBulkStar: () => void;
   onBulkMarkRead: (read: boolean) => void;
-  onBulkArchive: () => void;
-  onBulkDelete: () => void;
-  // Restore (Trash folder)
+  onBulkArchive?: () => void;
+  onBulkMoveToTrash?: () => void;
+  // Trash folder actions
   isTrash?: boolean;
   onRestore?: () => void;
   isRestoring?: boolean;
+  onBulkPermanentDelete?: () => void;
+  isPermanentDeleting?: boolean;
   // Account filter
   accounts: AuthorizedEmailAccount[];
   selectedAccountId?: number;
@@ -53,10 +55,12 @@ export const MailboxToolbar: React.FC<MailboxToolbarProps> = ({
   onBulkStar,
   onBulkMarkRead,
   onBulkArchive,
-  onBulkDelete,
+  onBulkMoveToTrash,
   isTrash = false,
   onRestore,
   isRestoring = false,
+  onBulkPermanentDelete,
+  isPermanentDeleting = false,
   accounts,
   selectedAccountId,
   onAccountChange,
@@ -106,78 +110,131 @@ export const MailboxToolbar: React.FC<MailboxToolbarProps> = ({
 
         {/* Action Icon Buttons */}
         <div className="flex items-center gap-1 text-slate-500">
-          {isTrash && (
-            <button
-              type="button"
-              disabled={!hasSelection || isRestoring}
-              onClick={onRestore}
-              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 hover:text-indigo-800 transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shadow-2xs mr-1"
-              title={hasSelection ? `Restore ${selectedCount} selected email(s) to Inbox` : "Select emails to restore"}
-              aria-label="Restore selected emails"
-            >
-              {isRestoring ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <RotateCcw className="h-3.5 w-3.5" />
-              )}
-              <span>Restore{selectedCount > 0 ? ` (${selectedCount})` : ""}</span>
-            </button>
+          {isTrash ? (
+            <>
+              <button
+                type="button"
+                disabled={!hasSelection || isRestoring}
+                onClick={onRestore}
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 hover:text-indigo-800 transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shadow-2xs mr-1"
+                title={hasSelection ? `Restore ${selectedCount} selected email(s) to Inbox` : "Select emails to restore"}
+                aria-label="Restore selected emails"
+              >
+                {isRestoring ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RotateCcw className="h-3.5 w-3.5" />
+                )}
+                <span>Restore{selectedCount > 0 ? ` (${selectedCount})` : ""}</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={!hasSelection}
+                onClick={onBulkStar}
+                className="p-1.5 rounded-md hover:text-amber-500 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
+                title="Star selected"
+                aria-label="Star selected emails"
+              >
+                <Star className="h-4 w-4" />
+              </button>
+
+              <button
+                type="button"
+                disabled={!hasSelection}
+                onClick={() => onBulkMarkRead(true)}
+                className="p-1.5 rounded-md hover:text-indigo-600 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
+                title="Mark as Read"
+                aria-label="Mark selected emails as read"
+              >
+                <MailOpen className="h-4 w-4" />
+              </button>
+
+              <button
+                type="button"
+                disabled={!hasSelection}
+                onClick={() => onBulkMarkRead(false)}
+                className="p-1.5 rounded-md hover:text-indigo-600 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
+                title="Mark as Unread"
+                aria-label="Mark selected emails as unread"
+              >
+                <Mail className="h-4 w-4" />
+              </button>
+
+              <button
+                type="button"
+                disabled={!hasSelection || isPermanentDeleting}
+                onClick={onBulkPermanentDelete}
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold bg-rose-50 border border-rose-200 text-rose-700 hover:bg-rose-100 hover:text-rose-800 transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shadow-2xs ml-1"
+                title={hasSelection ? `Permanently delete ${selectedCount} selected email(s)` : "Select emails to permanently delete"}
+                aria-label="Permanently delete selected emails"
+              >
+                {isPermanentDeleting ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="h-3.5 w-3.5" />
+                )}
+                <span>Delete Permanently{selectedCount > 0 ? ` (${selectedCount})` : ""}</span>
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                disabled={!hasSelection}
+                onClick={onBulkStar}
+                className="p-1.5 rounded-md hover:text-amber-500 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
+                title="Star selected"
+                aria-label="Star selected emails"
+              >
+                <Star className="h-4 w-4" />
+              </button>
+
+              <button
+                type="button"
+                disabled={!hasSelection}
+                onClick={() => onBulkMarkRead(true)}
+                className="p-1.5 rounded-md hover:text-indigo-600 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
+                title="Mark as Read"
+                aria-label="Mark selected emails as read"
+              >
+                <MailOpen className="h-4 w-4" />
+              </button>
+
+              <button
+                type="button"
+                disabled={!hasSelection}
+                onClick={() => onBulkMarkRead(false)}
+                className="p-1.5 rounded-md hover:text-indigo-600 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
+                title="Mark as Unread"
+                aria-label="Mark selected emails as unread"
+              >
+                <Mail className="h-4 w-4" />
+              </button>
+
+              <button
+                type="button"
+                disabled={!hasSelection}
+                onClick={onBulkArchive}
+                className="p-1.5 rounded-md hover:text-slate-900 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
+                title="Archive"
+                aria-label="Archive selected emails"
+              >
+                <Archive className="h-4 w-4" />
+              </button>
+
+              <button
+                type="button"
+                disabled={!hasSelection}
+                onClick={onBulkMoveToTrash}
+                className="p-1.5 rounded-md hover:text-rose-600 hover:bg-rose-50 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
+                title="Move to Trash"
+                aria-label="Move selected emails to trash"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </>
           )}
-
-          <button
-            type="button"
-            disabled={!hasSelection}
-            onClick={onBulkStar}
-            className="p-1.5 rounded-md hover:text-amber-500 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
-            title="Star selected"
-            aria-label="Star selected emails"
-          >
-            <Star className="h-4 w-4" />
-          </button>
-
-          <button
-            type="button"
-            disabled={!hasSelection}
-            onClick={() => onBulkMarkRead(true)}
-            className="p-1.5 rounded-md hover:text-indigo-600 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
-            title="Mark as Read"
-            aria-label="Mark selected emails as read"
-          >
-            <MailOpen className="h-4 w-4" />
-          </button>
-
-          <button
-            type="button"
-            disabled={!hasSelection}
-            onClick={() => onBulkMarkRead(false)}
-            className="p-1.5 rounded-md hover:text-indigo-600 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
-            title="Mark as Unread"
-            aria-label="Mark selected emails as unread"
-          >
-            <Mail className="h-4 w-4" />
-          </button>
-
-          <button
-            type="button"
-            disabled={!hasSelection}
-            onClick={onBulkArchive}
-            className="p-1.5 rounded-md hover:text-slate-900 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
-            title="Archive"
-            aria-label="Archive selected emails"
-          >
-            <Archive className="h-4 w-4" />
-          </button>
-
-          <button
-            type="button"
-            disabled={!hasSelection}
-            onClick={onBulkDelete}
-            className="p-1.5 rounded-md hover:text-rose-600 hover:bg-rose-50 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
-            title="Delete"
-            aria-label="Delete selected emails"
-          >
-            <Trash2 className="h-4 w-4" />
-          </button>
         </div>
       </div>
 

@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Inbox, AlertCircle, CheckCircle2, X } from "lucide-react";
+import { Inbox, AlertCircle, CheckCircle2, Info, X } from "lucide-react";
 import { emailsApi, emailAccountsApi } from "../services/api";
 import type { EmailItem, EmailListParams } from "../types/emails";
 import { MailboxHeader } from "../components/mailbox/MailboxHeader";
@@ -9,6 +9,7 @@ import { MailboxToolbar } from "../components/mailbox/MailboxToolbar";
 import { EmailRow } from "../components/mailbox/EmailRow";
 import { EmailDetailDrawer } from "../components/mailbox/EmailDetailDrawer";
 import { RestoreConfirmModal } from "../components/mailbox/RestoreConfirmModal";
+import { PermanentDeleteConfirmModal } from "../components/mailbox/PermanentDeleteConfirmModal";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Button } from "../components/ui/Button";
 
@@ -36,10 +37,13 @@ export function MailboxPage() {
   const [selectedEmail, setSelectedEmail] = useState<EmailItem | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
 
-  // Restore state
+  // Restore & Permanent Delete modal state
   const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
-  const [alertBanner, setAlertBanner] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [isPermanentDeleteModalOpen, setIsPermanentDeleteModalOpen] = useState(false);
+  const [isPermanentDeleting, setIsPermanentDeleting] = useState(false);
+  const [permanentDeleteTargetIds, setPermanentDeleteTargetIds] = useState<number[]>([]);
+  const [alertBanner, setAlertBanner] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
 
   // Auto-dismiss alert banner after 5 seconds
   useEffect(() => {
@@ -212,14 +216,6 @@ export function MailboxPage() {
     },
   });
 
-  const deleteMutation = useMutation({
-    mutationFn: (id: number) => emailsApi.softDelete(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["emails"] });
-      queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
-    },
-  });
-
   // Single Row Handlers
   const handleToggleStar = (id: number, currentStarred: boolean) => {
     markStarMutation.mutate({ id, isStarred: !currentStarred });
@@ -229,18 +225,78 @@ export function MailboxPage() {
     markReadMutation.mutate({ id, isRead: !currentRead });
   };
 
-  const handleDeleteRow = (id: number) => {
-    deleteMutation.mutate(id);
-    if (selectedEmail?.id === id) {
-      setSelectedEmail(null);
+  // Move to Trash (Soft Delete) Handlers
+  const handleMoveToTrashSingle = async (id: number) => {
+    try {
+      await emailsApi.softDelete(id);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["emails"] }),
+        queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] }),
+      ]);
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      if (selectedEmail?.id === id) {
+        setSelectedEmail(null);
+      }
+      setAlertBanner({
+        type: "success",
+        message: "Email moved to Trash.",
+      });
+    } catch {
+      setAlertBanner({
+        type: "error",
+        message: "Failed to move email to Trash. Please try again.",
+      });
     }
   };
 
-  const handleArchiveRow = (id: number) => {
-    deleteMutation.mutate(id);
+  const handleBulkMoveToTrash = async () => {
+    const ids = Array.from(currentSelectedIds);
+    if (ids.length === 0) return;
+    try {
+      const results = await Promise.allSettled(ids.map((id) => emailsApi.softDelete(id)));
+      const succeeded = results.filter((r) => r.status === "fulfilled").length;
+      setSelectedIds(new Set());
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["emails"] }),
+        queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] }),
+      ]);
+      if (succeeded === ids.length) {
+        setAlertBanner({
+          type: "success",
+          message: succeeded === 1 ? "Email moved to Trash." : `${succeeded} emails moved to Trash.`,
+        });
+      } else if (succeeded > 0) {
+        setAlertBanner({
+          type: "error",
+          message: `Moved ${succeeded} email(s) to Trash, but ${ids.length - succeeded} failed.`,
+        });
+      } else {
+        setAlertBanner({
+          type: "error",
+          message: "Failed to move selected email(s) to Trash.",
+        });
+      }
+    } catch {
+      setAlertBanner({
+        type: "error",
+        message: "An unexpected error occurred while moving emails to Trash.",
+      });
+    }
   };
 
-  // Bulk Action Handlers (Scoped strictly to visible selected items)
+  // Safe Archive Action (Backend has no archive; clearly inform user without moving to Trash)
+  const handleArchivePrompt = () => {
+    setAlertBanner({
+      type: "info",
+      message: "Archiving is not supported. Use Trash to remove messages from active folders.",
+    });
+  };
+
+  // Bulk Star & Read Handlers
   const handleBulkStar = async () => {
     const ids = Array.from(currentSelectedIds);
     if (ids.length === 0) return;
@@ -256,22 +312,84 @@ export function MailboxPage() {
     queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
   };
 
-  const handleBulkArchive = async () => {
-    const ids = Array.from(currentSelectedIds);
-    if (ids.length === 0) return;
-    await Promise.all(ids.map((id) => emailsApi.softDelete(id)));
-    setSelectedIds(new Set());
-    queryClient.invalidateQueries({ queryKey: ["emails"] });
-    queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+  // Permanent Delete Handlers (Trash Folder only)
+  const handlePermanentDeletePrompt = (targetId?: number) => {
+    if (activeFolder !== "trash") return;
+    if (targetId) {
+      setPermanentDeleteTargetIds([targetId]);
+      setIsPermanentDeleteModalOpen(true);
+    } else if (currentSelectedIds.size > 0) {
+      setPermanentDeleteTargetIds(Array.from(currentSelectedIds));
+      setIsPermanentDeleteModalOpen(true);
+    }
   };
 
-  const handleBulkDelete = async () => {
-    const ids = Array.from(currentSelectedIds);
-    if (ids.length === 0) return;
-    await Promise.all(ids.map((id) => emailsApi.softDelete(id)));
-    setSelectedIds(new Set());
-    queryClient.invalidateQueries({ queryKey: ["emails"] });
-    queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+  const handleConfirmPermanentDelete = async () => {
+    if (permanentDeleteTargetIds.length === 0 || activeFolder !== "trash") {
+      setIsPermanentDeleteModalOpen(false);
+      return;
+    }
+    setIsPermanentDeleting(true);
+    const succeededIds: number[] = [];
+    const failedIds: number[] = [];
+
+    try {
+      const results = await Promise.allSettled(
+        permanentDeleteTargetIds.map((id) => emailsApi.permanentDelete(id))
+      );
+
+      results.forEach((res, index) => {
+        if (res.status === "fulfilled") {
+          succeededIds.push(permanentDeleteTargetIds[index]);
+        } else {
+          failedIds.push(permanentDeleteTargetIds[index]);
+        }
+      });
+
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["emails"] }),
+        queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] }),
+      ]);
+
+      if (failedIds.length === 0) {
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          succeededIds.forEach((id) => next.delete(id));
+          return next;
+        });
+        setAlertBanner({
+          type: "success",
+          message:
+            succeededIds.length === 1
+              ? "Email permanently deleted."
+              : `${succeededIds.length} emails permanently deleted.`,
+        });
+      } else if (succeededIds.length > 0) {
+        setSelectedIds(new Set(failedIds));
+        setAlertBanner({
+          type: "error",
+          message: `Permanently deleted ${succeededIds.length} email(s), but failed to delete ${failedIds.length}.`,
+        });
+      } else {
+        setAlertBanner({
+          type: "error",
+          message: "Failed to permanently delete selected email(s).",
+        });
+      }
+
+      if (selectedEmail && succeededIds.includes(selectedEmail.id)) {
+        setSelectedEmail(null);
+      }
+    } catch {
+      setAlertBanner({
+        type: "error",
+        message: "An unexpected error occurred while permanently deleting email(s).",
+      });
+    } finally {
+      setIsPermanentDeleting(false);
+      setIsPermanentDeleteModalOpen(false);
+      setPermanentDeleteTargetIds([]);
+    }
   };
 
   // Restore Handlers (Trash Folder)
@@ -403,12 +521,16 @@ export function MailboxPage() {
           className={`flex items-center justify-between px-4 py-3 rounded-xl border text-xs font-medium transition-all ${
             alertBanner.type === "success"
               ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+              : alertBanner.type === "info"
+              ? "bg-sky-50 border-sky-200 text-sky-800"
               : "bg-rose-50 border-rose-200 text-rose-800"
           }`}
         >
           <div className="flex items-center gap-2">
             {alertBanner.type === "success" ? (
               <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+            ) : alertBanner.type === "info" ? (
+              <Info className="h-4 w-4 text-sky-600 shrink-0" />
             ) : (
               <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
             )}
@@ -436,11 +558,13 @@ export function MailboxPage() {
           onToggleSelectAll={handleToggleSelectAll}
           onBulkStar={handleBulkStar}
           onBulkMarkRead={handleBulkMarkRead}
-          onBulkArchive={handleBulkArchive}
-          onBulkDelete={handleBulkDelete}
+          onBulkArchive={handleArchivePrompt}
+          onBulkMoveToTrash={handleBulkMoveToTrash}
           isTrash={activeFolder === "trash"}
           onRestore={handleRestorePrompt}
           isRestoring={isRestoring}
+          onBulkPermanentDelete={() => handlePermanentDeletePrompt()}
+          isPermanentDeleting={isPermanentDeleting}
           accounts={authorizedAccounts}
           selectedAccountId={selectedAccountId}
           onAccountChange={handleAccountChange}
@@ -534,8 +658,9 @@ export function MailboxPage() {
                 onToggleSelect={handleToggleSelectRow}
                 onToggleStar={handleToggleStar}
                 onToggleRead={handleToggleRead}
-                onDelete={handleDeleteRow}
-                onArchive={handleArchiveRow}
+                onMoveToTrash={handleMoveToTrashSingle}
+                onPermanentDelete={(id) => handlePermanentDeletePrompt(id)}
+                onArchive={handleArchivePrompt}
                 onRestore={handleRestoreSingle}
                 onClick={handleEmailClick}
               />
@@ -548,6 +673,8 @@ export function MailboxPage() {
         email={selectedEmail}
         onClose={() => setSelectedEmail(null)}
         onRestore={handleRestoreSingle}
+        onMoveToTrash={handleMoveToTrashSingle}
+        onPermanentDelete={(id) => handlePermanentDeletePrompt(id)}
       />
 
       {/* 4. Restore Confirmation Modal */}
@@ -559,6 +686,20 @@ export function MailboxPage() {
           if (!isRestoring) setIsRestoreModalOpen(false);
         }}
         onConfirm={handleConfirmRestore}
+      />
+
+      {/* 5. Permanent Delete Confirmation Modal */}
+      <PermanentDeleteConfirmModal
+        isOpen={isPermanentDeleteModalOpen}
+        count={permanentDeleteTargetIds.length}
+        isDeleting={isPermanentDeleting}
+        onClose={() => {
+          if (!isPermanentDeleting) {
+            setIsPermanentDeleteModalOpen(false);
+            setPermanentDeleteTargetIds([]);
+          }
+        }}
+        onConfirm={handleConfirmPermanentDelete}
       />
     </div>
   );
