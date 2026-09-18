@@ -5,7 +5,21 @@ import type {
   DashboardFilterParams,
   DashboardStats,
 } from "../types/dashboard";
-import type { EmailListResponse } from "../types/emails";
+import type {
+  AttachmentItem,
+  AttachmentListResponse,
+  AuthorizedEmailAccount,
+  EmailDraftPayload,
+  EmailItem,
+  EmailListParams,
+  EmailListResponse,
+  EmailSendPayload,
+  EmailSignatureItem,
+  EmailSignatureListResponse,
+  EmailTemplateItem,
+  EmailTemplateListResponse,
+  EmailThreadDetail,
+} from "../types/emails";
 export type { ApiError } from "../types/api";
 
 export interface ServiceStatus {
@@ -143,13 +157,19 @@ export const apiClient = {
     request<T>(endpoint, {
       ...options,
       method: "POST",
-      body: body ? JSON.stringify(body) : undefined,
+      body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
     }),
   put: <T>(endpoint: string, body?: unknown, options?: RequestInit) =>
     request<T>(endpoint, {
       ...options,
       method: "PUT",
-      body: body ? JSON.stringify(body) : undefined,
+      body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
+    }),
+  patch: <T>(endpoint: string, body?: unknown, options?: RequestInit) =>
+    request<T>(endpoint, {
+      ...options,
+      method: "PATCH",
+      body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
     }),
   delete: <T>(endpoint: string, options?: RequestInit) => request<T>(endpoint, { ...options, method: "DELETE" }),
 };
@@ -211,6 +231,114 @@ export interface MailboxCounts {
 }
 
 export const emailsApi = {
+  listEmails: async (params?: EmailListParams): Promise<EmailListResponse> => {
+    const searchParams = new URLSearchParams();
+    if (params?.folder) searchParams.set("folder", params.folder);
+    if (params?.status) searchParams.set("status", params.status);
+    if (params?.direction) searchParams.set("direction", params.direction);
+    if (params?.emailAccountId) searchParams.set("email_account_id", String(params.emailAccountId));
+    if (params?.companyId) searchParams.set("company_id", String(params.companyId));
+    if (params?.isRead !== undefined) searchParams.set("is_read", String(params.isRead));
+    if (params?.isStarred !== undefined) searchParams.set("is_starred", String(params.isStarred));
+    if (params?.search) searchParams.set("search", params.search);
+    if (params?.dateFrom) searchParams.set("date_from", params.dateFrom);
+    if (params?.dateTo) searchParams.set("date_to", params.dateTo);
+    if (params?.sort) searchParams.set("sort", params.sort);
+    if (params?.limit !== undefined) searchParams.set("limit", String(params.limit));
+    if (params?.offset !== undefined) searchParams.set("offset", String(params.offset));
+    const qs = searchParams.toString();
+    const endpoint = params?.companyId
+      ? `/api/v1/companies/${params.companyId}/emails${qs ? `?${qs}` : ""}`
+      : `/api/v1/emails${qs ? `?${qs}` : ""}`;
+    return apiClient.get<EmailListResponse>(endpoint);
+  },
+
+  getEmailById: async (id: number, companyId?: number): Promise<EmailItem> => {
+    const endpoint = companyId ? `/api/v1/companies/${companyId}/emails/${id}` : `/api/v1/emails/${id}`;
+    return apiClient.get<EmailItem>(endpoint);
+  },
+
+  markRead: async (id: number, isRead: boolean): Promise<EmailItem> => {
+    return apiClient.patch<EmailItem>(`/api/v1/emails/${id}/read`, { is_read: isRead });
+  },
+
+  markStarred: async (id: number, isStarred: boolean): Promise<EmailItem> => {
+    return apiClient.patch<EmailItem>(`/api/v1/emails/${id}/star`, { is_starred: isStarred });
+  },
+
+  softDelete: async (id: number): Promise<EmailItem> => {
+    return apiClient.delete<EmailItem>(`/api/v1/emails/${id}`);
+  },
+
+  restore: async (id: number): Promise<EmailItem> => {
+    return apiClient.patch<EmailItem>(`/api/v1/emails/${id}/restore`);
+  },
+
+  permanentDelete: async (id: number): Promise<{ message: string; id: number }> => {
+    return apiClient.delete<{ message: string; id: number }>(`/api/v1/emails/${id}/permanent`);
+  },
+
+  getThread: async (threadId: number, companyId?: number): Promise<EmailThreadDetail> => {
+    const endpoint = companyId ? `/api/v1/companies/${companyId}/threads/${threadId}` : `/api/v1/threads/${threadId}`;
+    return apiClient.get<EmailThreadDetail>(endpoint);
+  },
+
+  getAttachments: async (emailId: number, companyId?: number): Promise<AttachmentListResponse> => {
+    const endpoint = companyId
+      ? `/api/v1/companies/${companyId}/emails/${emailId}/attachments`
+      : `/api/v1/emails/${emailId}/attachments`;
+    return apiClient.get<AttachmentListResponse>(endpoint);
+  },
+
+  downloadAttachment: async (emailId: number, attachmentId: number): Promise<Blob> => {
+    const token = tokenStorage.get();
+    const headers = new Headers();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const url = `${API_BASE_URL}/api/v1/emails/${emailId}/attachments/${attachmentId}/download`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error("Failed to download attachment");
+    return res.blob();
+  },
+
+  sendEmail: async (payload: EmailSendPayload): Promise<EmailItem> => {
+    return apiClient.post<EmailItem>("/api/v1/emails/send", payload);
+  },
+
+  createDraft: async (payload: EmailDraftPayload): Promise<EmailItem> => {
+    return apiClient.post<EmailItem>("/api/v1/emails/drafts", payload);
+  },
+
+  getDraft: async (draftId: number): Promise<EmailItem> => {
+    return apiClient.get<EmailItem>(`/api/v1/emails/drafts/${draftId}`);
+  },
+
+  updateDraft: async (draftId: number, payload: Partial<EmailDraftPayload>): Promise<EmailItem> => {
+    return apiClient.put<EmailItem>(`/api/v1/emails/drafts/${draftId}`, payload);
+  },
+
+  sendDraft: async (draftId: number): Promise<EmailItem> => {
+    return apiClient.post<EmailItem>(`/api/v1/emails/drafts/${draftId}/send`);
+  },
+
+  discardDraft: async (draftId: number): Promise<void> => {
+    return apiClient.delete<void>(`/api/v1/emails/drafts/${draftId}`);
+  },
+
+  uploadDraftAttachment: async (draftId: number, file: File): Promise<AttachmentItem> => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiClient.post<AttachmentItem>(`/api/v1/emails/drafts/${draftId}/attachments`, formData);
+  },
+
+  listDraftAttachments: async (draftId: number): Promise<AttachmentItem[]> => {
+    const res = await apiClient.get<AttachmentListResponse>(`/api/v1/emails/drafts/${draftId}/attachments`);
+    return res.attachments;
+  },
+
+  deleteDraftAttachment: async (draftId: number, attachmentId: number): Promise<void> => {
+    return apiClient.delete<void>(`/api/v1/emails/drafts/${draftId}/attachments/${attachmentId}`);
+  },
+
   getRecentEmails: async (limit: number = 7, companyId?: number): Promise<EmailListResponse> => {
     const searchParams = new URLSearchParams();
     searchParams.set("limit", String(limit));
@@ -256,8 +384,27 @@ export const emailsApi = {
   },
 };
 
+export const templatesApi = {
+  listTemplates: async (accountId?: number): Promise<EmailTemplateItem[]> => {
+    const url = accountId ? `/api/v1/templates?email_account_id=${accountId}` : "/api/v1/templates";
+    const res = await apiClient.get<EmailTemplateListResponse>(url);
+    return res.templates;
+  },
+};
+
+export const signaturesApi = {
+  listSignatures: async (accountId?: number): Promise<EmailSignatureItem[]> => {
+    const url = accountId ? `/api/v1/signatures?email_account_id=${accountId}` : "/api/v1/signatures";
+    const res = await apiClient.get<EmailSignatureListResponse>(url);
+    return res.signatures;
+  },
+};
 
 export const emailAccountsApi = {
+  getAuthorizedAccounts: async (): Promise<AuthorizedEmailAccount[]> => {
+    return apiClient.get<AuthorizedEmailAccount[]>("/api/v1/email-accounts/authorized");
+  },
+
   triggerSync: async (accountId: number, background: boolean = true): Promise<{ message?: string; status?: string }> => {
     return apiClient.post<{ message?: string; status?: string }>(
       `/api/v1/email-accounts/${accountId}/sync?background=${background}`

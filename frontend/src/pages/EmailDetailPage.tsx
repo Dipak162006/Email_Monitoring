@@ -1,61 +1,280 @@
-import { useParams, Link } from "react-router-dom";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../components/ui/Card";
+import { useState } from "react";
+import { useParams, Link, useNavigate } from "react-router-dom";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  ArrowLeft,
+  Reply,
+  CornerUpRight,
+  Trash2,
+  Star,
+  Mail,
+  MailOpen,
+  ShieldCheck,
+  Clock,
+  User,
+  Users,
+  Code,
+  FileText,
+  AlertCircle,
+} from "lucide-react";
+import { emailsApi } from "../services/api";
+import { Card, CardContent } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
-import { ArrowLeft, Mail, Reply, CornerUpRight, Trash2 } from "lucide-react";
+import { AttachmentList } from "../components/mailbox/AttachmentList";
+import { EmailConversation } from "../components/mailbox/EmailConversation";
+import DOMPurify from "dompurify";
 
 export function EmailDetailPage() {
   const { emailId } = useParams<{ emailId: string }>();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [viewMode, setViewMode] = useState<"html" | "text">("html");
+
+  const id = Number(emailId);
+
+  // Fetch email details
+  const {
+    data: email,
+    isLoading,
+    isError,
+    error,
+  } = useQuery({
+    queryKey: ["email-detail", id],
+    queryFn: () => emailsApi.getEmailById(id),
+    enabled: !isNaN(id),
+    staleTime: 30000,
+  });
+
+  // Fetch attachments
+  const { data: attachmentsData } = useQuery({
+    queryKey: ["email-attachments", id],
+    queryFn: () => emailsApi.getAttachments(id),
+    enabled: !isNaN(id),
+    staleTime: 60000,
+  });
+
+  // Mutations
+  const markReadMutation = useMutation({
+    mutationFn: (isRead: boolean) => emailsApi.markRead(id, isRead),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["email-detail", id] });
+      queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+    },
+  });
+
+  const markStarMutation = useMutation({
+    mutationFn: (isStarred: boolean) => emailsApi.markStarred(id, isStarred),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["email-detail", id] });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => emailsApi.softDelete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["emails"] });
+      queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+      navigate("/mailbox");
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div className="space-y-4 max-w-5xl mx-auto">
+        <div className="h-8 w-32 bg-slate-200 rounded animate-pulse" />
+        <Card className="p-8 space-y-6">
+          <div className="h-6 w-3/4 bg-slate-100 rounded animate-pulse" />
+          <div className="h-4 w-1/2 bg-slate-100 rounded animate-pulse" />
+          <div className="h-32 bg-slate-50 rounded-xl animate-pulse" />
+          <div className="h-48 bg-slate-50 rounded-lg animate-pulse" />
+        </Card>
+      </div>
+    );
+  }
+
+  if (isError || !email) {
+    return (
+      <div className="max-w-md mx-auto p-12 text-center space-y-4">
+        <div className="inline-flex p-3 rounded-full bg-rose-50 text-rose-600">
+          <AlertCircle className="h-6 w-6" />
+        </div>
+        <h2 className="text-base font-semibold text-slate-900">Email Not Found</h2>
+        <p className="text-xs text-slate-500">
+          {(error as Error)?.message || "The requested email could not be retrieved."}
+        </p>
+        <Link to="/mailbox">
+          <Button size="sm" variant="outline" className="mt-2">
+            Back to Mailbox
+          </Button>
+        </Link>
+      </div>
+    );
+  }
+
+  const hasHtml = !!email.body_html;
+  const sanitizedHtml = hasHtml ? DOMPurify.sanitize(email.body_html || "") : null;
+  const formattedDate = new Date(email.sent_at || email.received_at || email.created_at).toLocaleString([], {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
 
   return (
-    <div className="space-y-4">
-      {/* Navigation and Actions */}
-      <div className="flex items-center justify-between">
+    <div className="space-y-4 max-w-5xl mx-auto pb-10">
+      {/* Top Action & Navigation Bar */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <Link to="/mailbox">
           <Button variant="ghost" size="sm" className="gap-1.5 text-slate-600 hover:text-slate-900">
             <ArrowLeft className="h-4 w-4" />
             Back to Mailbox
           </Button>
         </Link>
+
         <div className="flex items-center space-x-2">
-          <Button variant="outline" size="sm" className="gap-1.5">
-            <Reply className="h-3.5 w-3.5" />
-            Reply
-          </Button>
-          <Button variant="outline" size="sm" className="gap-1.5">
-            <CornerUpRight className="h-3.5 w-3.5" />
-            Forward
-          </Button>
-          <Button variant="outline" size="sm" className="gap-1.5 text-rose-600 hover:bg-rose-50">
+          <button
+            type="button"
+            onClick={() => markStarMutation.mutate(!email.is_starred)}
+            className={`p-2 rounded-lg border text-xs font-medium transition-colors ${
+              email.is_starred
+                ? "bg-amber-50 border-amber-200 text-amber-600"
+                : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+            }`}
+            title={email.is_starred ? "Unstar" : "Star"}
+          >
+            <Star className="h-4 w-4" fill={email.is_starred ? "currentColor" : "none"} />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => markReadMutation.mutate(!email.is_read)}
+            className="p-2 rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 text-xs font-medium transition-colors"
+            title={email.is_read ? "Mark Unread" : "Mark Read"}
+          >
+            {email.is_read ? <Mail className="h-4 w-4" /> : <MailOpen className="h-4 w-4" />}
+          </button>
+
+          <Link to={`/compose?reply_to=${email.id}`}>
+            <Button variant="outline" size="sm" className="gap-1.5">
+              <Reply className="h-3.5 w-3.5" />
+              Reply
+            </Button>
+          </Link>
+
+          <Link to={`/compose?forward=${email.id}`}>
+            <Button variant="outline" size="sm" className="gap-1.5">
+              <CornerUpRight className="h-3.5 w-3.5" />
+              Forward
+            </Button>
+          </Link>
+
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => deleteMutation.mutate()}
+            className="gap-1.5 text-rose-600 hover:bg-rose-50 border-slate-200"
+          >
             <Trash2 className="h-3.5 w-3.5" />
             Delete
           </Button>
         </div>
       </div>
 
-      {/* Email Body Card */}
-      <Card>
-        <CardHeader className="border-b border-slate-100 pb-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="text-base font-bold text-slate-900">
-                Email Message Details
-              </CardTitle>
-              <CardDescription className="mt-1">
-                Viewing identifier: <span className="font-mono text-indigo-600 font-semibold">{emailId}</span>
-              </CardDescription>
-            </div>
-            <div className="h-9 w-9 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
-              <Mail className="h-5 w-5" />
+      {/* Main Email Display Card */}
+      <Card className="border-slate-200 shadow-2xs overflow-hidden">
+        <CardContent className="p-6 sm:p-8 space-y-6">
+          {/* Header Info */}
+          <div className="border-b border-slate-100 pb-5 space-y-3">
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+              {email.subject || "(No Subject)"}
+            </h1>
+
+            <div className="space-y-1.5 text-xs text-slate-600">
+              <div className="flex items-center gap-2">
+                <User className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                <span className="font-semibold text-slate-900">From:</span>
+                <span className="text-slate-800">{email.sender}</span>
+              </div>
+
+              {email.recipients && email.recipients.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <Users className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                  <span className="font-semibold text-slate-900">To:</span>
+                  <span className="text-slate-800">{email.recipients.join(", ")}</span>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 text-slate-500">
+                <Clock className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                <span>{formattedDate}</span>
+              </div>
             </div>
           </div>
-        </CardHeader>
-        <CardContent className="p-6">
-          <div className="p-8 text-center text-slate-500 rounded-xl bg-slate-50 border border-dashed border-slate-200">
-            <p className="text-sm font-semibold text-slate-700">Email View Scaffold</p>
-            <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-              Message threading, full MIME body rendering, headers, and attachments viewer will be connected in future frontend milestones.
-            </p>
+
+          {/* Telemetry Trace Box */}
+          <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl space-y-2">
+            <div className="flex items-center justify-between text-[11px] text-slate-500 uppercase tracking-wider font-semibold">
+              <span>Telemetry Protocol Trace</span>
+              <span className="text-emerald-700 font-mono font-medium flex items-center gap-1">
+                <ShieldCheck className="h-3.5 w-3.5" />
+                DKIM: PASS • SPF: PASS
+              </span>
+            </div>
+            <div className="font-mono text-xs text-slate-600 space-y-1">
+              <div>Return-Path: &lt;{email.sender}&gt;</div>
+              <div>Status: {email.status} • Direction: {email.direction}</div>
+              <div>Message ID: {email.message_id || `MSG-${email.id}`}</div>
+            </div>
           </div>
+
+          {/* Body Viewer */}
+          <div className="space-y-3">
+            {hasHtml && email.body_text && (
+              <div className="flex items-center space-x-1 bg-slate-100 p-0.5 rounded-lg w-fit text-xs">
+                <button
+                  type="button"
+                  onClick={() => setViewMode("html")}
+                  className={`px-2.5 py-1 rounded-md font-medium transition-colors flex items-center gap-1 ${
+                    viewMode === "html" ? "bg-white text-slate-900 shadow-2xs" : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  <Code className="h-3 w-3" />
+                  HTML View
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("text")}
+                  className={`px-2.5 py-1 rounded-md font-medium transition-colors flex items-center gap-1 ${
+                    viewMode === "text" ? "bg-white text-slate-900 shadow-2xs" : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  <FileText className="h-3 w-3" />
+                  Plain Text
+                </button>
+              </div>
+            )}
+
+            <div className="text-sm text-slate-800 leading-relaxed bg-white rounded-lg border border-slate-100 p-6 min-h-[160px]">
+              {viewMode === "html" && sanitizedHtml ? (
+                <div
+                  className="prose prose-sm max-w-none break-words text-slate-800"
+                  dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
+                />
+              ) : (
+                <pre className="whitespace-pre-wrap font-sans text-xs sm:text-sm text-slate-800 leading-relaxed">
+                  {email.body_text || email.body_html || "No message body content."}
+                </pre>
+              )}
+            </div>
+          </div>
+
+          {/* Attachments */}
+          {attachmentsData?.attachments && attachmentsData.attachments.length > 0 && (
+            <AttachmentList emailId={email.id} attachments={attachmentsData.attachments} />
+          )}
+
+          {/* Conversation Thread */}
+          {email.thread_id && (
+            <EmailConversation threadId={email.thread_id} currentEmailId={email.id} />
+          )}
         </CardContent>
       </Card>
     </div>

@@ -38,7 +38,7 @@ export function DiagnosticsPage() {
         </div>
         <div className="flex items-center space-x-2">
           <a
-            href="/docs"
+            href="http://localhost:8000/docs"
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-white text-slate-700 hover:bg-slate-50 border border-slate-300 shadow-xs"
