@@ -440,7 +440,9 @@ export function DashboardPage() {
                 {recentEmailsData.emails.slice(0, 7).map((email: EmailItem) => {
                   const isSent = email.direction === "OUTGOING" && email.status === "SENT";
                   const isBounced = email.status === "BOUNCED";
-                  const isResponse = email.direction === "INCOMING" && email.thread_id !== null;
+                  const isResponse =
+                    email.direction === "INCOMING" &&
+                    email.subject.trim().toLowerCase().startsWith("re:");
 
                   // Resolve provider from account mapping
                   const accountInfo = accountsMap.get(email.email_account_id);

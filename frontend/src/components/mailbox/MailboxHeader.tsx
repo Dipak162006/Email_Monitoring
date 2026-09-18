@@ -60,7 +60,7 @@ export const MailboxHeader: React.FC<MailboxHeaderProps> = ({
               <span>Unread</span>
               {mailboxCounts && (
                 <span className="font-semibold text-indigo-600 ml-0.5">
-                  {mailboxCounts.inbox}
+                  {mailboxCounts.unread ?? 0}
                 </span>
               )}
             </button>

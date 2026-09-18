@@ -223,6 +223,7 @@ export const dashboardApi = {
 
 export interface MailboxCounts {
   inbox: number;
+  unread: number;
   sent: number;
   drafts: number;
   responses: number;
@@ -359,28 +360,41 @@ export const emailsApi = {
     return res.total;
   },
 
-  getMailboxCounts: async (companyId?: number): Promise<MailboxCounts> => {
-    const folders = ["inbox", "sent", "drafts", "responses", "bounced", "trash"] as const;
-    const countPromises = folders.map(async (folder) => {
-      try {
-        const count = await emailsApi.getFolderCount(folder, companyId);
-        return [folder, count] as const;
-      } catch {
-        return [folder, 0] as const;
-      }
-    });
+  getMailboxCounts: async (companyId?: number, emailAccountId?: number): Promise<MailboxCounts> => {
+    try {
+      const searchParams = new URLSearchParams();
+      if (companyId) searchParams.set("company_id", String(companyId));
+      if (emailAccountId) searchParams.set("email_account_id", String(emailAccountId));
+      const qs = searchParams.toString();
+      const endpoint = companyId
+        ? `/api/v1/companies/${companyId}/emails/counts${qs ? `?${qs}` : ""}`
+        : `/api/v1/emails/counts${qs ? `?${qs}` : ""}`;
+      return await apiClient.get<MailboxCounts>(endpoint);
+    } catch {
+      // Fallback for resilient operation
+      const folders = ["inbox", "sent", "drafts", "responses", "bounced", "trash"] as const;
+      const countPromises = folders.map(async (folder) => {
+        try {
+          const count = await emailsApi.getFolderCount(folder, companyId);
+          return [folder, count] as const;
+        } catch {
+          return [folder, 0] as const;
+        }
+      });
 
-    const results = await Promise.all(countPromises);
-    const countsMap = Object.fromEntries(results) as Record<string, number>;
+      const results = await Promise.all(countPromises);
+      const countsMap = Object.fromEntries(results) as Record<string, number>;
 
-    return {
-      inbox: countsMap.inbox ?? 0,
-      sent: countsMap.sent ?? 0,
-      drafts: countsMap.drafts ?? 0,
-      responses: countsMap.responses ?? 0,
-      bounced: countsMap.bounced ?? 0,
-      trash: countsMap.trash ?? 0,
-    };
+      return {
+        inbox: countsMap.inbox ?? 0,
+        unread: 0,
+        sent: countsMap.sent ?? 0,
+        drafts: countsMap.drafts ?? 0,
+        responses: countsMap.responses ?? 0,
+        bounced: countsMap.bounced ?? 0,
+        trash: countsMap.trash ?? 0,
+      };
+    }
   },
 };
 

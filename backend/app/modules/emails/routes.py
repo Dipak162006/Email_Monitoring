@@ -38,6 +38,7 @@ from app.modules.emails.schemas import (
     EmailSyncJobResponse,
     EmailSyncRequest,
     EmailSyncResult,
+    MailboxCountsResponse,
     EmailTemplateActiveToggle,
     EmailTemplateCreate,
     EmailTemplateListResponse,
@@ -485,6 +486,113 @@ async def list_emails(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get(
+    "/emails/counts",
+    response_model=MailboxCountsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get aggregated live email counts across mailbox folders and unread telemetry",
+)
+async def get_mailbox_counts(
+    company_id: Optional[int] = Query(None, description="Filter by company ID"),
+    email_account_id: Optional[int] = Query(None, description="Filter by email account ID"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MailboxCountsResponse:
+    """Retrieve real-time mailbox counts (inbox, unread, sent, drafts, responses, bounced, trash)."""
+    if company_id is not None:
+        membership = await CompanyService.get_user_membership(
+            db=db,
+            company_id=company_id,
+            user_id=current_user.id,
+        )
+        if not membership:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not belong to the specified company.",
+            )
+
+        accessible_accs = await EmailAccountService.get_user_accessible_accounts_for_company(
+            db=db,
+            company_id=company_id,
+            user_id=current_user.id,
+            user_role=membership.role,
+        )
+        accessible_acc_ids = [acc.id for acc in accessible_accs]
+        if not accessible_acc_ids:
+            return MailboxCountsResponse()
+
+        if email_account_id is not None:
+            if email_account_id not in accessible_acc_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You do not have access to this email account.",
+                )
+            target_account_id = email_account_id
+            target_account_ids = None
+        else:
+            target_account_id = None
+            target_account_ids = accessible_acc_ids
+
+        counts = await EmailMailboxService.get_mailbox_counts(
+            db=db,
+            company_id=company_id,
+            email_account_id=target_account_id,
+            email_account_ids=target_account_ids,
+        )
+        return MailboxCountsResponse(**counts)
+    else:
+        if email_account_id is not None:
+            account = await verify_user_can_access_account(db, current_user, email_account_id)
+            counts = await EmailMailboxService.get_mailbox_counts(
+                db=db,
+                company_id=account.company_id,
+                email_account_id=account.id,
+            )
+            return MailboxCountsResponse(**counts)
+        else:
+            user_companies = await CompanyService.get_user_companies(db, current_user.id)
+            all_acc_ids: List[int] = []
+            for comp, role in user_companies:
+                accs = await EmailAccountService.get_user_accessible_accounts_for_company(
+                    db=db,
+                    company_id=comp.id,
+                    user_id=current_user.id,
+                    user_role=role,
+                )
+                all_acc_ids.extend([a.id for a in accs])
+
+            if not all_acc_ids:
+                return MailboxCountsResponse()
+
+            counts = await EmailMailboxService.get_mailbox_counts(
+                db=db,
+                company_ids=[comp.id for comp, _ in user_companies],
+                email_account_ids=all_acc_ids,
+            )
+            return MailboxCountsResponse(**counts)
+
+
+@router.get(
+    "/companies/{company_id}/emails/counts",
+    response_model=MailboxCountsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get aggregated live email counts scoped to a specific company",
+)
+async def get_company_mailbox_counts(
+    company_id: int,
+    email_account_id: Optional[int] = Query(None, description="Filter by email account ID"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MailboxCountsResponse:
+    """Retrieve real-time mailbox counts strictly scoped to a specific company."""
+    return await get_mailbox_counts(
+        company_id=company_id,
+        email_account_id=email_account_id,
+        current_user=current_user,
+        db=db,
     )
 
 

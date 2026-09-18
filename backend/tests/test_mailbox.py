@@ -999,3 +999,94 @@ async def test_37_nonexistent_email_returns_404(async_client: AsyncClient, db_se
 
     r6 = await async_client.delete("/api/v1/emails/999999/permanent", headers={"Authorization": f"Bearer {token}"})
     assert r6.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_38_mailbox_counts_endpoint(async_client: AsyncClient, db_session: AsyncSession):
+    """38. GET /api/v1/emails/counts returns accurate counts across all mailbox folders."""
+    token = await register_and_login(async_client, "user38@test.com")
+    comp_id = await create_company_helper(async_client, token, "Co 38")
+    acc_id = await create_account_helper(async_client, token, comp_id, email="support38@test.com")
+
+    # 1. Inbox unread email
+    await create_email_record(db_session, comp_id, acc_id, is_read=False, is_deleted=False)
+    # 2. Inbox read email
+    await create_email_record(db_session, comp_id, acc_id, is_read=True, is_deleted=False)
+    # 3. Sent email
+    await create_email_record(
+        db_session, comp_id, acc_id,
+        direction=EmailDirection.OUTGOING.value,
+        status=EmailStatus.SENT.value,
+        is_deleted=False,
+    )
+    # 4. Bounced email
+    await create_email_record(
+        db_session, comp_id, acc_id,
+        direction=EmailDirection.OUTGOING.value,
+        status=EmailStatus.BOUNCED.value,
+        is_deleted=False,
+    )
+    # 5. Soft-deleted (Trash) email
+    await create_email_record(
+        db_session, comp_id, acc_id,
+        is_deleted=True,
+        is_read=False,  # Should not be counted in unread
+    )
+    # 6. Response email (incoming in thread with has_reply=True)
+    th = await create_thread_record(db_session, comp_id, acc_id, has_reply=True)
+    await create_email_record(
+        db_session, comp_id, acc_id,
+        direction=EmailDirection.INCOMING.value,
+        status=EmailStatus.RECEIVED.value,
+        thread_id=th.id,
+        is_read=True,
+        is_deleted=False,
+    )
+
+    resp = await async_client.get(
+        "/api/v1/emails/counts",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["inbox"] == 3       # 2 regular incoming + 1 response incoming
+    assert data["unread"] == 1      # Only the active non-deleted unread email
+    assert data["sent"] == 1
+    assert data["drafts"] == 0
+    assert data["bounced"] == 1
+    assert data["responses"] == 1
+    assert data["trash"] == 1
+
+
+@pytest.mark.asyncio
+async def test_39_mailbox_counts_company_isolation(async_client: AsyncClient, db_session: AsyncSession):
+    """39. GET /api/v1/emails/counts respects multi-tenant company isolation."""
+    # Company A setup
+    token_a = await register_and_login(async_client, "user39a@test.com")
+    comp_a = await create_company_helper(async_client, token_a, "Co 39A")
+    acc_a = await create_account_helper(async_client, token_a, comp_a, email="support39a@test.com")
+    await create_email_record(db_session, comp_a, acc_a, is_read=False)
+
+    # Company B setup
+    token_b = await register_and_login(async_client, "user39b@test.com")
+    comp_b = await create_company_helper(async_client, token_b, "Co 39B")
+    acc_b = await create_account_helper(async_client, token_b, comp_b, email="support39b@test.com")
+
+    # Co B sees 0 emails
+    resp_b = await async_client.get(
+        "/api/v1/emails/counts",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert resp_b.status_code == 200
+    assert resp_b.json()["inbox"] == 0
+    assert resp_b.json()["unread"] == 0
+
+    # Co A sees 1 email
+    resp_a = await async_client.get(
+        "/api/v1/emails/counts",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert resp_a.status_code == 200
+    assert resp_a.json()["inbox"] == 1
+    assert resp_a.json()["unread"] == 1
+

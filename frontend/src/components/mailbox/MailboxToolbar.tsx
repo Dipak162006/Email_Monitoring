@@ -9,6 +9,8 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronDown,
+  RotateCcw,
+  Loader2,
 } from "lucide-react";
 import type { AuthorizedEmailAccount } from "../../types/emails";
 
@@ -24,6 +26,10 @@ interface MailboxToolbarProps {
   onBulkMarkRead: (read: boolean) => void;
   onBulkArchive: () => void;
   onBulkDelete: () => void;
+  // Restore (Trash folder)
+  isTrash?: boolean;
+  onRestore?: () => void;
+  isRestoring?: boolean;
   // Account filter
   accounts: AuthorizedEmailAccount[];
   selectedAccountId?: number;
@@ -48,6 +54,9 @@ export const MailboxToolbar: React.FC<MailboxToolbarProps> = ({
   onBulkMarkRead,
   onBulkArchive,
   onBulkDelete,
+  isTrash = false,
+  onRestore,
+  isRestoring = false,
   accounts,
   selectedAccountId,
   onAccountChange,
@@ -96,7 +105,25 @@ export const MailboxToolbar: React.FC<MailboxToolbarProps> = ({
         <div className="h-4 w-px bg-slate-200 mx-1 hidden sm:block" />
 
         {/* Action Icon Buttons */}
-        <div className="flex items-center gap-0.5 text-slate-500">
+        <div className="flex items-center gap-1 text-slate-500">
+          {isTrash && (
+            <button
+              type="button"
+              disabled={!hasSelection || isRestoring}
+              onClick={onRestore}
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 hover:text-indigo-800 transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shadow-2xs mr-1"
+              title={hasSelection ? `Restore ${selectedCount} selected email(s) to Inbox` : "Select emails to restore"}
+              aria-label="Restore selected emails"
+            >
+              {isRestoring ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RotateCcw className="h-3.5 w-3.5" />
+              )}
+              <span>Restore{selectedCount > 0 ? ` (${selectedCount})` : ""}</span>
+            </button>
+          )}
+
           <button
             type="button"
             disabled={!hasSelection}

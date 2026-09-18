@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import logging
 from typing import List, Optional, Tuple
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.emails.models import Email, EmailDirection, EmailStatus, EmailThread
 from app.modules.emails.schemas import VALID_FOLDERS
@@ -286,3 +286,80 @@ class EmailMailboxService:
                     await cls.recalculate_thread_read_state(db, thread_id)
 
         await db.commit()
+
+    @classmethod
+    async def get_mailbox_counts(
+        cls,
+        db: AsyncSession,
+        company_id: Optional[int] = None,
+        company_ids: Optional[List[int]] = None,
+        email_account_id: Optional[int] = None,
+        email_account_ids: Optional[List[int]] = None,
+    ) -> dict:
+        """Calculate exact live email counts across all mailbox folders and unread telemetry."""
+        # 1. Base scoping conditions
+        acc_cond = None
+        if email_account_id is not None:
+            acc_cond = (Email.email_account_id == email_account_id)
+        elif email_account_ids is not None:
+            if not email_account_ids:
+                return {"inbox": 0, "unread": 0, "sent": 0, "drafts": 0, "responses": 0, "bounced": 0, "trash": 0}
+            acc_cond = (Email.email_account_id.in_(email_account_ids))
+
+        comp_cond = None
+        if company_id is not None:
+            comp_cond = (Email.company_id == company_id)
+        elif company_ids is not None:
+            if not company_ids:
+                return {"inbox": 0, "unread": 0, "sent": 0, "drafts": 0, "responses": 0, "bounced": 0, "trash": 0}
+            comp_cond = (Email.company_id.in_(company_ids))
+        elif email_account_id is None and email_account_ids is None:
+            return {"inbox": 0, "unread": 0, "sent": 0, "drafts": 0, "responses": 0, "bounced": 0, "trash": 0}
+
+        base_conds = []
+        if acc_cond is not None:
+            base_conds.append(acc_cond)
+        if comp_cond is not None:
+            base_conds.append(comp_cond)
+
+        # Primary query using conditional aggregation
+        stmt = select(
+            func.count(case((and_(Email.direction == EmailDirection.INCOMING.value, Email.status == EmailStatus.RECEIVED.value, Email.is_deleted == False), Email.id))),
+            func.count(case((and_(Email.direction == EmailDirection.INCOMING.value, Email.status == EmailStatus.RECEIVED.value, Email.is_read == False, Email.is_deleted == False), Email.id))),
+            func.count(case((and_(Email.direction == EmailDirection.OUTGOING.value, Email.status == EmailStatus.SENT.value, Email.is_deleted == False), Email.id))),
+            func.count(case((and_(Email.direction == EmailDirection.OUTGOING.value, Email.status == EmailStatus.DRAFT.value, Email.is_deleted == False), Email.id))),
+            func.count(case((and_(Email.status == EmailStatus.BOUNCED.value, Email.is_deleted == False), Email.id))),
+            func.count(case((Email.is_deleted == True, Email.id))),
+        )
+        if base_conds:
+            stmt = stmt.where(*base_conds)
+
+        res = await db.execute(stmt)
+        inbox, unread, sent, drafts, bounced, trash = res.one()
+
+        # Responses query (joined with EmailThread)
+        resp_stmt = (
+            select(func.count(Email.id))
+            .join(EmailThread, Email.thread_id == EmailThread.id)
+            .where(
+                Email.direction == EmailDirection.INCOMING.value,
+                EmailThread.has_reply == True,
+                Email.is_deleted == False,
+            )
+        )
+        if base_conds:
+            resp_stmt = resp_stmt.where(*base_conds)
+
+        resp_res = await db.execute(resp_stmt)
+        responses = resp_res.scalar() or 0
+
+        return {
+            "inbox": inbox or 0,
+            "unread": unread or 0,
+            "sent": sent or 0,
+            "drafts": drafts or 0,
+            "responses": responses or 0,
+            "bounced": bounced or 0,
+            "trash": trash or 0,
+        }
+

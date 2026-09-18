@@ -664,3 +664,15 @@ class AccountHealthResponse(BaseModel):
     syncing_accounts: int = Field(default=0)
     last_synced_at: Optional[datetime] = None
     accounts: List[AccountHealthItem] = Field(default_factory=list)
+
+
+class MailboxCountsResponse(BaseModel):
+    """Aggregated real-time counts across mailbox folders and unread telemetry."""
+    inbox: int = Field(default=0, description="Total active incoming received emails")
+    unread: int = Field(default=0, description="Total active unread incoming emails in inbox")
+    sent: int = Field(default=0, description="Total active outgoing sent emails")
+    drafts: int = Field(default=0, description="Total active outgoing draft emails")
+    responses: int = Field(default=0, description="Total active customer replies in replied threads")
+    bounced: int = Field(default=0, description="Total active bounced delivery failures")
+    trash: int = Field(default=0, description="Total soft-deleted emails in trash")
+

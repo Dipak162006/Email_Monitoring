@@ -12,6 +12,7 @@ import {
   Users,
   Code,
   FileText,
+  RotateCcw,
 } from "lucide-react";
 import type { EmailItem } from "../../types/emails";
 import { emailsApi } from "../../services/api";
@@ -22,6 +23,7 @@ import DOMPurify from "dompurify";
 interface EmailDetailDrawerProps {
   email: EmailItem | null;
   onClose: () => void;
+  onRestore?: (id: number) => void;
 }
 
 function formatEmailTime(dateString?: string | null): string {
@@ -44,7 +46,7 @@ function formatEmailTime(dateString?: string | null): string {
   return `${timeStr} (${relStr})`;
 }
 
-export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({ email, onClose }) => {
+export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({ email, onClose, onRestore }) => {
   const [viewMode, setViewMode] = useState<"html" | "text">("html");
 
   // Escape key handler
@@ -221,24 +223,37 @@ export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({ email, onC
         {/* Drawer Footer Actions (Always fixed and visible at the bottom of drawer) */}
         <div className="shrink-0 bg-white border-t border-slate-200 px-6 py-3.5 sm:py-4 flex items-center justify-between shadow-xs z-10">
           <div className="flex items-center gap-2.5">
-            <Link to={`/compose?reply_to=${email.id}`}>
+            {email.is_deleted && onRestore ? (
               <button
                 type="button"
+                onClick={() => onRestore(email.id)}
                 className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
               >
-                <Reply className="h-3.5 w-3.5" />
-                Reply
+                <RotateCcw className="h-3.5 w-3.5" />
+                Restore to Inbox
               </button>
-            </Link>
-            <Link to={`/compose?forward=${email.id}`}>
-              <button
-                type="button"
-                className="px-4 py-2 rounded-lg bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
-              >
-                <CornerUpRight className="h-3.5 w-3.5" />
-                Forward
-              </button>
-            </Link>
+            ) : (
+              <>
+                <Link to={`/compose?reply_to=${email.id}`}>
+                  <button
+                    type="button"
+                    className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                  >
+                    <Reply className="h-3.5 w-3.5" />
+                    Reply
+                  </button>
+                </Link>
+                <Link to={`/compose?forward=${email.id}`}>
+                  <button
+                    type="button"
+                    className="px-4 py-2 rounded-lg bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                  >
+                    <CornerUpRight className="h-3.5 w-3.5" />
+                    Forward
+                  </button>
+                </Link>
+              </>
+            )}
           </div>
 
           <button
