@@ -1,7 +1,6 @@
 import {
   Star,
   Paperclip,
-  Archive,
   Mail,
   MailOpen,
   Trash2,
@@ -19,7 +18,6 @@ interface EmailRowProps {
   onDelete?: (id: number) => void;
   onMoveToTrash?: (id: number) => void;
   onPermanentDelete?: (id: number) => void;
-  onArchive?: (id: number) => void;
   onRestore?: (id: number) => void;
   onClick: (email: EmailItem) => void;
 }
@@ -77,7 +75,6 @@ export const EmailRow: React.FC<EmailRowProps> = ({
   onDelete,
   onMoveToTrash,
   onPermanentDelete,
-  onArchive,
   onRestore,
   onClick,
 }) => {
@@ -248,28 +245,15 @@ export const EmailRow: React.FC<EmailRowProps> = ({
             </button>
           </>
         ) : (
-          <>
-            {onArchive && (
-              <button
-                type="button"
-                onClick={() => onArchive(email.id)}
-                className="p-1 rounded text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
-                title="Archive"
-                aria-label="Archive email"
-              >
-                <Archive className="h-4 w-4" />
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => (onMoveToTrash ? onMoveToTrash(email.id) : onDelete?.(email.id))}
-              className="p-1 rounded text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
-              title="Move to Trash"
-              aria-label="Move email to trash"
-            >
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </>
+          <button
+            type="button"
+            onClick={() => (onMoveToTrash ? onMoveToTrash(email.id) : onDelete?.(email.id))}
+            className="p-1 rounded text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+            title="Move to Trash"
+            aria-label="Move email to trash"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
         )}
       </div>
     </div>

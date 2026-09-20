@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Inbox, AlertCircle, CheckCircle2, Info, X } from "lucide-react";
 import { emailsApi, emailAccountsApi } from "../services/api";
@@ -17,6 +17,7 @@ const PAGE_SIZE = 25;
 
 export function MailboxPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   // Active folder from URL search params (default to "inbox")
@@ -30,12 +31,22 @@ export function MailboxPage() {
 
   // Local state
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
   const [selectedAccountId, setSelectedAccountId] = useState<number | undefined>(undefined);
+  const [sortBy, setSortBy] = useState<"newest" | "oldest">("newest");
   const [unreadOnly, setUnreadOnly] = useState<boolean | undefined>(undefined);
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [selectedEmail, setSelectedEmail] = useState<EmailItem | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
+
+  // Debounce search query updates by ~300ms to avoid firing API requests on every keystroke
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   // Restore & Permanent Delete modal state
   const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
@@ -67,12 +78,13 @@ export function MailboxPage() {
     setSelectedEmail(null);
     setUnreadOnly(undefined);
     setSearchQuery("");
+    setDebouncedSearchQuery("");
   }, [activeFolder]);
 
-  // Fetch Mailbox dynamic counts
+  // Fetch Mailbox dynamic counts scoped to the selected email account
   const { data: mailboxCounts, refetch: refetchCounts } = useQuery({
-    queryKey: ["mailbox-counts"],
-    queryFn: () => emailsApi.getMailboxCounts(),
+    queryKey: ["mailbox-counts", selectedAccountId],
+    queryFn: () => emailsApi.getMailboxCounts(undefined, selectedAccountId),
     staleTime: 30000,
   });
 
@@ -87,14 +99,14 @@ export function MailboxPage() {
   const listParams: EmailListParams = useMemo(() => {
     return {
       folder: activeFolder,
-      search: searchQuery.trim() || undefined,
+      search: debouncedSearchQuery.trim() || undefined,
       emailAccountId: selectedAccountId,
       isRead: unreadOnly ? false : undefined,
       limit: PAGE_SIZE,
       offset: (currentPage - 1) * PAGE_SIZE,
-      sort: "newest",
+      sort: sortBy,
     };
-  }, [activeFolder, searchQuery, selectedAccountId, unreadOnly, currentPage]);
+  }, [activeFolder, debouncedSearchQuery, selectedAccountId, unreadOnly, currentPage, sortBy]);
 
   // Fetch email list
   const {
@@ -135,6 +147,13 @@ export function MailboxPage() {
   const selectedCount = currentSelectedIds.size;
   const isAllSelected = emails.length > 0 && currentSelectedIds.size === emails.length;
   const isSomeSelected = currentSelectedIds.size > 0 && !isAllSelected;
+
+  // Determine whether all currently selected visible emails are starred
+  const isAllSelectedStarred = useMemo(() => {
+    if (currentSelectedIds.size === 0) return false;
+    const selected = emails.filter((e) => currentSelectedIds.has(e.id));
+    return selected.length > 0 && selected.every((e) => e.is_starred);
+  }, [emails, currentSelectedIds]);
 
   // Selection Logic
   const handleToggleSelectAll = () => {
@@ -288,20 +307,19 @@ export function MailboxPage() {
     }
   };
 
-  // Safe Archive Action (Backend has no archive; clearly inform user without moving to Trash)
-  const handleArchivePrompt = () => {
-    setAlertBanner({
-      type: "info",
-      message: "Archiving is not supported. Use Trash to remove messages from active folders.",
-    });
-  };
-
   // Bulk Star & Read Handlers
   const handleBulkStar = async () => {
     const ids = Array.from(currentSelectedIds);
     if (ids.length === 0) return;
-    await Promise.all(ids.map((id) => emailsApi.markStarred(id, true)));
+    const targetStarredState = !isAllSelectedStarred;
+    await Promise.all(ids.map((id) => emailsApi.markStarred(id, targetStarredState)));
     queryClient.invalidateQueries({ queryKey: ["emails"] });
+    setAlertBanner({
+      type: "success",
+      message: targetStarredState
+        ? (ids.length === 1 ? "Email starred." : `${ids.length} emails starred.`)
+        : (ids.length === 1 ? "Email unstarred." : `${ids.length} emails unstarred.`),
+    });
   };
 
   const handleBulkMarkRead = async (isRead: boolean) => {
@@ -557,8 +575,8 @@ export function MailboxPage() {
           totalVisibleCount={emails.length}
           onToggleSelectAll={handleToggleSelectAll}
           onBulkStar={handleBulkStar}
+          isAllSelectedStarred={isAllSelectedStarred}
           onBulkMarkRead={handleBulkMarkRead}
-          onBulkArchive={handleArchivePrompt}
           onBulkMoveToTrash={handleBulkMoveToTrash}
           isTrash={activeFolder === "trash"}
           onRestore={handleRestorePrompt}
@@ -568,8 +586,11 @@ export function MailboxPage() {
           accounts={authorizedAccounts}
           selectedAccountId={selectedAccountId}
           onAccountChange={handleAccountChange}
+          sortBy={sortBy}
+          onSortChange={setSortBy}
           searchQuery={searchQuery}
           onSearchChange={handleSearchChange}
+          folderTitle={folderTitle}
           currentPage={currentPage}
           pageSize={PAGE_SIZE}
           totalCount={totalEmails}
@@ -632,15 +653,29 @@ export function MailboxPage() {
                 icon={<Inbox className="h-8 w-8 text-indigo-500" />}
                 title={`No messages in ${folderTitle}`}
                 description={
-                  searchQuery
-                    ? `No messages matched your search term "${searchQuery}".`
+                  debouncedSearchQuery
+                    ? `No messages matched your search term "${debouncedSearchQuery}".`
+                    : activeFolder === "trash"
+                    ? "Your trash folder is currently empty."
+                    : activeFolder === "drafts"
+                    ? "You have no saved drafts. Compose a message to create one."
                     : `Your ${folderTitle.toLowerCase()} folder is currently empty. Connect an account or trigger sync to ingest emails.`
                 }
-                actionLabel={searchQuery ? "Clear Search" : "Sync Mailbox"}
+                actionLabel={
+                  searchQuery
+                    ? "Clear Search"
+                    : activeFolder === "drafts"
+                    ? "Compose Email"
+                    : activeFolder === "trash"
+                    ? undefined
+                    : "Sync Mailbox"
+                }
                 onAction={() => {
                   if (searchQuery) {
                     handleSearchChange("");
-                  } else {
+                  } else if (activeFolder === "drafts") {
+                    navigate("/compose");
+                  } else if (activeFolder !== "trash") {
                     handleSync();
                   }
                 }}
@@ -660,7 +695,6 @@ export function MailboxPage() {
                 onToggleRead={handleToggleRead}
                 onMoveToTrash={handleMoveToTrashSingle}
                 onPermanentDelete={(id) => handlePermanentDeletePrompt(id)}
-                onArchive={handleArchivePrompt}
                 onRestore={handleRestoreSingle}
                 onClick={handleEmailClick}
               />

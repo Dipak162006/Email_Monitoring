@@ -141,7 +141,9 @@ export function AppLayout() {
     if (targetQuery) {
       const targetParams = new URLSearchParams(targetQuery);
       const targetFolder = targetParams.get("folder");
-      const currentFolder = new URLSearchParams(location.search).get("folder");
+      const currentFolder =
+        new URLSearchParams(location.search).get("folder") ||
+        (location.pathname === "/mailbox" ? "inbox" : null);
       return location.pathname === targetPath && currentFolder === targetFolder;
     }
     if (href === "/dashboard") {

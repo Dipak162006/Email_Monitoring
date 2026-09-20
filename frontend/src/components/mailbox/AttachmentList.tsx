@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { FileText, FileCode, Image, File, Download, Loader2 } from "lucide-react";
+import { FileText, FileCode, Image, File, Download, Loader2, AlertCircle, X } from "lucide-react";
 import type { AttachmentItem } from "../../types/emails";
 import { emailsApi } from "../../services/api";
 
@@ -42,6 +42,7 @@ function getFileIcon(fileName: string, contentType: string) {
 
 export const AttachmentList: React.FC<AttachmentListProps> = ({ emailId, attachments }) => {
   const [downloadingId, setDownloadingId] = useState<number | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   if (!attachments || attachments.length === 0) {
     return null;
@@ -49,6 +50,7 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({ emailId, attachm
 
   const handleDownload = async (attachment: AttachmentItem) => {
     try {
+      setDownloadError(null);
       setDownloadingId(attachment.id);
       const blob = await emailsApi.downloadAttachment(emailId, attachment.id);
       const url = window.URL.createObjectURL(blob);
@@ -61,6 +63,7 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({ emailId, attachm
       window.URL.revokeObjectURL(url);
     } catch (err) {
       console.error("Failed to download attachment:", err);
+      setDownloadError(`Failed to download ${attachment.file_name}. Please try again.`);
     } finally {
       setDownloadingId(null);
     }
@@ -71,6 +74,23 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({ emailId, attachm
       <span className="text-xs uppercase tracking-wider text-slate-500 font-semibold">
         Attachments ({attachments.length} {attachments.length === 1 ? "File" : "Files"})
       </span>
+
+      {downloadError && (
+        <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <AlertCircle className="h-3.5 w-3.5 text-rose-600 shrink-0" />
+            <span className="truncate">{downloadError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setDownloadError(null)}
+            className="p-1 rounded text-rose-400 hover:text-rose-600 cursor-pointer shrink-0"
+            aria-label="Dismiss download error"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
         {attachments.map((att) => {
           const isDownloading = downloadingId === att.id;

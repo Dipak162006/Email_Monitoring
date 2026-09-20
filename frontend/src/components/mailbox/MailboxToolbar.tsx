@@ -3,7 +3,6 @@ import {
   Star,
   Mail,
   MailOpen,
-  Archive,
   Trash2,
   Search,
   ChevronLeft,
@@ -23,8 +22,8 @@ interface MailboxToolbarProps {
   onToggleSelectAll: () => void;
   // Bulk Actions
   onBulkStar: () => void;
+  isAllSelectedStarred?: boolean;
   onBulkMarkRead: (read: boolean) => void;
-  onBulkArchive?: () => void;
   onBulkMoveToTrash?: () => void;
   // Trash folder actions
   isTrash?: boolean;
@@ -36,9 +35,13 @@ interface MailboxToolbarProps {
   accounts: AuthorizedEmailAccount[];
   selectedAccountId?: number;
   onAccountChange: (accountId?: number) => void;
+  // Sorting
+  sortBy?: "newest" | "oldest";
+  onSortChange?: (sort: "newest" | "oldest") => void;
   // Search
   searchQuery: string;
   onSearchChange: (query: string) => void;
+  folderTitle?: string;
   // Pagination
   currentPage: number;
   pageSize: number;
@@ -53,8 +56,8 @@ export const MailboxToolbar: React.FC<MailboxToolbarProps> = ({
   totalVisibleCount,
   onToggleSelectAll,
   onBulkStar,
+  isAllSelectedStarred = false,
   onBulkMarkRead,
-  onBulkArchive,
   onBulkMoveToTrash,
   isTrash = false,
   onRestore,
@@ -64,8 +67,11 @@ export const MailboxToolbar: React.FC<MailboxToolbarProps> = ({
   accounts,
   selectedAccountId,
   onAccountChange,
+  sortBy = "newest",
+  onSortChange,
   searchQuery,
   onSearchChange,
+  folderTitle,
   currentPage,
   pageSize,
   totalCount,
@@ -132,11 +138,13 @@ export const MailboxToolbar: React.FC<MailboxToolbarProps> = ({
                 type="button"
                 disabled={!hasSelection}
                 onClick={onBulkStar}
-                className="p-1.5 rounded-md hover:text-amber-500 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
-                title="Star selected"
-                aria-label="Star selected emails"
+                className={`p-1.5 rounded-md hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed ${
+                  isAllSelectedStarred ? "text-amber-500 hover:text-amber-600" : "text-slate-500 hover:text-amber-500"
+                }`}
+                title={isAllSelectedStarred ? "Unstar selected" : "Star selected"}
+                aria-label={isAllSelectedStarred ? "Unstar selected emails" : "Star selected emails"}
               >
-                <Star className="h-4 w-4" />
+                <Star className="h-4 w-4" fill={isAllSelectedStarred ? "currentColor" : "none"} />
               </button>
 
               <button
@@ -183,11 +191,13 @@ export const MailboxToolbar: React.FC<MailboxToolbarProps> = ({
                 type="button"
                 disabled={!hasSelection}
                 onClick={onBulkStar}
-                className="p-1.5 rounded-md hover:text-amber-500 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
-                title="Star selected"
-                aria-label="Star selected emails"
+                className={`p-1.5 rounded-md hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed ${
+                  isAllSelectedStarred ? "text-amber-500 hover:text-amber-600" : "text-slate-500 hover:text-amber-500"
+                }`}
+                title={isAllSelectedStarred ? "Unstar selected" : "Star selected"}
+                aria-label={isAllSelectedStarred ? "Unstar selected emails" : "Star selected emails"}
               >
-                <Star className="h-4 w-4" />
+                <Star className="h-4 w-4" fill={isAllSelectedStarred ? "currentColor" : "none"} />
               </button>
 
               <button
@@ -215,17 +225,6 @@ export const MailboxToolbar: React.FC<MailboxToolbarProps> = ({
               <button
                 type="button"
                 disabled={!hasSelection}
-                onClick={onBulkArchive}
-                className="p-1.5 rounded-md hover:text-slate-900 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
-                title="Archive"
-                aria-label="Archive selected emails"
-              >
-                <Archive className="h-4 w-4" />
-              </button>
-
-              <button
-                type="button"
-                disabled={!hasSelection}
                 onClick={onBulkMoveToTrash}
                 className="p-1.5 rounded-md hover:text-rose-600 hover:bg-rose-50 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
                 title="Move to Trash"
@@ -238,7 +237,7 @@ export const MailboxToolbar: React.FC<MailboxToolbarProps> = ({
         </div>
       </div>
 
-      {/* Right: Account Filter, Local Search & Pagination Controls */}
+      {/* Right: Account Filter, Sort, Local Search & Pagination Controls */}
       <div className="flex items-center gap-3 flex-wrap lg:flex-nowrap">
         {/* Account Filter Dropdown */}
         <div className="relative">
@@ -260,6 +259,22 @@ export const MailboxToolbar: React.FC<MailboxToolbarProps> = ({
           <ChevronDown className="h-3.5 w-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
         </div>
 
+        {/* Sort Dropdown */}
+        {onSortChange && (
+          <div className="relative">
+            <select
+              value={sortBy}
+              onChange={(e) => onSortChange(e.target.value as "newest" | "oldest")}
+              className="appearance-none bg-slate-50 border border-slate-200 text-slate-700 text-xs font-medium py-1.5 pl-3 pr-7 rounded-lg shadow-2xs hover:border-slate-300 focus:bg-white focus:outline-none focus:ring-1 focus:ring-indigo-600 focus:border-indigo-600 cursor-pointer transition-colors"
+              aria-label="Sort order"
+            >
+              <option value="newest">Newest First</option>
+              <option value="oldest">Oldest First</option>
+            </select>
+            <ChevronDown className="h-3.5 w-3.5 text-slate-400 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+          </div>
+        )}
+
         {/* Mailbox Search Input */}
         <div className="relative">
           <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -267,7 +282,7 @@ export const MailboxToolbar: React.FC<MailboxToolbarProps> = ({
             type="text"
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search inbox..."
+            placeholder={folderTitle ? `Search ${folderTitle.toLowerCase()}...` : "Search messages..."}
             className="w-44 lg:w-56 bg-slate-50 border border-slate-200 text-slate-800 placeholder-slate-400 rounded-lg pl-8 pr-3 py-1.5 text-xs focus:bg-white focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 outline-none transition-all"
           />
         </div>

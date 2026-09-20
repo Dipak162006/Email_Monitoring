@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -16,12 +16,17 @@ import {
   Code,
   FileText,
   AlertCircle,
+  RotateCcw,
+  CheckCircle2,
+  X,
 } from "lucide-react";
 import { emailsApi } from "../services/api";
 import { Card, CardContent } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { AttachmentList } from "../components/mailbox/AttachmentList";
 import { EmailConversation } from "../components/mailbox/EmailConversation";
+import { RestoreConfirmModal } from "../components/mailbox/RestoreConfirmModal";
+import { PermanentDeleteConfirmModal } from "../components/mailbox/PermanentDeleteConfirmModal";
 import DOMPurify from "dompurify";
 
 export function EmailDetailPage() {
@@ -30,7 +35,13 @@ export function EmailDetailPage() {
   const queryClient = useQueryClient();
   const [viewMode, setViewMode] = useState<"html" | "text">("html");
 
+  // Modals and feedback state
+  const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
+  const [isPermanentDeleteModalOpen, setIsPermanentDeleteModalOpen] = useState(false);
+  const [alertBanner, setAlertBanner] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
   const id = Number(emailId);
+  const hasMarkedReadRef = useRef<number | null>(null);
 
   // Fetch email details
   const {
@@ -45,6 +56,14 @@ export function EmailDetailPage() {
     staleTime: 30000,
   });
 
+  // Automatically mark unread email as read once opened
+  useEffect(() => {
+    if (email && !email.is_read && hasMarkedReadRef.current !== email.id) {
+      hasMarkedReadRef.current = email.id;
+      markReadMutation.mutate(true);
+    }
+  }, [email?.id, email?.is_read]);
+
   // Fetch attachments
   const { data: attachmentsData } = useQuery({
     queryKey: ["email-attachments", id],
@@ -58,6 +77,7 @@ export function EmailDetailPage() {
     mutationFn: (isRead: boolean) => emailsApi.markRead(id, isRead),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["email-detail", id] });
+      queryClient.invalidateQueries({ queryKey: ["emails"] });
       queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
     },
   });
@@ -66,6 +86,7 @@ export function EmailDetailPage() {
     mutationFn: (isStarred: boolean) => emailsApi.markStarred(id, isStarred),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["email-detail", id] });
+      queryClient.invalidateQueries({ queryKey: ["emails"] });
     },
   });
 
@@ -75,6 +96,38 @@ export function EmailDetailPage() {
       queryClient.invalidateQueries({ queryKey: ["emails"] });
       queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
       navigate("/mailbox");
+    },
+    onError: () => {
+      setAlertBanner({ type: "error", message: "Failed to move email to Trash. Please try again." });
+    },
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: () => emailsApi.restore(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["email-detail", id] });
+      queryClient.invalidateQueries({ queryKey: ["emails"] });
+      queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+      setIsRestoreModalOpen(false);
+      setAlertBanner({ type: "success", message: "Email successfully restored to Inbox." });
+    },
+    onError: () => {
+      setIsRestoreModalOpen(false);
+      setAlertBanner({ type: "error", message: "Failed to restore email. Please try again." });
+    },
+  });
+
+  const permanentDeleteMutation = useMutation({
+    mutationFn: () => emailsApi.permanentDelete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["emails"] });
+      queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+      setIsPermanentDeleteModalOpen(false);
+      navigate("/mailbox?folder=trash");
+    },
+    onError: () => {
+      setIsPermanentDeleteModalOpen(false);
+      setAlertBanner({ type: "error", message: "Failed to permanently delete email." });
     },
   });
 
@@ -152,31 +205,88 @@ export function EmailDetailPage() {
             {email.is_read ? <Mail className="h-4 w-4" /> : <MailOpen className="h-4 w-4" />}
           </button>
 
-          <Link to={`/compose?reply_to=${email.id}`}>
-            <Button variant="outline" size="sm" className="gap-1.5">
-              <Reply className="h-3.5 w-3.5" />
-              Reply
-            </Button>
-          </Link>
+          {email.is_deleted ? (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setIsRestoreModalOpen(true)}
+                disabled={restoreMutation.isPending}
+                className="gap-1.5 text-indigo-600 hover:bg-indigo-50 border-indigo-200"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Restore to Inbox
+              </Button>
 
-          <Link to={`/compose?forward=${email.id}`}>
-            <Button variant="outline" size="sm" className="gap-1.5">
-              <CornerUpRight className="h-3.5 w-3.5" />
-              Forward
-            </Button>
-          </Link>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setIsPermanentDeleteModalOpen(true)}
+                disabled={permanentDeleteMutation.isPending}
+                className="gap-1.5 text-rose-600 hover:bg-rose-50 border-rose-200"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Delete Permanently
+              </Button>
+            </>
+          ) : (
+            <>
+              <Link to={`/compose?reply_to=${email.id}`}>
+                <Button variant="outline" size="sm" className="gap-1.5">
+                  <Reply className="h-3.5 w-3.5" />
+                  Reply
+                </Button>
+              </Link>
 
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => deleteMutation.mutate()}
-            className="gap-1.5 text-rose-600 hover:bg-rose-50 border-slate-200"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            Delete
-          </Button>
+              <Link to={`/compose?forward=${email.id}`}>
+                <Button variant="outline" size="sm" className="gap-1.5">
+                  <CornerUpRight className="h-3.5 w-3.5" />
+                  Forward
+                </Button>
+              </Link>
+
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => deleteMutation.mutate()}
+                disabled={deleteMutation.isPending}
+                className="gap-1.5 text-rose-600 hover:bg-rose-50 border-slate-200"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Move to Trash
+              </Button>
+            </>
+          )}
         </div>
       </div>
+
+      {/* Operation Feedback Alert Banner */}
+      {alertBanner && (
+        <div
+          className={`flex items-center justify-between px-4 py-3 rounded-xl border text-xs font-medium transition-all ${
+            alertBanner.type === "success"
+              ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+              : "bg-rose-50 border-rose-200 text-rose-800"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {alertBanner.type === "success" ? (
+              <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
+            )}
+            <span>{alertBanner.message}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setAlertBanner(null)}
+            className="p-1 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-200/50 cursor-pointer"
+            aria-label="Dismiss message"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Main Email Display Card */}
       <Card className="border-slate-200 shadow-2xs overflow-hidden">
@@ -277,6 +387,28 @@ export function EmailDetailPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Restore Confirmation Modal */}
+      <RestoreConfirmModal
+        isOpen={isRestoreModalOpen}
+        count={1}
+        isRestoring={restoreMutation.isPending}
+        onClose={() => {
+          if (!restoreMutation.isPending) setIsRestoreModalOpen(false);
+        }}
+        onConfirm={() => restoreMutation.mutate()}
+      />
+
+      {/* Permanent Delete Confirmation Modal */}
+      <PermanentDeleteConfirmModal
+        isOpen={isPermanentDeleteModalOpen}
+        count={1}
+        isDeleting={permanentDeleteMutation.isPending}
+        onClose={() => {
+          if (!permanentDeleteMutation.isPending) setIsPermanentDeleteModalOpen(false);
+        }}
+        onConfirm={() => permanentDeleteMutation.mutate()}
+      />
     </div>
   );
 }
