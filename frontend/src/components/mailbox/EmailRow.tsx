@@ -83,7 +83,7 @@ export const EmailRow: React.FC<EmailRowProps> = ({
   const isOutgoing = email.direction === "OUTGOING";
   const initials = getSenderInitials(email.sender);
   const avatarColor = getAvatarColor(email.sender);
-  const formattedTime = formatTimestamp(email.sent_at || email.received_at || email.created_at);
+  const formattedTime = formatTimestamp(email.received_at || email.sent_at || email.created_at);
 
   const cleanSnippet = email.body_text
     ? email.body_text.replace(/\s+/g, " ").trim().slice(0, 110)
@@ -165,7 +165,7 @@ export const EmailRow: React.FC<EmailRowProps> = ({
             >
               {email.subject || "(No Subject)"}
             </span>
-            {email.thread_id && (
+            {(email.attachment_count ?? 0) > 0 && (
               <span className="flex items-center text-slate-400 text-xs shrink-0 ml-1">
                 <Paperclip className="h-3 w-3" />
               </span>
