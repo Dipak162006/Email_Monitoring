@@ -49,7 +49,6 @@ from app.modules.emails.schemas import (
     ThreadListResponse,
 )
 from app.modules.emails.service import EmailService
-from app.workers.tasks import sync_email_account_task
 from app.modules.emails.signature_service import SignatureService
 from app.modules.emails.sync_service import EmailSyncService
 from app.modules.emails.template_service import EmailTemplateService
@@ -412,7 +411,7 @@ async def list_emails(
             target_account_id = None
             target_account_ids = accessible_acc_ids
 
-        emails, total = await EmailMailboxService.list_emails(
+        emails, total, att_counts = await EmailMailboxService.list_emails(
             db=db,
             company_id=company_id,
             email_account_id=target_account_id,
@@ -433,7 +432,7 @@ async def list_emails(
         # Cross-company listing for current user's authorized accounts
         if email_account_id is not None:
             account = await verify_user_can_access_account(db, current_user, email_account_id)
-            emails, total = await EmailMailboxService.list_emails(
+            emails, total, att_counts = await EmailMailboxService.list_emails(
                 db=db,
                 company_id=account.company_id,
                 email_account_id=account.id,
@@ -464,7 +463,7 @@ async def list_emails(
             if not all_acc_ids:
                 return EmailListResponse(emails=[], total=0, limit=limit, offset=offset)
 
-            emails, total = await EmailMailboxService.list_emails(
+            emails, total, att_counts = await EmailMailboxService.list_emails(
                 db=db,
                 company_ids=[comp.id for comp, _ in user_companies],
                 email_account_ids=all_acc_ids,
@@ -482,7 +481,10 @@ async def list_emails(
             )
 
     return EmailListResponse(
-        emails=[EmailRead.model_validate(e) for e in emails],
+        emails=[
+            EmailRead.model_validate(e).model_copy(update={"attachment_count": att_counts.get(e.id, 0)})
+            for e in emails
+        ],
         total=total,
         limit=limit,
         offset=offset,
@@ -840,6 +842,7 @@ async def sync_email_account(
     is_background = background or req.background
 
     if is_background:
+        from app.workers.tasks import sync_email_account_task
         task = sync_email_account_task.delay(
             account_id=account.id,
             folder=req.folder,
@@ -890,6 +893,7 @@ async def sync_company_email_account(
     is_background = background or req.background
 
     if is_background:
+        from app.workers.tasks import sync_email_account_task
         task = sync_email_account_task.delay(
             account_id=account.id,
             folder=req.folder,

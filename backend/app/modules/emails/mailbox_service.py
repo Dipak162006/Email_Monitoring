@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 import logging
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from fastapi import HTTPException, status
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.modules.emails.models import Email, EmailDirection, EmailStatus, EmailThread
+from app.modules.emails.models import Email, EmailAttachment, EmailDirection, EmailStatus, EmailThread
 from app.modules.emails.schemas import VALID_FOLDERS
 
 logger = logging.getLogger(__name__)
@@ -35,8 +35,13 @@ class EmailMailboxService:
         sort: str = "newest",
         limit: int = 50,
         offset: int = 0,
-    ) -> Tuple[List[Email], int]:
-        """Query emails with database-level filtering, folder shorthand, sorting, and pagination."""
+    ) -> Tuple[List[Email], int, Dict[int, int]]:
+        """Query emails with database-level filtering, folder shorthand, sorting, and pagination.
+        
+        Returns:
+            Tuple of (emails, total_count, attachment_counts) where attachment_counts maps
+            email_id -> number of stored EmailAttachment records for that email.
+        """
         query = select(Email)
         count_query = select(func.count(Email.id))
 
@@ -177,9 +182,22 @@ class EmailMailboxService:
 
         query = query.offset(offset).limit(limit)
         emails_res = await db.execute(query)
-        emails = emails_res.scalars().all()
+        emails = list(emails_res.scalars().all())
 
-        return list(emails), total
+        # 7. Bulk attachment count: single query for all returned email IDs
+        attachment_counts: Dict[int, int] = {}
+        if emails:
+            email_ids = [e.id for e in emails]
+            att_count_stmt = (
+                select(EmailAttachment.email_id, func.count(EmailAttachment.id).label("cnt"))
+                .where(EmailAttachment.email_id.in_(email_ids))
+                .group_by(EmailAttachment.email_id)
+            )
+            att_res = await db.execute(att_count_stmt)
+            for row in att_res.all():
+                attachment_counts[row.email_id] = row.cnt
+
+        return emails, total, attachment_counts
 
     @classmethod
     async def recalculate_thread_read_state(cls, db: AsyncSession, thread_id: int) -> None:

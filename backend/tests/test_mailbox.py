@@ -1090,3 +1090,53 @@ async def test_39_mailbox_counts_company_isolation(async_client: AsyncClient, db
     assert resp_a.json()["inbox"] == 1
     assert resp_a.json()["unread"] == 1
 
+
+@pytest.mark.asyncio
+async def test_40_mailbox_list_attachment_count(async_client: AsyncClient, db_session: AsyncSession):
+    """40. GET /api/v1/emails correctly returns attachment_count for emails with/without attachments."""
+    from app.modules.emails.models import EmailAttachment
+
+    token = await register_and_login(async_client, "user40@test.com")
+    comp = await create_company_helper(async_client, token, "Co 40")
+    acc = await create_account_helper(async_client, token, comp, email="user40@testco.com")
+
+    # Email 1: No attachments
+    e1 = await create_email_record(db_session, comp, acc, subject="No Attachment")
+
+    # Email 2: Has 2 attachments
+    e2 = await create_email_record(db_session, comp, acc, subject="With Attachments")
+    att1 = EmailAttachment(
+        company_id=comp,
+        email_account_id=acc,
+        email_id=e2.id,
+        file_name="report.pdf",
+        content_type="application/pdf",
+        file_size=1024,
+        storage_path="mock/path/report.pdf",
+    )
+    att2 = EmailAttachment(
+        company_id=comp,
+        email_account_id=acc,
+        email_id=e2.id,
+        file_name="data.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        file_size=2048,
+        storage_path="mock/path/data.xlsx",
+    )
+    db_session.add_all([att1, att2])
+    await db_session.commit()
+
+    resp = await async_client.get(
+        f"/api/v1/companies/{comp}/emails",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["emails"]) == 2
+
+    # Map by subject to check attachment_count
+    counts_by_subj = {e["subject"]: e["attachment_count"] for e in data["emails"]}
+    assert counts_by_subj["No Attachment"] == 0
+    assert counts_by_subj["With Attachments"] == 2
+
+

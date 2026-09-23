@@ -110,6 +110,8 @@ class EmailRead(BaseModel):
     error_message: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    # Number of stored downloadable attachments linked to this email (0 when none)
+    attachment_count: int = 0
 
 
 class EmailSyncRequest(BaseModel):
