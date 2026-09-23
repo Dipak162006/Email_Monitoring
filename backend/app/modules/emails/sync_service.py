@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.email_accounts.models import EmailAccount
+from app.modules.emails.attachment_service import AttachmentService
 from app.modules.emails.models import Email, EmailDirection, EmailStatus, EmailThread
 from app.modules.emails.monitoring_service import EmailMonitoringService
 from app.modules.emails.schemas import EmailSyncResult
@@ -55,12 +56,21 @@ class EmailSyncService:
                 detail="Email account does not have an IMAP host configured.",
             )
 
+        # Query existing synced IMAP UIDs for this account to prioritize unsynced messages
+        existing_uids_stmt = select(Email.imap_uid).where(
+            Email.email_account_id == account.id,
+            Email.imap_uid.is_not(None),
+        )
+        existing_uids_res = await db.execute(existing_uids_stmt)
+        existing_uids = set(existing_uids_res.scalars().all())
+
         # 2. Fetch Messages via Adapter
         try:
             raw_messages = await self.imap_adapter.fetch_messages(
                 account=account,
                 folder=folder,
                 max_messages=max_messages,
+                existing_uids=existing_uids,
             )
         except IMAPConfigurationError as cfg_err:
             raise HTTPException(
@@ -85,7 +95,13 @@ class EmailSyncService:
         malformed_skipped = 0
 
         # 3. Process, Parse, and Deduplicate Each Message
-        for uid, raw_bytes in raw_messages:
+        for msg_item in raw_messages:
+            if len(msg_item) == 3:
+                uid, raw_bytes, internaldate = msg_item
+            else:
+                uid, raw_bytes = msg_item[0], msg_item[1]
+                internaldate = None
+
             try:
                 parsed = EmailParser.parse_raw_email(raw_bytes, imap_uid=uid)
             except Exception as parse_err:
@@ -93,31 +109,50 @@ class EmailSyncService:
                 malformed_skipped += 1
                 continue
 
-            # Account-scoped duplicate check
-            is_duplicate = False
+            # Account-scoped duplicate check and attachment backfill
+            existing_email: Optional[Email] = None
 
             # Check by message_id within this email_account_id
             if parsed.message_id:
-                dup_msg_query = select(Email.id).where(
+                dup_msg_query = select(Email).where(
                     Email.email_account_id == account.id,
                     Email.message_id == parsed.message_id,
                 )
                 dup_msg_res = await db.execute(dup_msg_query)
-                if dup_msg_res.scalars().first() is not None:
-                    is_duplicate = True
+                existing_email = dup_msg_res.scalars().first()
 
             # Check by imap_uid within this email_account_id
-            if not is_duplicate and parsed.imap_uid:
-                dup_uid_query = select(Email.id).where(
+            if not existing_email and parsed.imap_uid:
+                dup_uid_query = select(Email).where(
                     Email.email_account_id == account.id,
                     Email.imap_uid == parsed.imap_uid,
                 )
                 dup_uid_res = await db.execute(dup_uid_query)
-                if dup_uid_res.scalars().first() is not None:
-                    is_duplicate = True
+                existing_email = dup_uid_res.scalars().first()
 
-            if is_duplicate:
+            if existing_email:
                 duplicates_skipped += 1
+                if parsed.imap_uid and not existing_email.imap_uid:
+                    existing_email.imap_uid = parsed.imap_uid
+
+                # Correct historical received_at if it was stamped with sync-time
+                accurate_ts = internaldate or parsed.date
+                if accurate_ts and existing_email.received_at and existing_email.sent_at:
+                    if (existing_email.received_at - existing_email.sent_at).total_seconds() > 600:
+                        existing_email.received_at = accurate_ts
+
+                # Backfill missing attachments if email was previously fetched without attachments
+                if parsed.attachments:
+                    for att in parsed.attachments:
+                        await AttachmentService.create_incoming_attachment(
+                            db=db,
+                            company_id=account.company_id,
+                            email_account_id=account.id,
+                            email_id=existing_email.id,
+                            file_name=att.filename,
+                            content_type=att.content_type,
+                            content_bytes=att.content_bytes,
+                        )
                 continue
 
             # 4. Resolve Thread, Detect Bounces and Auto-Replies
@@ -195,7 +230,7 @@ class EmailSyncService:
                 is_read=False,
                 is_starred=False,
                 sent_at=parsed.date,
-                received_at=datetime.now(timezone.utc),
+                received_at=internaldate or parsed.date or datetime.now(timezone.utc),
                 error_message=incoming_error,
             )
             EmailThreadService.attach_email_to_thread(
@@ -204,6 +239,21 @@ class EmailSyncService:
                 is_reply_to_outgoing=is_reply_to_outgoing,
             )
             db.add(email_record)
+            await db.flush()
+
+            # Save attachments if present
+            if parsed.attachments:
+                for att in parsed.attachments:
+                    await AttachmentService.create_incoming_attachment(
+                        db=db,
+                        company_id=account.company_id,
+                        email_account_id=account.id,
+                        email_id=email_record.id,
+                        file_name=att.filename,
+                        content_type=att.content_type,
+                        content_bytes=att.content_bytes,
+                    )
+
             new_messages += 1
 
         # 5. Update Account Last Synced Timestamp

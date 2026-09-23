@@ -27,7 +27,13 @@ class AttachmentStorageService:
     @classmethod
     def get_base_upload_dir(cls) -> Path:
         """Resolve and ensure the base upload directory exists."""
-        base_dir = Path(settings.UPLOAD_DIR).resolve()
+        raw_path = Path(settings.UPLOAD_DIR)
+        if raw_path.is_absolute():
+            base_dir = raw_path.resolve()
+        else:
+            # Anchor relative upload directory deterministically to the backend directory
+            backend_dir = Path(__file__).resolve().parent.parent.parent
+            base_dir = (backend_dir / raw_path).resolve()
         base_dir.mkdir(parents=True, exist_ok=True)
         return base_dir
 
@@ -129,11 +135,63 @@ class AttachmentStorageService:
         return safe_original_name, content_type, total_size, rel_storage_path
 
     @classmethod
+    def save_attachment_bytes(
+        cls,
+        company_id: int,
+        account_id: int,
+        raw_filename: Optional[str],
+        content_type: Optional[str],
+        content_bytes: bytes,
+    ) -> Tuple[str, str, int, str]:
+        """Persist raw byte content for an attachment into partitioned storage.
+
+        Returns:
+            Tuple of (sanitized_original_filename, content_type, file_size_bytes, relative_storage_path)
+        """
+        if not content_bytes:
+            raise ValueError("Attachment content is empty (0 bytes).")
+
+        total_size = len(content_bytes)
+        if total_size > settings.MAX_ATTACHMENT_SIZE_BYTES:
+            raise ValueError(
+                f"Attachment size ({total_size} bytes) exceeds maximum limit of {settings.MAX_ATTACHMENT_SIZE_BYTES} bytes."
+            )
+
+        safe_original_name = cls.sanitize_filename(raw_filename)
+
+        # Validate extension
+        is_valid, err = cls.validate_filename(safe_original_name)
+        if not is_valid:
+            raise ValueError(err)
+
+        unique_id = uuid.uuid4().hex
+        ext = Path(safe_original_name).suffix
+        internal_name = f"{unique_id}{ext}"
+
+        dest_dir = cls.get_company_account_dir(company_id, account_id)
+        dest_path = dest_dir / internal_name
+
+        base_dir = cls.get_base_upload_dir()
+        rel_storage_path = str(dest_path.relative_to(base_dir)).replace("\\", "/")
+
+        dest_path.write_bytes(content_bytes)
+        clean_content_type = content_type or "application/octet-stream"
+        return safe_original_name, clean_content_type, total_size, rel_storage_path
+
+    @classmethod
     def resolve_storage_path(cls, relative_storage_path: str) -> Path:
         """Resolve a stored relative path safely, ensuring it remains within the upload base dir."""
         base_dir = cls.get_base_upload_dir()
         # Normalize and resolve path
         target_path = (base_dir / relative_storage_path).resolve()
+
+        # Fallback: check project root uploads directory if not found in primary base_dir
+        if not target_path.is_file():
+            project_root = Path(__file__).resolve().parent.parent.parent.parent
+            fallback_path = (project_root / "uploads" / relative_storage_path).resolve()
+            if fallback_path.is_file():
+                target_path = fallback_path
+                base_dir = (project_root / "uploads").resolve()
 
         # Prevent directory traversal attacks
         try:

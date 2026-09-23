@@ -1,13 +1,25 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import email
 from email.header import decode_header
 from email.utils import formataddr, getaddresses, parseaddr, parsedate_to_datetime
 import logging
+import mimetypes
+from pathlib import Path
 import re
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ParsedAttachment:
+    """Extracted attachment file from an incoming MIME email message."""
+    filename: str
+    content_type: str
+    content_bytes: bytes
+    content_id: Optional[str] = None
+    is_inline: bool = False
 
 
 @dataclass
@@ -35,6 +47,7 @@ class ParsedEmail:
     bounce_original_message_id: Optional[str] = None
     is_auto_reply: bool = False
     auto_submitted: Optional[str] = None
+    attachments: List[ParsedAttachment] = field(default_factory=list)
 
 
 class EmailParser:
@@ -309,50 +322,123 @@ class EmailParser:
             except Exception:
                 pass
 
-        # 5. Extract Text and HTML Bodies
+        # 5. Extract Text and HTML Bodies & Attachments
         body_text: Optional[str] = None
         body_html: Optional[str] = None
+        attachments: List[ParsedAttachment] = []
+
+        # Content types that represent multipart envelopes or bounce diagnostics, not user attachments
+        CONTAINER_AND_DSN_TYPES = {
+            "multipart/mixed",
+            "multipart/alternative",
+            "multipart/related",
+            "multipart/report",
+            "multipart/signed",
+            "multipart/encrypted",
+            "message/delivery-status",
+            "text/rfc822-headers",
+        }
 
         if msg.is_multipart():
             for part in msg.walk():
-                content_type = part.get_content_type()
-                content_disposition = str(part.get("Content-Disposition") or "")
-
-                # Skip attachments from being treated as message bodies
-                if "attachment" in content_disposition.lower():
+                if part.is_multipart():
                     continue
 
-                if content_type == "text/plain" and body_text is None:
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        charset = part.get_content_charset() or "utf-8"
-                        try:
-                            body_text = payload.decode(charset, errors="replace")
-                        except (LookupError, UnicodeDecodeError):
-                            body_text = payload.decode("utf-8", errors="replace")
+                content_type = part.get_content_type().lower()
+                if content_type in CONTAINER_AND_DSN_TYPES:
+                    continue
 
-                elif content_type == "text/html" and body_html is None:
+                content_disposition = str(part.get("Content-Disposition") or "")
+                raw_filename = part.get_filename()
+                if not raw_filename:
+                    raw_filename = part.get_param("name")
+
+                decoded_filename = cls.decode_header_str(raw_filename) if raw_filename else None
+                disposition_lower = content_disposition.lower()
+
+                # Determine if this part is an attachment
+                is_attachment = False
+                if "attachment" in disposition_lower or bool(decoded_filename):
+                    is_attachment = True
+                elif content_type not in ("text/plain", "text/html", "text/x-amp-html", "text/watch-html", "message/rfc822"):
+                    is_attachment = True
+
+                if is_attachment:
                     payload = part.get_payload(decode=True)
-                    if payload:
-                        charset = part.get_content_charset() or "utf-8"
-                        try:
-                            body_html = payload.decode(charset, errors="replace")
-                        except (LookupError, UnicodeDecodeError):
-                            body_html = payload.decode("utf-8", errors="replace")
+                    if payload and len(payload) > 0:
+                        content_id = part.get("Content-ID")
+                        cleaned_cid = content_id.strip().strip("<>") if content_id else None
+                        is_inline = "inline" in disposition_lower or (bool(cleaned_cid) and "attachment" not in disposition_lower)
+
+                        final_filename = decoded_filename
+                        if not final_filename:
+                            ext = mimetypes.guess_extension(content_type) or ".bin"
+                            if ext == ".bin" and "pdf" in content_type:
+                                ext = ".pdf"
+                            final_filename = f"attachment_{len(attachments) + 1}{ext}"
+
+                        final_filename = Path(final_filename).name
+
+                        attachments.append(
+                            ParsedAttachment(
+                                filename=final_filename,
+                                content_type=content_type or "application/octet-stream",
+                                content_bytes=payload,
+                                content_id=cleaned_cid,
+                                is_inline=is_inline,
+                            )
+                        )
+                else:
+                    if content_type == "text/plain" and body_text is None:
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            charset = part.get_content_charset() or "utf-8"
+                            try:
+                                body_text = payload.decode(charset, errors="replace")
+                            except (LookupError, UnicodeDecodeError):
+                                body_text = payload.decode("utf-8", errors="replace")
+
+                    elif content_type == "text/html" and body_html is None:
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            charset = part.get_content_charset() or "utf-8"
+                            try:
+                                body_html = payload.decode(charset, errors="replace")
+                            except (LookupError, UnicodeDecodeError):
+                                body_html = payload.decode("utf-8", errors="replace")
         else:
-            payload = msg.get_payload(decode=True)
-            charset = msg.get_content_charset() or "utf-8"
-            decoded_body = ""
-            if payload:
-                try:
-                    decoded_body = payload.decode(charset, errors="replace")
-                except (LookupError, UnicodeDecodeError):
-                    decoded_body = payload.decode("utf-8", errors="replace")
+            content_type = msg.get_content_type().lower()
+            content_disposition = str(msg.get("Content-Disposition") or "")
+            raw_filename = msg.get_filename() or msg.get_param("name")
+            decoded_filename = cls.decode_header_str(raw_filename) if raw_filename else None
+            disposition_lower = content_disposition.lower()
 
-            if msg.get_content_type() == "text/html":
-                body_html = decoded_body
+            payload = msg.get_payload(decode=True)
+            if "attachment" in disposition_lower or (content_type not in ("text/plain", "text/html") and bool(decoded_filename)):
+                if payload and len(payload) > 0:
+                    final_filename = decoded_filename or f"attachment_1{mimetypes.guess_extension(content_type) or '.bin'}"
+                    attachments.append(
+                        ParsedAttachment(
+                            filename=Path(final_filename).name,
+                            content_type=content_type or "application/octet-stream",
+                            content_bytes=payload,
+                            content_id=None,
+                            is_inline="inline" in disposition_lower,
+                        )
+                    )
             else:
-                body_text = decoded_body
+                charset = msg.get_content_charset() or "utf-8"
+                decoded_body = ""
+                if payload:
+                    try:
+                        decoded_body = payload.decode(charset, errors="replace")
+                    except (LookupError, UnicodeDecodeError):
+                        decoded_body = payload.decode("utf-8", errors="replace")
+
+                if content_type == "text/html":
+                    body_html = decoded_body
+                else:
+                    body_text = decoded_body
 
         # 6. Detect Bounce & Auto-Reply Indicators
         (
@@ -393,4 +479,5 @@ class EmailParser:
             bounce_original_message_id=bounce_original_message_id,
             is_auto_reply=is_auto_reply,
             auto_submitted=auto_submitted,
+            attachments=attachments,
         )

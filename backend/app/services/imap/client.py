@@ -1,8 +1,10 @@
+from datetime import datetime, timezone
 import imaplib
 import logging
+import re
 import socket
 import ssl
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 from app.modules.email_accounts.models import SecurityMode
 from app.services.imap.exceptions import (
     IMAPAuthenticationError,
@@ -14,6 +16,36 @@ from app.services.imap.exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def parse_internaldate(raw_bytes_or_str: Union[bytes, str]) -> Optional[datetime]:
+    """Parse an IMAP INTERNALDATE response attribute into a timezone-aware UTC datetime."""
+    if isinstance(raw_bytes_or_str, bytes):
+        text_val = raw_bytes_or_str.decode("utf-8", errors="replace")
+    else:
+        text_val = str(raw_bytes_or_str)
+
+    # Example: INTERNALDATE "23-Sep-2026 07:49:33 +0000" or " 3-Sep-2026 07:49:33 +0530"
+    match = re.search(
+        r'INTERNALDATE\s+"?\s*(\d{1,2}-[A-Za-z]{3}-\d{4}\s+\d{2}:\d{2}:\d{2}\s+[+-]\d{4})"?',
+        text_val,
+        re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(r'(\d{1,2}-[A-Za-z]{3}-\d{4}\s+\d{2}:\d{2}:\d{2}\s+[+-]\d{4})', text_val)
+
+    if match:
+        val = match.group(1).strip()
+        # Ensure 2-digit day for strptime (%d)
+        parts = val.split("-", 1)
+        if len(parts[0]) == 1:
+            val = "0" + val
+        try:
+            return datetime.strptime(val, "%d-%b-%Y %H:%M:%S %z").astimezone(timezone.utc)
+        except Exception:
+            pass
+    return None
+
 
 
 class IMAPClient:
@@ -130,10 +162,54 @@ class IMAPClient:
             for response_part in data:
                 if isinstance(response_part, tuple) and len(response_part) >= 2:
                     return response_part[1]
-            return None
         except (imaplib.IMAP4.error, Exception) as err:
             logger.warning("Failed to fetch message UID %s: %s", uid, err)
             return None
+
+    def fetch_messages_batch(
+        self,
+        uids: List[str],
+        chunk_size: int = 50,
+    ) -> List[Tuple[str, bytes, Optional[datetime]]]:
+        """Fetch raw messages and INTERNALDATE in chunks for a list of UIDs without marking as seen."""
+        if not self._client:
+            raise IMAPConnectionError("No active IMAP connection.")
+        if not uids:
+            return []
+
+        results: List[Tuple[str, bytes, Optional[datetime]]] = []
+        uid_list = [str(u) for u in uids if u]
+
+        for i in range(0, len(uid_list), chunk_size):
+            chunk = uid_list[i : i + chunk_size]
+            uid_str = ",".join(chunk)
+            try:
+                typ, data = self._client.uid("fetch", uid_str, "(INTERNALDATE BODY.PEEK[])")
+                if typ != "OK" or not data:
+                    typ, data = self._client.uid("fetch", uid_str, "(INTERNALDATE RFC822)")
+                if typ != "OK" or not data:
+                    continue
+
+                for item in data:
+                    if isinstance(item, tuple) and len(item) >= 2:
+                        header_info = (
+                            item[0].decode("utf-8", errors="replace")
+                            if isinstance(item[0], bytes)
+                            else str(item[0])
+                        )
+                        raw_bytes = item[1] if isinstance(item[1], bytes) else b""
+
+                        # Extract UID from header_info (e.g. "3646 (UID 4780 INTERNALDATE ...")
+                        uid_match = re.search(r'\bUID\s+(\d+)\b', header_info, re.IGNORECASE)
+                        msg_uid = uid_match.group(1) if uid_match else None
+                        internaldate = parse_internaldate(header_info)
+
+                        if msg_uid and raw_bytes:
+                            results.append((msg_uid, raw_bytes, internaldate))
+            except Exception as err:
+                logger.warning("Batch fetch failed for UIDs %s: %s", uid_str, err)
+
+        return results
 
     def close(self) -> None:
         """Cleanly close folder and disconnect/logout from the IMAP session."""

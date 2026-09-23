@@ -131,6 +131,72 @@ class AttachmentService:
         return attachment
 
     @classmethod
+    async def create_incoming_attachment(
+        cls,
+        db: AsyncSession,
+        company_id: int,
+        email_account_id: int,
+        email_id: int,
+        file_name: str,
+        content_type: str,
+        content_bytes: bytes,
+    ) -> Optional[EmailAttachment]:
+        """Save an incoming attachment extracted from an IMAP email idempotently."""
+        safe_name = AttachmentStorageService.sanitize_filename(file_name)
+        file_size = len(content_bytes)
+
+        # Idempotency check: verify if attachment already exists for this email
+        dup_stmt = select(EmailAttachment).where(
+            EmailAttachment.email_id == email_id,
+            EmailAttachment.file_name == safe_name,
+            EmailAttachment.file_size == file_size,
+        )
+        dup_res = await db.execute(dup_stmt)
+        existing = dup_res.scalars().first()
+        if existing:
+            logger.info(
+                "Attachment '%s' (size=%d) already exists on email id=%d; skipping duplicate creation.",
+                safe_name,
+                file_size,
+                email_id,
+            )
+            return existing
+
+        try:
+            safe_name, c_type, file_size, rel_path = AttachmentStorageService.save_attachment_bytes(
+                company_id=company_id,
+                account_id=email_account_id,
+                raw_filename=file_name,
+                content_type=content_type,
+                content_bytes=content_bytes,
+            )
+        except ValueError as exc:
+            logger.warning("Skipping incoming attachment '%s' for email %d: %s", file_name, email_id, exc)
+            return None
+        except Exception as exc:
+            logger.error("Failed to save incoming attachment '%s' for email %d: %s", file_name, email_id, exc)
+            return None
+
+        attachment = EmailAttachment(
+            company_id=company_id,
+            email_account_id=email_account_id,
+            email_id=email_id,
+            file_name=safe_name,
+            content_type=c_type,
+            file_size=file_size,
+            storage_path=rel_path,
+        )
+        db.add(attachment)
+        logger.info(
+            "Created incoming attachment '%s' (size=%d bytes, path=%s) for email id=%d",
+            safe_name,
+            file_size,
+            rel_path,
+            email_id,
+        )
+        return attachment
+
+    @classmethod
     async def list_draft_attachments(
         cls,
         db: AsyncSession,
