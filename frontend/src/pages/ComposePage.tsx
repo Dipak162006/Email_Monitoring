@@ -348,7 +348,7 @@ export function ComposePage() {
     } else if (template.body_text) {
       setBodyHtml(`<p>${template.body_text.replace(/\n/g, "<br/>")}</p>`);
       setBodyText(template.body_text);
-    }
+    } 
   };
 
   // Handle Signature Insertion

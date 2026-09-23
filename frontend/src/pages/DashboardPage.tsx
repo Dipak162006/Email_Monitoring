@@ -152,14 +152,28 @@ export function DashboardPage() {
       const activeAccounts = accountHealth.accounts.filter((a) => a.is_active);
       const targetAccounts = activeAccounts.length > 0 ? activeAccounts : [accountHealth.accounts[0]];
 
-      await Promise.all(targetAccounts.map((acc) => emailAccountsApi.triggerSync(acc.id, true)));
-      setSyncFeedback("Sync queued successfully");
+      const results = await Promise.allSettled(
+        targetAccounts.map((acc) => emailAccountsApi.triggerSync(acc.id, false))
+      );
+      const fulfilled = results.filter((r) => r.status === "fulfilled");
+      const rejected = results.filter((r) => r.status === "rejected");
+
+      if (rejected.length === 0) {
+        setSyncFeedback("Sync completed successfully");
+      } else if (fulfilled.length > 0) {
+        setSyncFeedback(`Sync completed with ${rejected.length} account failure(s)`);
+      } else {
+        const firstErr = (rejected[0] as PromiseRejectedResult).reason;
+        const msg = firstErr?.message || firstErr?.detail || "Sync failed";
+        setSyncFeedback(msg);
+      }
+
+      await handleRefresh();
       setTimeout(() => {
         setSyncFeedback(null);
-        handleRefresh();
-      }, 2500);
+      }, 3500);
     } catch {
-      setSyncFeedback("Sync trigger failed");
+      setSyncFeedback("Sync failed");
       setTimeout(() => setSyncFeedback(null), 3000);
     } finally {
       setIsSyncing(false);

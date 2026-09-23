@@ -32,6 +32,8 @@ export interface EmailItem {
   received_at?: string | null;
   created_at: string;
   updated_at: string;
+  /** Number of stored downloadable attachments for this email (0 when none). */
+  attachment_count?: number;
 }
 
 export interface EmailListResponse {
@@ -87,6 +89,64 @@ export interface EmailThreadDetail {
   created_at: string;
   updated_at: string;
   emails: EmailItem[];
+}
+
+export type EmailProvider = "CUSTOM" | "GOOGLE" | "YAHOO" | "ZOHO";
+export type SecurityMode = "NONE" | "SSL" | "STARTTLS";
+
+export interface EmailAccountItem {
+  id: number;
+  company_id: number;
+  name: string;
+  email_address: string;
+  provider: EmailProvider;
+  smtp_host?: string | null;
+  smtp_port?: number | null;
+  smtp_security?: SecurityMode | null;
+  smtp_username?: string | null;
+  has_smtp_password: boolean;
+  imap_host?: string | null;
+  imap_port?: number | null;
+  imap_security?: SecurityMode | null;
+  imap_username?: string | null;
+  has_imap_password: boolean;
+  is_active: boolean;
+  last_synced_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EmailAccountCreatePayload {
+  name: string;
+  email_address: string;
+  provider: EmailProvider;
+  smtp_host?: string | null;
+  smtp_port?: number | null;
+  smtp_security?: SecurityMode | null;
+  smtp_username?: string | null;
+  smtp_password?: string | null;
+  imap_host?: string | null;
+  imap_port?: number | null;
+  imap_security?: SecurityMode | null;
+  imap_username?: string | null;
+  imap_password?: string | null;
+}
+
+export interface EmailAccountUpdatePayload {
+  name?: string;
+  email_address?: string;
+  provider?: EmailProvider;
+  smtp_host?: string | null;
+  smtp_port?: number | null;
+  smtp_security?: SecurityMode | null;
+  smtp_username?: string | null;
+  smtp_password?: string | null;
+  imap_host?: string | null;
+  imap_port?: number | null;
+  imap_security?: SecurityMode | null;
+  imap_username?: string | null;
+  imap_password?: string | null;
+  is_active?: boolean;
 }
 
 export interface AuthorizedEmailAccount {
@@ -164,3 +224,23 @@ export interface EmailSignatureListResponse {
   total: number;
 }
 
+export interface EmailSyncResult {
+  email_account_id: number;
+  status: "SUCCESS" | "PARTIAL" | "FAILED" | string;
+  folder: string;
+  total_discovered: number;
+  new_messages: number;
+  duplicates_skipped: number;
+  malformed_skipped: number;
+  synced_at: string;
+  error_message?: string | null;
+  task_id?: string | null;
+}
+
+export interface EmailSyncJobResponse {
+  task_id: string;
+  status: string;
+  email_account_id?: number;
+  folder?: string;
+  message?: string;
+}
