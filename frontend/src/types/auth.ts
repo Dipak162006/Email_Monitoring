@@ -29,3 +29,11 @@ export interface AuthState {
   isAuthenticated: boolean;
   isLoading: boolean;
 }
+
+export interface CompanyWithRole {
+  id: number;
+  name: string;
+  is_active: boolean;
+  role: "OWNER" | "ADMIN" | "MEMBER";
+  created_at: string;
+}

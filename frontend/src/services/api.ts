@@ -1,4 +1,4 @@
-import type { LoginCredentials, RegisterCredentials, Token, User } from "../types/auth";
+import type { CompanyWithRole, LoginCredentials, RegisterCredentials, Token, User } from "../types/auth";
 import type {
   AccountHealthResponse,
   DashboardActivityResponse,
@@ -9,6 +9,9 @@ import type {
   AttachmentItem,
   AttachmentListResponse,
   AuthorizedEmailAccount,
+  EmailAccountCreatePayload,
+  EmailAccountItem,
+  EmailAccountUpdatePayload,
   EmailDraftPayload,
   EmailItem,
   EmailListParams,
@@ -16,6 +19,8 @@ import type {
   EmailSendPayload,
   EmailSignatureItem,
   EmailSignatureListResponse,
+  EmailSyncJobResponse,
+  EmailSyncResult,
   EmailTemplateItem,
   EmailTemplateListResponse,
   EmailThreadDetail,
@@ -414,13 +419,38 @@ export const signaturesApi = {
   },
 };
 
+export const companiesApi = {
+  getMyCompanies: async (): Promise<CompanyWithRole[]> => {
+    return apiClient.get<CompanyWithRole[]>("/api/v1/companies/");
+  },
+};
+
 export const emailAccountsApi = {
   getAuthorizedAccounts: async (): Promise<AuthorizedEmailAccount[]> => {
     return apiClient.get<AuthorizedEmailAccount[]>("/api/v1/email-accounts/authorized");
   },
 
-  triggerSync: async (accountId: number, background: boolean = true): Promise<{ message?: string; status?: string }> => {
-    return apiClient.post<{ message?: string; status?: string }>(
+  listCompanyAccounts: async (companyId: number): Promise<EmailAccountItem[]> => {
+    return apiClient.get<EmailAccountItem[]>(`/api/v1/companies/${companyId}/email-accounts`);
+  },
+
+  createAccount: async (companyId: number, data: EmailAccountCreatePayload): Promise<EmailAccountItem> => {
+    return apiClient.post<EmailAccountItem>(`/api/v1/companies/${companyId}/email-accounts`, data);
+  },
+
+  updateAccount: async (companyId: number, accountId: number, data: EmailAccountUpdatePayload): Promise<EmailAccountItem> => {
+    return apiClient.put<EmailAccountItem>(`/api/v1/companies/${companyId}/email-accounts/${accountId}`, data);
+  },
+
+  deleteAccount: async (companyId: number, accountId: number): Promise<void> => {
+    return apiClient.delete<void>(`/api/v1/companies/${companyId}/email-accounts/${accountId}`);
+  },
+
+  triggerSync: async (
+    accountId: number,
+    background: boolean = false
+  ): Promise<EmailSyncResult | EmailSyncJobResponse> => {
+    return apiClient.post<EmailSyncResult | EmailSyncJobResponse>(
       `/api/v1/email-accounts/${accountId}/sync?background=${background}`
     );
   },
