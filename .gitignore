@@ -57,3 +57,11 @@ Thumbs.db
 # Project uploads / scratch
 uploads/
 scratch/
+
+# Redis
+.redis/
+dump.rdb
+
+# Celery
+celerybeat-schedule*
+backend/celerybeat-schedule*
