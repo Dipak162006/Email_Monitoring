@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import type { DashboardActivityPoint } from "../../types/dashboard";
 
 interface ActivityTrendChartProps {
@@ -6,8 +6,162 @@ interface ActivityTrendChartProps {
   isLoading?: boolean;
 }
 
+interface ChartPoint {
+  key: string;
+  date: string;
+  label: string;
+  fullLabel: string;
+  sent: number;
+  responses: number;
+  bounced: number;
+}
+
+const MONTH_NAMES_SHORT = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+];
+
+const MONTH_NAMES_FULL = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"
+];
+
+function parseDate(dStr: string): { year: number; month: number; day: number } {
+  const parts = dStr.split("-").map(Number);
+  return {
+    year: parts[0] || 2026,
+    month: parts[1] || 1,
+    day: parts[2] || 1,
+  };
+}
+
+/**
+ * Adaptively aggregates raw daily activity points into an optimal number of chart points.
+ * - <= 31 days (Today, 7d, 30d): Keep daily resolution.
+ * - 32 to 210 days (90d, 6m): Aggregate into 7-day weekly buckets (~13 to 26 points).
+ * - > 210 days (1y, All Time): Aggregate into calendar month buckets (~12 to 25 points).
+ *
+ * All sums (sent, responses, bounced) are strictly preserved across buckets with zero data loss.
+ */
+function aggregateActivityPoints(rawPoints: DashboardActivityPoint[]): ChartPoint[] {
+  if (!rawPoints || rawPoints.length === 0) return [];
+  const n = rawPoints.length;
+
+  // Case 1: Short ranges (<= 31 days) -> Keep daily points
+  if (n <= 31) {
+    return rawPoints.map((p) => {
+      const { year, month, day } = parseDate(p.date);
+      const shortLabel = n <= 7 && p.label ? p.label : `${MONTH_NAMES_SHORT[month - 1]} ${day}`;
+      const fullLabel = `${MONTH_NAMES_FULL[month - 1]} ${day}, ${year}`;
+      return {
+        key: p.date,
+        date: p.date,
+        label: shortLabel,
+        fullLabel,
+        sent: p.sent,
+        responses: p.responses,
+        bounced: p.bounced,
+      };
+    });
+  }
+
+  // Case 2: Medium ranges (32 to 210 days) -> 7-day weekly buckets
+  if (n <= 210) {
+    const chunkSize = 7;
+    const aggregated: ChartPoint[] = [];
+
+    for (let i = 0; i < n; i += chunkSize) {
+      const slice = rawPoints.slice(i, i + chunkSize);
+      const startPt = slice[0];
+      const endPt = slice[slice.length - 1];
+
+      const startParsed = parseDate(startPt.date);
+      const endParsed = parseDate(endPt.date);
+
+      const sentSum = slice.reduce((acc, cur) => acc + cur.sent, 0);
+      const respSum = slice.reduce((acc, cur) => acc + cur.responses, 0);
+      const bounceSum = slice.reduce((acc, cur) => acc + cur.bounced, 0);
+
+      const label = `${MONTH_NAMES_SHORT[startParsed.month - 1]} ${startParsed.day}`;
+      const fullLabel = `${MONTH_NAMES_SHORT[startParsed.month - 1]} ${startParsed.day} – ${MONTH_NAMES_SHORT[endParsed.month - 1]} ${endParsed.day}, ${endParsed.year}`;
+
+      aggregated.push({
+        key: `week-${startPt.date}`,
+        date: startPt.date,
+        label,
+        fullLabel,
+        sent: sentSum,
+        responses: respSum,
+        bounced: bounceSum,
+      });
+    }
+
+    return aggregated;
+  }
+
+  // Case 3: Long ranges (> 210 days) -> Calendar month buckets
+  const monthMap = new Map<
+    string,
+    {
+      year: number;
+      month: number;
+      sent: number;
+      responses: number;
+      bounced: number;
+      firstDate: string;
+    }
+  >();
+
+  for (const pt of rawPoints) {
+    const { year, month } = parseDate(pt.date);
+    const monthKey = `${year}-${String(month).padStart(2, "0")}`;
+    const existing = monthMap.get(monthKey);
+    if (!existing) {
+      monthMap.set(monthKey, {
+        year,
+        month,
+        sent: pt.sent,
+        responses: pt.responses,
+        bounced: pt.bounced,
+        firstDate: pt.date,
+      });
+    } else {
+      existing.sent += pt.sent;
+      existing.responses += pt.responses;
+      existing.bounced += pt.bounced;
+    }
+  }
+
+  const years = new Set(Array.from(monthMap.values()).map((m) => m.year));
+  const isMultiYear = years.size > 1;
+
+  const aggregated: ChartPoint[] = [];
+  for (const [key, data] of monthMap.entries()) {
+    const label = isMultiYear
+      ? `${MONTH_NAMES_SHORT[data.month - 1]} '${String(data.year).slice(-2)}`
+      : MONTH_NAMES_SHORT[data.month - 1];
+    const fullLabel = `${MONTH_NAMES_FULL[data.month - 1]} ${data.year}`;
+
+    aggregated.push({
+      key,
+      date: data.firstDate,
+      label,
+      fullLabel,
+      sent: data.sent,
+      responses: data.responses,
+      bounced: data.bounced,
+    });
+  }
+
+  return aggregated;
+}
+
 export function ActivityTrendChart({ points, isLoading }: ActivityTrendChartProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+
+  const chartPoints = useMemo(() => {
+    return aggregateActivityPoints(points || []);
+  }, [points]);
 
   if (isLoading) {
     return (
@@ -20,28 +174,27 @@ export function ActivityTrendChart({ points, isLoading }: ActivityTrendChartProp
     );
   }
 
-  const validPoints = points && points.length > 0 ? points : [];
+  const n = chartPoints.length;
   const maxVal = Math.max(
-    ...validPoints.map((p) => Math.max(p.sent, p.responses, p.bounced)),
+    ...chartPoints.map((p) => Math.max(p.sent, p.responses, p.bounced)),
     5 // Minimum scale ceiling so 0 isn't collapsed
   );
 
   const width = 800;
   const height = 240;
-  const paddingX = 40;
+  const paddingX = 45;
   const paddingBottom = 40;
   const paddingTop = 30;
   const chartWidth = width - paddingX * 2;
   const chartHeight = height - paddingTop - paddingBottom;
 
-  const n = validPoints.length;
   const getX = (idx: number) => {
     if (n <= 1) return width / 2;
     return paddingX + (idx / (n - 1)) * chartWidth;
   };
 
   const getY = (val: number) => {
-    const ratio = val / maxVal;
+    const ratio = Math.min(1, Math.max(0, val / maxVal));
     return height - paddingBottom - ratio * chartHeight;
   };
 
@@ -49,7 +202,9 @@ export function ActivityTrendChart({ points, isLoading }: ActivityTrendChartProp
   const buildSmoothPath = (values: number[]) => {
     if (values.length === 0) return "";
     const pts = values.map((v, i) => ({ x: getX(i), y: getY(v) }));
-    if (pts.length === 1) return `M ${pts[0].x} ${pts[0].y}`;
+    if (pts.length === 1) {
+      return `M ${paddingX} ${pts[0].y} L ${width - paddingX} ${pts[0].y}`;
+    }
 
     let path = `M ${pts[0].x} ${pts[0].y}`;
     for (let i = 0; i < pts.length - 1; i++) {
@@ -68,23 +223,24 @@ export function ActivityTrendChart({ points, isLoading }: ActivityTrendChartProp
     return path;
   };
 
-  const sentPath = buildSmoothPath(validPoints.map((p) => p.sent));
-  const respPath = buildSmoothPath(validPoints.map((p) => p.responses));
-  const bouncePath = buildSmoothPath(validPoints.map((p) => p.bounced));
+  const sentPath = buildSmoothPath(chartPoints.map((p) => p.sent));
+  const respPath = buildSmoothPath(chartPoints.map((p) => p.responses));
+  const bouncePath = buildSmoothPath(chartPoints.map((p) => p.bounced));
 
   // Area under curve paths
   const baselineY = height - paddingBottom;
   const buildAreaPath = (linePath: string) => {
-    if (!linePath || validPoints.length === 0) return "";
-    const firstX = getX(0);
-    const lastX = getX(validPoints.length - 1);
+    if (!linePath || chartPoints.length === 0) return "";
+    const firstX = chartPoints.length === 1 ? paddingX : getX(0);
+    const lastX = chartPoints.length === 1 ? width - paddingX : getX(chartPoints.length - 1);
     return `${linePath} L ${lastX} ${baselineY} L ${firstX} ${baselineY} Z`;
   };
 
   const sentArea = buildAreaPath(sentPath);
   const respArea = buildAreaPath(respPath);
 
-  const activePoint = hoverIndex !== null && validPoints[hoverIndex] ? validPoints[hoverIndex] : null;
+  const activePoint =
+    hoverIndex !== null && chartPoints[hoverIndex] ? chartPoints[hoverIndex] : null;
 
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -93,7 +249,7 @@ export function ActivityTrendChart({ points, isLoading }: ActivityTrendChartProp
 
     let closestIdx = 0;
     let minDiff = Infinity;
-    validPoints.forEach((_, idx) => {
+    chartPoints.forEach((_, idx) => {
       const diff = Math.abs(getX(idx) - svgX);
       if (diff < minDiff) {
         minDiff = diff;
@@ -103,7 +259,9 @@ export function ActivityTrendChart({ points, isLoading }: ActivityTrendChartProp
     setHoverIndex(closestIdx);
   };
 
-  const allZero = validPoints.every((p) => p.sent === 0 && p.responses === 0 && p.bounced === 0);
+  const allZero = chartPoints.every(
+    (p) => p.sent === 0 && p.responses === 0 && p.bounced === 0
+  );
 
   return (
     <div className="w-full relative">
@@ -185,16 +343,29 @@ export function ActivityTrendChart({ points, isLoading }: ActivityTrendChartProp
         )}
 
         {/* Date Labels on X Axis */}
-        {validPoints.map((p, idx) => {
+        {chartPoints.map((p, idx) => {
+          const maxLabels = 8;
+          const step = Math.max(1, Math.floor(chartPoints.length / maxLabels));
+          const isFirst = idx === 0;
+          const isLast = idx === chartPoints.length - 1;
+          const isStepped = idx % step === 0;
+          const showLabel = isFirst || isLast || isStepped;
+
+          // Prevent rendering penultimate label if it is too close to the last one
+          if (!isFirst && !isLast && isStepped && idx >= chartPoints.length - Math.ceil(step / 1.5)) {
+            return null;
+          }
+
+          if (!showLabel && hoverIndex !== idx) return null;
           const x = getX(idx);
           const isSelected = hoverIndex === idx;
           return (
             <text
-              key={p.date}
+              key={p.key}
               x={x}
               y={height - 12}
               textAnchor="middle"
-              className={`text-[11px] transition-colors duration-150 ${
+              className={`text-[11px] transition-colors duration-150 select-none ${
                 isSelected ? "fill-indigo-700 font-semibold" : "fill-slate-400 font-medium"
               }`}
             >
@@ -249,20 +420,23 @@ export function ActivityTrendChart({ points, isLoading }: ActivityTrendChartProp
         )}
       </svg>
 
-      {/* Floating Tooltip matching Stitch dark badge style */}
+      {/* Floating Tooltip with boundary-safe positioning */}
       {hoverIndex !== null && activePoint && (
         <div
           className="absolute z-20 pointer-events-none transition-all duration-75"
           style={{
-            left: `${(getX(hoverIndex) / width) * 100}%`,
+            left: `${Math.max(5, Math.min(95, (getX(hoverIndex) / width) * 100))}%`,
             top: "8px",
-            transform: "translateX(-50%)",
+            transform:
+              getX(hoverIndex) / width > 0.75
+                ? "translateX(-95%)"
+                : getX(hoverIndex) / width < 0.25
+                ? "translateX(-5%)"
+                : "translateX(-50%)",
           }}
         >
           <div className="bg-slate-900/95 text-white text-[11px] rounded-xl px-3.5 py-2 shadow-xl backdrop-blur-xs border border-slate-700 flex items-center space-x-3 whitespace-nowrap">
-            <span className="font-semibold text-slate-200">
-              {activePoint.label} ({activePoint.date})
-            </span>
+            <span className="font-semibold text-slate-200">{activePoint.fullLabel}</span>
             <span className="h-3 w-px bg-slate-700" />
             <span className="text-indigo-300 font-medium">
               Sent: <strong className="text-white">{activePoint.sent.toLocaleString()}</strong>

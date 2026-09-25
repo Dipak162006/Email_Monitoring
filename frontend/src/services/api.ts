@@ -196,6 +196,7 @@ export const dashboardApi = {
     const searchParams = new URLSearchParams();
     if (params?.companyId) searchParams.set("company_id", String(params.companyId));
     if (params?.emailAccountId) searchParams.set("email_account_id", String(params.emailAccountId));
+    if (params?.allTime) searchParams.set("all_time", "true");
     if (params?.dateFrom) searchParams.set("date_from", params.dateFrom);
     if (params?.dateTo) searchParams.set("date_to", params.dateTo);
     const qs = searchParams.toString();
@@ -209,6 +210,7 @@ export const dashboardApi = {
     const searchParams = new URLSearchParams();
     if (params?.companyId) searchParams.set("company_id", String(params.companyId));
     if (params?.emailAccountId) searchParams.set("email_account_id", String(params.emailAccountId));
+    if (params?.allTime) searchParams.set("all_time", "true");
     if (params?.dateFrom) searchParams.set("date_from", params.dateFrom);
     if (params?.dateTo) searchParams.set("date_to", params.dateTo);
     const qs = searchParams.toString();

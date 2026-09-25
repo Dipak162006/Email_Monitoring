@@ -30,6 +30,24 @@ import { AttachmentUploadList, type ComposeAttachment } from "../components/comp
 import { TemplateModal } from "../components/compose/TemplateModal";
 import { SignatureModal } from "../components/compose/SignatureModal";
 
+/**
+ * Authoritative maximum attachment file size matching the backend configuration
+ * (backend/app/core/config.py: MAX_ATTACHMENT_SIZE_BYTES = 25 * 1024 * 1024 = 25 MB).
+ */
+export const MAX_ATTACHMENT_SIZE_BYTES = 25 * 1024 * 1024;
+
+export function isAttachmentError(msg: string | null): boolean {
+  if (!msg) return false;
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes("attachment") ||
+    lower.includes("maximum limit") ||
+    lower.includes("exceeds") ||
+    lower.includes("file size") ||
+    lower.includes("upload")
+  );
+}
+
 export function ComposePage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -37,6 +55,11 @@ export function ComposePage() {
 
   const replyToId = searchParams.get("reply_to");
   const forwardId = searchParams.get("forward");
+  const draftParamId = searchParams.get("draft_id") || searchParams.get("draft");
+
+  // Threading / Reply State
+  const [replyThreadId, setReplyThreadId] = useState<number | undefined>(undefined);
+  const [replyInReplyTo, setReplyInReplyTo] = useState<string | undefined>(undefined);
 
   // Form State
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
@@ -78,15 +101,71 @@ export function ComposePage() {
     }
   }, [accounts, selectedAccountId]);
 
-  // Handle Reply or Forward pre-population
+  // Handle Reply, Forward, or existing Draft pre-population
   useEffect(() => {
     const loadReferencedEmail = async () => {
+      // 1. Existing Draft loading
+      if (draftParamId) {
+        try {
+          const draftEmail = await emailsApi.getEmailById(Number(draftParamId));
+          setDraftId(draftEmail.id);
+          if (draftEmail.email_account_id) {
+            setSelectedAccountId(draftEmail.email_account_id);
+          }
+          if (draftEmail.recipients) {
+            setToRecipients(draftEmail.recipients);
+          }
+          if (draftEmail.cc && draftEmail.cc.length > 0) {
+            setCcRecipients(draftEmail.cc);
+            setShowCc(true);
+          }
+          if (draftEmail.bcc && draftEmail.bcc.length > 0) {
+            setBccRecipients(draftEmail.bcc);
+            setShowBcc(true);
+          }
+          if (draftEmail.subject) {
+            setSubject(draftEmail.subject);
+          }
+          if (draftEmail.body_html) {
+            setBodyHtml(draftEmail.body_html);
+          }
+          if (draftEmail.body_text) {
+            setBodyText(draftEmail.body_text);
+          }
+          if (draftEmail.thread_id) {
+            setReplyThreadId(draftEmail.thread_id);
+          }
+          if (draftEmail.in_reply_to) {
+            setReplyInReplyTo(draftEmail.in_reply_to);
+          }
+          const atts = await emailsApi.getAttachments(draftEmail.id);
+          if (atts?.attachments) {
+            setServerAttachments(atts.attachments);
+          }
+          return;
+        } catch (err) {
+          console.error("Failed to load draft email:", err);
+        }
+      }
+
+      // 2. Reply or Forward loading
       const refId = replyToId || forwardId;
       if (!refId) return;
 
       try {
         const sourceEmail = await emailsApi.getEmailById(Number(refId));
+        if (sourceEmail.email_account_id) {
+          setSelectedAccountId(sourceEmail.email_account_id);
+        }
+
         if (replyToId) {
+          if (sourceEmail.thread_id) {
+            setReplyThreadId(sourceEmail.thread_id);
+          }
+          if (sourceEmail.message_id) {
+            setReplyInReplyTo(sourceEmail.message_id);
+          }
+
           setToRecipients([sourceEmail.sender]);
           setSubject(
             sourceEmail.subject.toLowerCase().startsWith("re:")
@@ -114,7 +193,7 @@ export function ComposePage() {
     };
 
     loadReferencedEmail();
-  }, [replyToId, forwardId]);
+  }, [replyToId, forwardId, draftParamId]);
 
   const selectedAccount = accounts.find((a: AuthorizedEmailAccount) => a.id === selectedAccountId);
 
@@ -153,6 +232,8 @@ export function ComposePage() {
         subject,
         body_text: bodyText || undefined,
         body_html: bodyHtml || undefined,
+        thread_id: replyThreadId,
+        in_reply_to: replyInReplyTo,
       };
 
       let activeDraftId = draftId;
@@ -168,11 +249,20 @@ export function ComposePage() {
       // If there are staged files, upload them now to the draft
       if (stagedFiles.length > 0) {
         setIsUploadingAttachment(true);
-        for (const file of stagedFiles) {
-          const uploaded = await emailsApi.uploadDraftAttachment(activeDraftId, file);
-          setServerAttachments((prev) => [...prev, uploaded]);
+        const remaining = [...stagedFiles];
+        try {
+          while (remaining.length > 0) {
+            const file = remaining[0];
+            const uploaded = await emailsApi.uploadDraftAttachment(activeDraftId, file);
+            setServerAttachments((prev) => [...prev, uploaded]);
+            remaining.shift();
+            setStagedFiles([...remaining]);
+          }
+        } catch (uploadErr) {
+          remaining.shift();
+          setStagedFiles([...remaining]);
+          throw uploadErr;
         }
-        setStagedFiles([]);
       }
 
       return activeDraftId;
@@ -216,6 +306,8 @@ export function ComposePage() {
           subject,
           body_text: bodyText,
           body_html: bodyHtml,
+          thread_id: replyThreadId,
+          in_reply_to: replyInReplyTo,
         });
         activeDraftId = created.id;
         setDraftId(created.id);
@@ -224,11 +316,20 @@ export function ComposePage() {
       // Upload any staged files to the draft
       if (activeDraftId && stagedFiles.length > 0) {
         setIsUploadingAttachment(true);
-        for (const file of stagedFiles) {
-          const uploaded = await emailsApi.uploadDraftAttachment(activeDraftId, file);
-          setServerAttachments((prev) => [...prev, uploaded]);
+        const remaining = [...stagedFiles];
+        try {
+          while (remaining.length > 0) {
+            const file = remaining[0];
+            const uploaded = await emailsApi.uploadDraftAttachment(activeDraftId, file);
+            setServerAttachments((prev) => [...prev, uploaded]);
+            remaining.shift();
+            setStagedFiles([...remaining]);
+          }
+        } catch (uploadErr) {
+          remaining.shift();
+          setStagedFiles([...remaining]);
+          throw uploadErr;
         }
-        setStagedFiles([]);
       }
 
       // Transmit via draft if a draft exists
@@ -241,6 +342,8 @@ export function ComposePage() {
           subject,
           body_text: bodyText,
           body_html: bodyHtml,
+          thread_id: replyThreadId,
+          in_reply_to: replyInReplyTo,
         });
         return emailsApi.sendDraft(activeDraftId);
       }
@@ -255,6 +358,8 @@ export function ComposePage() {
         body_text: bodyText || undefined,
         body_html: bodyHtml || undefined,
         signature_id: selectedSignature ? selectedSignature.id : undefined,
+        thread_id: replyThreadId,
+        in_reply_to: replyInReplyTo,
       };
 
       return emailsApi.sendEmail(payload);
@@ -288,38 +393,69 @@ export function ComposePage() {
 
   // Handle Attachment Selection
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
 
-    try {
+    const files = Array.from(fileList);
+
+    // Clear previous attachment-related error when a new selection begins
+    if (isAttachmentError(errorMessage)) {
       setErrorMessage(null);
-      // If a draft already exists on the server, upload directly
-      if (draftId) {
-        setIsUploadingAttachment(true);
-        for (let i = 0; i < files.length; i++) {
-          const uploaded = await emailsApi.uploadDraftAttachment(draftId, files[i]);
-          setServerAttachments((prev) => [...prev, uploaded]);
-        }
+    }
+
+    const validFiles: File[] = [];
+    const oversizedFiles: File[] = [];
+
+    for (const file of files) {
+      if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
+        oversizedFiles.push(file);
       } else {
-        // Stage files locally until user saves or sends
-        const newFiles = Array.from(files);
-        setStagedFiles((prev) => [...prev, ...newFiles]);
+        validFiles.push(file);
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to upload attachment.";
-      setErrorMessage(msg);
-    } finally {
-      setIsUploadingAttachment(false);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
+    }
+
+    if (oversizedFiles.length > 0) {
+      const names = oversizedFiles.map((f) => `"${f.name}"`).join(", ");
+      setErrorMessage(
+        `File ${names} exceeds the maximum attachment limit of 25 MB.`
+      );
+    }
+
+    // Process valid files if any
+    if (validFiles.length > 0) {
+      try {
+        if (draftId) {
+          setIsUploadingAttachment(true);
+          for (const file of validFiles) {
+            const uploaded = await emailsApi.uploadDraftAttachment(draftId, file);
+            setServerAttachments((prev) => [...prev, uploaded]);
+          }
+        } else {
+          // Stage files locally until user saves or sends
+          setStagedFiles((prev) => [...prev, ...validFiles]);
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Failed to upload attachment.";
+        setErrorMessage(msg);
+      } finally {
+        setIsUploadingAttachment(false);
       }
+    }
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
     }
   };
 
   // Handle Attachment Removal
   const handleRemoveAttachment = async (id: number | string) => {
+    // Clear attachment error when an attachment is removed
+    if (isAttachmentError(errorMessage)) {
+      setErrorMessage(null);
+    }
+
     if (typeof id === "string") {
-      // Staged local file
+      // Staged local file (e.g., staged-0-filename)
       const parts = id.split("-");
       const idx = parseInt(parts[1], 10);
       setStagedFiles((prev) => prev.filter((_, i) => i !== idx));

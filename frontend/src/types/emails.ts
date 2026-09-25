@@ -22,6 +22,8 @@ export interface EmailItem {
   cc?: string[] | null;
   bcc?: string[] | null;
   reply_to?: string | null;
+  in_reply_to?: string | null;
+  references_header?: string | null;
   subject: string;
   body_text?: string | null;
   body_html?: string | null;

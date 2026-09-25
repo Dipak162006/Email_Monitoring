@@ -67,6 +67,7 @@ export const RichTextEditor: React.FC<RichTextEditorProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const savedRangeRef = useRef<Range | null>(null);
   const isInitialized = useRef(false);
+  const lastReportedHtmlRef = useRef<string>(initialHtml);
 
   // Dropdown states
   const [isFontDropdownOpen, setIsFontDropdownOpen] = useState(false);
@@ -108,18 +109,23 @@ export const RichTextEditor: React.FC<RichTextEditorProps> = ({
     }
   }, []);
 
-  // Sync initial content once
+  // Sync initial content or external programmatic updates (templates, reply quote, drafts)
   useEffect(() => {
-    if (editorRef.current && !isInitialized.current && initialHtml) {
-      editorRef.current.innerHTML = initialHtml;
-      isInitialized.current = true;
-    }
-  }, [initialHtml]);
+    if (!editorRef.current) return;
 
-  // If initialHtml is updated externally (e.g. template inserted or reply body set)
-  useEffect(() => {
-    if (editorRef.current && initialHtml !== editorRef.current.innerHTML && isInitialized.current) {
+    if (!isInitialized.current) {
+      if (initialHtml) {
+        editorRef.current.innerHTML = initialHtml;
+        lastReportedHtmlRef.current = initialHtml;
+        isInitialized.current = true;
+      }
+      return;
+    }
+
+    // Only update innerHTML when the prop change was NOT caused by the user typing
+    if (initialHtml !== lastReportedHtmlRef.current) {
       editorRef.current.innerHTML = initialHtml;
+      lastReportedHtmlRef.current = initialHtml;
     }
   }, [initialHtml]);
 
@@ -127,6 +133,8 @@ export const RichTextEditor: React.FC<RichTextEditorProps> = ({
     if (editorRef.current) {
       const html = editorRef.current.innerHTML;
       const text = editorRef.current.innerText;
+      lastReportedHtmlRef.current = html;
+      isInitialized.current = true;
       onChange(html, text);
     }
   }, [onChange]);

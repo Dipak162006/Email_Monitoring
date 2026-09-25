@@ -1140,3 +1140,104 @@ async def test_40_mailbox_list_attachment_count(async_client: AsyncClient, db_se
     assert counts_by_subj["With Attachments"] == 2
 
 
+@pytest.mark.asyncio
+async def test_mailbox_pagination_page_sizes_and_offsets(async_client: AsyncClient, db_session: AsyncSession):
+    """Verify mailbox pagination offsets, page sizes (25, 50, 100, 200), total counts, and safety limits."""
+    token = await register_and_login(async_client, "pager_user@test.com")
+    comp = await create_company_helper(async_client, token, "Pager Co")
+    acc = await create_account_helper(async_client, token, comp, email="pager@testco.com")
+
+    # Create 120 incoming received emails
+    base_time = datetime.now(timezone.utc) - timedelta(days=1)
+    for i in range(120):
+        await create_email_record(
+            db_session,
+            company_id=comp,
+            email_account_id=acc,
+            direction="INCOMING",
+            status="RECEIVED",
+            subject=f"Pager Email #{i:03d}",
+            received_at=base_time + timedelta(minutes=i),
+        )
+
+    # 1. Page size 50 (default): Page 1 (offset=0, limit=50) -> 1-50
+    resp_p1 = await async_client.get(
+        f"/api/v1/companies/{comp}/emails",
+        params={"limit": 50, "offset": 0, "folder": "inbox"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_p1.status_code == 200
+    d1 = resp_p1.json()
+    assert d1["total"] == 120
+    assert len(d1["emails"]) == 50
+    p1_ids = [e["id"] for e in d1["emails"]]
+
+    # 2. Page size 50: Page 2 (offset=50, limit=50) -> 51-100
+    resp_p2 = await async_client.get(
+        f"/api/v1/companies/{comp}/emails",
+        params={"limit": 50, "offset": 50, "folder": "inbox"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_p2.status_code == 200
+    d2 = resp_p2.json()
+    assert d2["total"] == 120
+    assert len(d2["emails"]) == 50
+    p2_ids = [e["id"] for e in d2["emails"]]
+    assert set(p1_ids).isdisjoint(set(p2_ids))
+
+    # 3. Page size 50: Page 3 (offset=100, limit=50) -> 101-120 (remaining 20)
+    resp_p3 = await async_client.get(
+        f"/api/v1/companies/{comp}/emails",
+        params={"limit": 50, "offset": 100, "folder": "inbox"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_p3.status_code == 200
+    d3 = resp_p3.json()
+    assert d3["total"] == 120
+    assert len(d3["emails"]) == 20
+    p3_ids = [e["id"] for e in d3["emails"]]
+    assert set(p2_ids).isdisjoint(set(p3_ids))
+
+    # 4. Page size 100: Page 1 (offset=0, limit=100) -> 1-100
+    resp_100_p1 = await async_client.get(
+        f"/api/v1/companies/{comp}/emails",
+        params={"limit": 100, "offset": 0, "folder": "inbox"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_100_p1.status_code == 200
+    d100_1 = resp_100_p1.json()
+    assert d100_1["total"] == 120
+    assert len(d100_1["emails"]) == 100
+
+    # 5. Page size 100: Page 2 (offset=100, limit=100) -> 101-120 (20 items)
+    resp_100_p2 = await async_client.get(
+        f"/api/v1/companies/{comp}/emails",
+        params={"limit": 100, "offset": 100, "folder": "inbox"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_100_p2.status_code == 200
+    d100_2 = resp_100_p2.json()
+    assert d100_2["total"] == 120
+    assert len(d100_2["emails"]) == 20
+
+    # 6. Page size 200: (offset=0, limit=200) -> returns all 120 emails
+    resp_200 = await async_client.get(
+        f"/api/v1/companies/{comp}/emails",
+        params={"limit": 200, "offset": 0, "folder": "inbox"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_200.status_code == 200
+    d200 = resp_200.json()
+    assert d200["total"] == 120
+    assert len(d200["emails"]) == 120
+
+    # 7. Safety validation: limit > 200 should fail with 422 Unprocessable Entity
+    resp_over_limit = await async_client.get(
+        f"/api/v1/companies/{comp}/emails",
+        params={"limit": 201, "offset": 0, "folder": "inbox"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_over_limit.status_code == 422
+
+
+

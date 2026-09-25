@@ -85,24 +85,42 @@ class DashboardService:
         cls,
         date_from: Optional[datetime],
         date_to: Optional[datetime],
-    ) -> Tuple[datetime, datetime]:
-        """Normalize date boundaries to UTC and default to the last 7 days if omitted."""
+        all_time: bool = False,
+        default_to_7d: bool = False,
+    ) -> Tuple[Optional[datetime], datetime]:
+        """Normalize date boundaries to UTC and handle time windows including All Time.
+        
+        - If all_time is True: resolved_from is None (no lower date boundary).
+        - If date_from is explicitly provided: validates and normalizes it to UTC.
+        - If date_from is omitted (None):
+            - If default_to_7d is True: defaults to last 7 days.
+            - Otherwise: resolved_from is None (complete available history / All Time).
+        """
         now = datetime.now(timezone.utc)
         resolved_to = date_to if date_to is not None else now
-        resolved_from = date_from if date_from is not None else (resolved_to - timedelta(days=7))
-
-        if resolved_from.tzinfo is None:
-            resolved_from = resolved_from.replace(tzinfo=timezone.utc)
         if resolved_to.tzinfo is None:
             resolved_to = resolved_to.replace(tzinfo=timezone.utc)
 
-        if resolved_from > resolved_to:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="date_from cannot be later than date_to.",
-            )
+        if all_time:
+            return None, resolved_to
 
-        return resolved_from, resolved_to
+        if date_from is not None:
+            resolved_from = date_from
+            if resolved_from.tzinfo is None:
+                resolved_from = resolved_from.replace(tzinfo=timezone.utc)
+
+            if resolved_from > resolved_to:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="date_from cannot be later than date_to.",
+                )
+            return resolved_from, resolved_to
+
+        if default_to_7d:
+            resolved_from = resolved_to - timedelta(days=7)
+            return resolved_from, resolved_to
+
+        return None, resolved_to
 
     @classmethod
     async def get_dashboard_stats(
@@ -113,9 +131,11 @@ class DashboardService:
         email_account_id: Optional[int] = None,
         date_from: Optional[datetime] = None,
         date_to: Optional[datetime] = None,
+        all_time: bool = False,
     ) -> DashboardStatsResponse:
         """Calculate primary email operational metrics for the current period
         and compute comparisons against the previous equivalent time window.
+        When all_time is True or date_from is omitted, queries complete available history.
         """
         account_ids = await cls._resolve_authorized_account_ids(
             db=db,
@@ -124,7 +144,9 @@ class DashboardService:
             email_account_id=email_account_id,
         )
 
-        resolved_from, resolved_to = cls._normalize_date_range(date_from, date_to)
+        resolved_from, resolved_to = cls._normalize_date_range(
+            date_from, date_to, all_time=all_time, default_to_7d=False
+        )
 
         if not account_ids:
             return DashboardStatsResponse(
@@ -139,15 +161,10 @@ class DashboardService:
                 period_end=resolved_to,
             )
 
-        # Equivalent previous period calculation
-        duration = resolved_to - resolved_from
-        prev_to = resolved_from
-        prev_from = resolved_from - duration
-
         effective_ts = func.coalesce(Email.received_at, Email.sent_at, Email.created_at)
 
         # Helper to query counts
-        async def query_counts(start: datetime, end: datetime) -> Tuple[int, int, int]:
+        async def query_counts(start: Optional[datetime], end: datetime) -> Tuple[int, int, int]:
             # Sent count: OUTGOING + SENT
             sent_stmt = (
                 select(func.count(Email.id))
@@ -156,10 +173,11 @@ class DashboardService:
                     Email.direction == EmailDirection.OUTGOING.value,
                     Email.status == EmailStatus.SENT.value,
                     Email.is_deleted == False,
-                    effective_ts >= start,
                     effective_ts <= end,
                 )
             )
+            if start is not None:
+                sent_stmt = sent_stmt.where(effective_ts >= start)
             sent_res = await db.execute(sent_stmt)
             sent = sent_res.scalar() or 0
 
@@ -170,10 +188,11 @@ class DashboardService:
                     Email.email_account_id.in_(account_ids),
                     Email.status == EmailStatus.BOUNCED.value,
                     Email.is_deleted == False,
-                    effective_ts >= start,
                     effective_ts <= end,
                 )
             )
+            if start is not None:
+                bounced_stmt = bounced_stmt.where(effective_ts >= start)
             bounced_res = await db.execute(bounced_stmt)
             bounced = bounced_res.scalar() or 0
 
@@ -186,23 +205,34 @@ class DashboardService:
                     Email.direction == EmailDirection.INCOMING.value,
                     EmailThread.has_reply == True,
                     Email.is_deleted == False,
-                    effective_ts >= start,
                     effective_ts <= end,
                 )
             )
+            if start is not None:
+                resp_stmt = resp_stmt.where(effective_ts >= start)
             resp_res = await db.execute(resp_stmt)
             resp = resp_res.scalar() or 0
 
             return sent, bounced, resp
 
         curr_sent, curr_bounced, curr_resp = await query_counts(resolved_from, resolved_to)
-        prev_sent, prev_bounced, prev_resp = await query_counts(prev_from, prev_to)
+
+        # Equivalent previous period calculation (only possible if resolved_from is bounded)
+        if resolved_from is not None:
+            duration = resolved_to - resolved_from
+            prev_to = resolved_from
+            prev_from = resolved_from - duration
+            prev_sent, prev_bounced, prev_resp = await query_counts(prev_from, prev_to)
+        else:
+            prev_sent, prev_bounced, prev_resp = 0, 0, 0
 
         # Bounce rate calculation
         bounce_rate = round((curr_bounced / curr_sent * 100.0), 2) if curr_sent > 0 else 0.0
 
         # Safe percentage change calculation
         def calculate_change(curr: int, prev: int) -> Optional[float]:
+            if resolved_from is None:
+                return None
             if prev > 0:
                 return round(((curr - prev) / prev * 100.0), 1)
             return None
@@ -228,6 +258,7 @@ class DashboardService:
         email_account_id: Optional[int] = None,
         date_from: Optional[datetime] = None,
         date_to: Optional[datetime] = None,
+        all_time: bool = False,
     ) -> DashboardActivityResponse:
         """Aggregate daily email counts (sent, responses, bounced) across the date range."""
         account_ids = await cls._resolve_authorized_account_ids(
@@ -237,12 +268,39 @@ class DashboardService:
             email_account_id=email_account_id,
         )
 
-        resolved_from, resolved_to = cls._normalize_date_range(date_from, date_to)
+        resolved_from, resolved_to = cls._normalize_date_range(
+            date_from, date_to, all_time=all_time, default_to_7d=True
+        )
+
+        effective_ts = func.coalesce(Email.received_at, Email.sent_at, Email.created_at)
+
+        if resolved_from is None and account_ids:
+            # All-time mode: look up earliest email date in authorized accounts
+            min_stmt = (
+                select(func.min(effective_ts))
+                .where(
+                    Email.email_account_id.in_(account_ids),
+                    Email.is_deleted == False,
+                )
+            )
+            min_res = await db.execute(min_stmt)
+            earliest = min_res.scalar()
+            if earliest is not None:
+                if earliest.tzinfo is None:
+                    earliest = earliest.replace(tzinfo=timezone.utc)
+                resolved_from = earliest
+            else:
+                resolved_from = resolved_to - timedelta(days=7)
+        elif resolved_from is None:
+            resolved_from = resolved_to - timedelta(days=7)
 
         # Generate calendar days list
         start_date = resolved_from.date()
         end_date = resolved_to.date()
         day_count = (end_date - start_date).days + 1
+        if day_count <= 0:
+            day_count = 1
+            start_date = end_date
 
         calendar_days = [start_date + timedelta(days=i) for i in range(day_count)]
         date_keys = [d.isoformat() for d in calendar_days]
@@ -264,8 +322,6 @@ class DashboardService:
                 total_responses=0,
                 total_bounced=0,
             )
-
-        effective_ts = func.coalesce(Email.received_at, Email.sent_at, Email.created_at)
 
         # 1. Sent emails grouped by day
         sent_stmt = (

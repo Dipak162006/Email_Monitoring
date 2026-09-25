@@ -734,3 +734,176 @@ async def test_17_existing_m6_duplicate_imap_sync_still_works(async_client: Asyn
     threads = (await db_session.execute(select(EmailThread).where(EmailThread.email_account_id == acc_id))).scalars().all()
     assert len(threads) == 1
     assert threads[0].message_count == 1
+
+
+@pytest.mark.asyncio
+async def test_18_customer_reply_multi_turn_threading_and_draft_persistence(
+    async_client: AsyncClient, db_session: AsyncSession
+):
+    """18. Multi-turn conversation threading:
+    - User sends original email -> Thread created (message_count=1)
+    - Customer replies via IMAP -> Same thread (message_count=2)
+    - User replies directly -> Preserves thread_id and in_reply_to, remains in same thread (message_count=3)
+    - Customer replies again via IMAP -> Same thread (message_count=4)
+    - User creates reply draft -> Preserves thread_id and in_reply_to
+    - User updates and sends reply draft -> Sent email remains in same thread (message_count=5)
+    """
+    token = await register_and_login(async_client, "thread_multiturn_user@test.com")
+    comp_id = await create_company_helper(async_client, token, "MultiTurn Thread Co")
+    acc_id = await create_account_helper(async_client, token, comp_id, email="support@multiturn.com")
+
+    # Step 1: User sends original email
+    with patch.object(SMTPClient, "send_email_sync", return_value=None):
+        send_1 = await async_client.post(
+            "/api/v1/emails/send",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "email_account_id": acc_id,
+                "to": ["client@partner.com"],
+                "subject": "Project Proposal Discussion",
+                "body_text": "Hi Client, here is our proposal.",
+            },
+        )
+    assert send_1.status_code == 201
+    email_1_data = send_1.json()
+    thread_id = email_1_data["thread_id"]
+    msg_id_1 = email_1_data["message_id"]
+    assert thread_id is not None
+    assert msg_id_1 is not None
+
+    # Step 2: Customer sends Reply 1 via IMAP sync
+    msg_id_2 = "<client-reply-1@partner.com>"
+    raw_reply_1 = make_raw_email(
+        msg_id=msg_id_2,
+        subject="Re: Project Proposal Discussion",
+        from_addr="client@partner.com",
+        to_addrs=["support@multiturn.com"],
+        body="Thanks, could you clarify the timeline?",
+        in_reply_to=msg_id_1,
+        references=msg_id_1,
+    )
+    with mock_imap_sync([raw_reply_1], uids=["801"]):
+        sync_1 = await async_client.post(
+            f"/api/v1/email-accounts/{acc_id}/sync",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert sync_1.status_code == 200
+        assert sync_1.json()["new_messages"] == 1
+
+    # Verify thread message_count is 2
+    thread_resp = await async_client.get(
+        f"/api/v1/threads/{thread_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert thread_resp.status_code == 200
+    assert thread_resp.json()["message_count"] == 2
+
+    # Step 3: User replies directly to Customer Reply 1
+    with patch.object(SMTPClient, "send_email_sync", return_value=None):
+        send_2 = await async_client.post(
+            "/api/v1/emails/send",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "email_account_id": acc_id,
+                "to": ["client@partner.com"],
+                "subject": "Re: Project Proposal Discussion",
+                "body_text": "Timeline is 4 weeks.",
+                "thread_id": thread_id,
+                "in_reply_to": msg_id_2,
+            },
+        )
+    assert send_2.status_code == 201
+    email_3_data = send_2.json()
+    assert email_3_data["thread_id"] == thread_id
+    assert email_3_data["in_reply_to"] == msg_id_2
+    msg_id_3 = email_3_data["message_id"]
+
+    # Verify thread message_count is 3
+    thread_resp = await async_client.get(
+        f"/api/v1/threads/{thread_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert thread_resp.json()["message_count"] == 3
+
+    # Step 4: Customer sends Reply 2 via IMAP sync
+    msg_id_4 = "<client-reply-2@partner.com>"
+    raw_reply_2 = make_raw_email(
+        msg_id=msg_id_4,
+        subject="Re: Project Proposal Discussion",
+        from_addr="client@partner.com",
+        to_addrs=["support@multiturn.com"],
+        body="Got it. What about milestone billing?",
+        in_reply_to=msg_id_3,
+        references=f"{msg_id_1} {msg_id_2} {msg_id_3}",
+    )
+    with mock_imap_sync([raw_reply_2], uids=["802"]):
+        sync_2 = await async_client.post(
+            f"/api/v1/email-accounts/{acc_id}/sync",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert sync_2.status_code == 200
+        assert sync_2.json()["new_messages"] == 1
+
+    # Verify thread message_count is 4
+    thread_resp = await async_client.get(
+        f"/api/v1/threads/{thread_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert thread_resp.json()["message_count"] == 4
+
+    # Step 5: User creates a reply draft referencing Customer Reply 2
+    draft_create_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc_id,
+            "to": ["client@partner.com"],
+            "subject": "Re: Project Proposal Discussion",
+            "body_text": "Working draft on milestone billing...",
+            "thread_id": thread_id,
+            "in_reply_to": msg_id_4,
+        },
+    )
+    assert draft_create_resp.status_code == 201
+    draft_data = draft_create_resp.json()
+    draft_id = draft_data["id"]
+    assert draft_data["thread_id"] == thread_id
+    assert draft_data["in_reply_to"] == msg_id_4
+
+    # User updates the reply draft
+    draft_update_resp = await async_client.put(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "body_text": "We support 50/50 milestone billing.",
+            "thread_id": thread_id,
+            "in_reply_to": msg_id_4,
+        },
+    )
+    assert draft_update_resp.status_code == 200
+    assert draft_update_resp.json()["thread_id"] == thread_id
+    assert draft_update_resp.json()["in_reply_to"] == msg_id_4
+
+    # User sends the reply draft
+    with patch.object(SMTPClient, "send_email_sync", return_value=None):
+        send_draft_resp = await async_client.post(
+            f"/api/v1/emails/drafts/{draft_id}/send",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert send_draft_resp.status_code == 200
+    sent_draft_data = send_draft_resp.json()
+    assert sent_draft_data["thread_id"] == thread_id
+    assert sent_draft_data["in_reply_to"] == msg_id_4
+    assert sent_draft_data["status"] == "SENT"
+
+    # Step 6: Verify final thread state: all 5 messages remain in ONE thread
+    final_thread_resp = await async_client.get(
+        f"/api/v1/threads/{thread_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert final_thread_resp.status_code == 200
+    final_thread = final_thread_resp.json()
+    assert final_thread["message_count"] == 5
+    assert len(final_thread["emails"]) == 5
+    assert all(e["thread_id"] == thread_id for e in final_thread["emails"])
+

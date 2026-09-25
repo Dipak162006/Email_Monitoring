@@ -27,6 +27,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { ActivityTrendChart } from "../components/dashboard/ActivityTrendChart";
 import { dashboardApi, emailsApi, emailAccountsApi, RequestError } from "../services/api";
 
+import { DATE_RANGE_PRESETS } from "../types/dashboard";
 import type { DateRangePreset } from "../types/dashboard";
 import type { EmailItem } from "../types/emails";
 
@@ -71,20 +72,9 @@ export function DashboardPage() {
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
 
   // Compute UTC date boundaries for selected preset
-  const { dateFrom, dateTo } = useMemo(() => {
-    const now = new Date();
-    const toStr = now.toISOString();
-    if (datePreset === "today") {
-      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-      return { dateFrom: todayStart.toISOString(), dateTo: toStr };
-    }
-    if (datePreset === "30d") {
-      const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-      return { dateFrom: thirtyDaysAgo.toISOString(), dateTo: toStr };
-    }
-    // Default 7 days
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    return { dateFrom: sevenDaysAgo.toISOString(), dateTo: toStr };
+  const { dateFrom, dateTo, allTime } = useMemo(() => {
+    const config = DATE_RANGE_PRESETS[datePreset] || DATE_RANGE_PRESETS["7d"];
+    return config.computeRange(new Date());
   }, [datePreset]);
 
   // 1. Primary Stats Query
@@ -95,14 +85,14 @@ export function DashboardPage() {
     error: statsError,
     refetch: refetchStats,
   } = useQuery({
-    queryKey: ["dashboard-stats", datePreset, dateFrom, dateTo],
-    queryFn: () => dashboardApi.getStats({ dateFrom, dateTo }),
+    queryKey: ["dashboard-stats", datePreset, dateFrom, dateTo, allTime],
+    queryFn: () => dashboardApi.getStats({ dateFrom, dateTo, allTime }),
   });
 
   // 2. Activity Trends Query
   const { data: activityData, isLoading: isActivityLoading } = useQuery({
-    queryKey: ["dashboard-activity", datePreset, dateFrom, dateTo],
-    queryFn: () => dashboardApi.getActivity({ dateFrom, dateTo }),
+    queryKey: ["dashboard-activity", datePreset, dateFrom, dateTo, allTime],
+    queryFn: () => dashboardApi.getActivity({ dateFrom, dateTo, allTime }),
   });
 
   // 3. Account Health Query
@@ -203,9 +193,11 @@ export function DashboardPage() {
               onChange={(e) => setDatePreset(e.target.value as DateRangePreset)}
               className="bg-transparent text-xs font-medium text-slate-700 focus:outline-none cursor-pointer pr-1"
             >
-              <option value="today">Today</option>
-              <option value="7d">Last 7 days</option>
-              <option value="30d">Last 30 days</option>
+              {Object.values(DATE_RANGE_PRESETS).map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.label}
+                </option>
+              ))}
             </select>
           </div>
 
@@ -257,7 +249,7 @@ export function DashboardPage() {
                   <TrendingUp className="h-3 w-3" />
                   <span>
                     {stats.sent_change_percent >= 0 ? "+" : ""}
-                    {stats.sent_change_percent}% vs previous {datePreset === "30d" ? "30d" : datePreset === "today" ? "day" : "7d"}
+                    {stats.sent_change_percent}% vs {DATE_RANGE_PRESETS[datePreset]?.comparisonLabel || "previous period"}
                   </span>
                 </div>
               ) : (

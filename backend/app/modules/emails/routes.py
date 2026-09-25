@@ -361,7 +361,7 @@ async def list_emails(
     date_from: Optional[datetime] = Query(None, description="Start date filter"),
     date_to: Optional[datetime] = Query(None, description="End date filter"),
     sort: str = Query("newest", pattern="^(newest|oldest)$", description="Sort order: newest or oldest"),
-    limit: int = Query(50, ge=1, le=100, description="Page limit"),
+    limit: int = Query(50, ge=1, le=200, description="Page limit"),
     offset: int = Query(0, ge=0, description="Page offset"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -616,7 +616,7 @@ async def list_company_emails(
     date_from: Optional[datetime] = Query(None, description="Start date filter"),
     date_to: Optional[datetime] = Query(None, description="End date filter"),
     sort: str = Query("newest", pattern="^(newest|oldest)$", description="Sort order: newest or oldest"),
-    limit: int = Query(50, ge=1, le=100, description="Page limit"),
+    limit: int = Query(50, ge=1, le=200, description="Page limit"),
     offset: int = Query(0, ge=0, description="Page offset"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -2410,6 +2410,7 @@ async def get_dashboard_stats(
     email_account_id: Optional[int] = Query(None, description="Optional email account ID scope"),
     date_from: Optional[datetime] = Query(None, description="Start date filter"),
     date_to: Optional[datetime] = Query(None, description="End date filter"),
+    all_time: bool = Query(False, description="Query complete history without lower date boundary"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> DashboardStatsResponse:
@@ -2421,6 +2422,7 @@ async def get_dashboard_stats(
         email_account_id=email_account_id,
         date_from=date_from,
         date_to=date_to,
+        all_time=all_time,
     )
 
 
@@ -2435,6 +2437,7 @@ async def get_company_dashboard_stats(
     email_account_id: Optional[int] = Query(None, description="Optional email account ID scope"),
     date_from: Optional[datetime] = Query(None, description="Start date filter"),
     date_to: Optional[datetime] = Query(None, description="End date filter"),
+    all_time: bool = Query(False, description="Query complete history without lower date boundary"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> DashboardStatsResponse:
@@ -2446,6 +2449,7 @@ async def get_company_dashboard_stats(
         email_account_id=email_account_id,
         date_from=date_from,
         date_to=date_to,
+        all_time=all_time,
     )
 
 
@@ -2460,6 +2464,7 @@ async def get_dashboard_activity(
     email_account_id: Optional[int] = Query(None, description="Optional email account ID scope"),
     date_from: Optional[datetime] = Query(None, description="Start date filter"),
     date_to: Optional[datetime] = Query(None, description="End date filter"),
+    all_time: bool = Query(False, description="Query complete history without lower date boundary"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> DashboardActivityResponse:
@@ -2471,6 +2476,7 @@ async def get_dashboard_activity(
         email_account_id=email_account_id,
         date_from=date_from,
         date_to=date_to,
+        all_time=all_time,
     )
 
 
@@ -2485,6 +2491,7 @@ async def get_company_dashboard_activity(
     email_account_id: Optional[int] = Query(None, description="Optional email account ID scope"),
     date_from: Optional[datetime] = Query(None, description="Start date filter"),
     date_to: Optional[datetime] = Query(None, description="End date filter"),
+    all_time: bool = Query(False, description="Query complete history without lower date boundary"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> DashboardActivityResponse:
@@ -2496,6 +2503,7 @@ async def get_company_dashboard_activity(
         email_account_id=email_account_id,
         date_from=date_from,
         date_to=date_to,
+        all_time=all_time,
     )
 
 

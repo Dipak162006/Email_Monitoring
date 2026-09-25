@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { Inbox, AlertCircle, CheckCircle2, Info, X } from "lucide-react";
 import { emailsApi, emailAccountsApi } from "../services/api";
 import type { EmailItem, EmailListParams } from "../types/emails";
@@ -12,8 +12,6 @@ import { RestoreConfirmModal } from "../components/mailbox/RestoreConfirmModal";
 import { PermanentDeleteConfirmModal } from "../components/mailbox/PermanentDeleteConfirmModal";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Button } from "../components/ui/Button";
-
-const PAGE_SIZE = 25;
 
 export function MailboxPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -36,6 +34,7 @@ export function MailboxPage() {
   const [sortBy, setSortBy] = useState<"newest" | "oldest">("newest");
   const [unreadOnly, setUnreadOnly] = useState<boolean | undefined>(undefined);
   const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(50);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [selectedEmail, setSelectedEmail] = useState<EmailItem | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -102,13 +101,13 @@ export function MailboxPage() {
       search: debouncedSearchQuery.trim() || undefined,
       emailAccountId: selectedAccountId,
       isRead: unreadOnly ? false : undefined,
-      limit: PAGE_SIZE,
-      offset: (currentPage - 1) * PAGE_SIZE,
+      limit: pageSize,
+      offset: (currentPage - 1) * pageSize,
       sort: sortBy,
     };
-  }, [activeFolder, debouncedSearchQuery, selectedAccountId, unreadOnly, currentPage, sortBy]);
+  }, [activeFolder, debouncedSearchQuery, selectedAccountId, unreadOnly, currentPage, pageSize, sortBy]);
 
-  // Fetch email list
+  // Fetch email list with keepPreviousData to prevent unmounting/reset during pagination
   const {
     data: emailListData,
     isLoading,
@@ -118,19 +117,22 @@ export function MailboxPage() {
   } = useQuery({
     queryKey: ["emails", listParams],
     queryFn: () => emailsApi.listEmails(listParams),
+    placeholderData: keepPreviousData,
     staleTime: 15000,
   });
 
   const emails = emailListData?.emails || [];
   const totalEmails = emailListData?.total || 0;
 
-  // Pagination safety: reset to page 1 if current page exceeds total pages
-  const totalPages = Math.ceil(totalEmails / PAGE_SIZE) || 1;
+  // Pagination safety: only clamp if data has successfully loaded, total > 0, and currentPage exceeds totalPages
   useEffect(() => {
-    if (currentPage > totalPages) {
-      setCurrentPage(1);
+    if (emailListData && emailListData.total > 0) {
+      const calculatedTotalPages = Math.ceil(emailListData.total / pageSize);
+      if (currentPage > calculatedTotalPages) {
+        setCurrentPage(Math.max(1, calculatedTotalPages));
+      }
     }
-  }, [currentPage, totalPages]);
+  }, [emailListData, currentPage, pageSize]);
 
   // Selection Scoping: Only allow selection of emails currently visible on the page
   const visibleEmailIds = useMemo(() => new Set(emails.map((e) => e.id)), [emails]);
@@ -191,6 +193,12 @@ export function MailboxPage() {
 
   const handlePageChange = (newPage: number) => {
     setCurrentPage(newPage);
+    setSelectedIds(new Set());
+  };
+
+  const handlePageSizeChange = (newSize: number) => {
+    setPageSize(newSize);
+    setCurrentPage(1);
     setSelectedIds(new Set());
   };
 
@@ -592,9 +600,10 @@ export function MailboxPage() {
           onSearchChange={handleSearchChange}
           folderTitle={folderTitle}
           currentPage={currentPage}
-          pageSize={PAGE_SIZE}
+          pageSize={pageSize}
           totalCount={totalEmails}
           onPageChange={handlePageChange}
+          onPageSizeChange={handlePageSizeChange}
         />
 
         {/* Desktop Table Column Headers */}

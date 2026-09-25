@@ -383,3 +383,126 @@ async def test_invalid_date_range(async_client: AsyncClient):
     )
     assert resp.status_code == 400
     assert "date_from cannot be later than date_to" in resp.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_dashboard_time_ranges_and_all_time(async_client: AsyncClient, db_session: AsyncSession):
+    """Verify stats across Today, 7d, 30d, 90d, 6m, 1y, and All Time with historical emails."""
+    token = await register_and_login(async_client, "timerange_user@test.com")
+    company_id = await create_company_helper(async_client, token, "TimeRange Corp")
+    account_id = await create_account_helper(async_client, token, company_id)
+
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Email timeline:
+    # 0: Today (2 hours ago or 1 hour into today)
+    # 1: 5 days ago (within 7d)
+    # 2: 20 days ago (within 30d)
+    # 3: 60 days ago (within 90d)
+    # 4: 120 days ago (within 6m / 180d)
+    # 5: 250 days ago (within 1y / 365d)
+    # 6: 500 days ago (very old email, > 1 year old, only in All Time)
+    email_offsets = [
+        today_start + timedelta(hours=1),
+        now - timedelta(days=5),
+        now - timedelta(days=20),
+        now - timedelta(days=60),
+        now - timedelta(days=120),
+        now - timedelta(days=250),
+        now - timedelta(days=500),
+    ]
+
+    for i, sent_time in enumerate(email_offsets):
+        db_session.add(
+            Email(
+                company_id=company_id,
+                email_account_id=account_id,
+                direction=EmailDirection.OUTGOING.value,
+                status=EmailStatus.SENT.value,
+                sender="support@timerange.com",
+                recipients=[f"user{i}@example.com"],
+                subject=f"Email age offset #{i}",
+                sent_at=sent_time,
+            )
+        )
+    await db_session.commit()
+
+    # 1. Today
+    resp_today = await async_client.get(
+        f"/api/v1/companies/{company_id}/emails/dashboard/stats",
+        params={"date_from": today_start.isoformat(), "date_to": now.isoformat()},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_today.status_code == 200
+    assert resp_today.json()["sent_count"] == 1
+
+    # 2. 7 Days
+    resp_7d = await async_client.get(
+        f"/api/v1/companies/{company_id}/emails/dashboard/stats",
+        params={"date_from": (now - timedelta(days=7)).isoformat(), "date_to": now.isoformat()},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_7d.status_code == 200
+    assert resp_7d.json()["sent_count"] == 2
+
+    # 3. 30 Days
+    resp_30d = await async_client.get(
+        f"/api/v1/companies/{company_id}/emails/dashboard/stats",
+        params={"date_from": (now - timedelta(days=30)).isoformat(), "date_to": now.isoformat()},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_30d.status_code == 200
+    assert resp_30d.json()["sent_count"] == 3
+
+    # 4. 90 Days
+    resp_90d = await async_client.get(
+        f"/api/v1/companies/{company_id}/emails/dashboard/stats",
+        params={"date_from": (now - timedelta(days=90)).isoformat(), "date_to": now.isoformat()},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_90d.status_code == 200
+    assert resp_90d.json()["sent_count"] == 4
+
+    # 5. 6 Months (180 days)
+    resp_6m = await async_client.get(
+        f"/api/v1/companies/{company_id}/emails/dashboard/stats",
+        params={"date_from": (now - timedelta(days=180)).isoformat(), "date_to": now.isoformat()},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_6m.status_code == 200
+    assert resp_6m.json()["sent_count"] == 5
+
+    # 6. 1 Year (365 days)
+    resp_1y = await async_client.get(
+        f"/api/v1/companies/{company_id}/emails/dashboard/stats",
+        params={"date_from": (now - timedelta(days=365)).isoformat(), "date_to": now.isoformat()},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_1y.status_code == 200
+    assert resp_1y.json()["sent_count"] == 6
+
+    # 7. All Time (all_time=true, no lower date boundary)
+    resp_all = await async_client.get(
+        f"/api/v1/companies/{company_id}/emails/dashboard/stats",
+        params={"all_time": "true", "date_to": now.isoformat()},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_all.status_code == 200
+    all_data = resp_all.json()
+    assert all_data["sent_count"] == 7
+    assert all_data["period_start"] is None
+    # No comparison percentage for all time
+    assert all_data["sent_change_percent"] is None
+
+    # Activity trends for All Time
+    resp_act_all = await async_client.get(
+        f"/api/v1/companies/{company_id}/emails/dashboard/activity",
+        params={"all_time": "true"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_act_all.status_code == 200
+    act_data = resp_act_all.json()
+    assert act_data["total_sent"] == 7
+    assert len(act_data["points"]) >= 500  # covers full history back to 500 days ago
+
