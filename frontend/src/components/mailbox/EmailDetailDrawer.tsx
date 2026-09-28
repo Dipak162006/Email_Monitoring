@@ -14,6 +14,7 @@ import {
   FileText,
   RotateCcw,
   Trash2,
+  PenTool,
 } from "lucide-react";
 import type { EmailItem } from "../../types/emails";
 import { emailsApi } from "../../services/api";
@@ -252,6 +253,28 @@ export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                     Delete Permanently
+                  </button>
+                )}
+              </>
+            ) : email.status === "DRAFT" ? (
+              <>
+                <Link to={`/compose?draft_id=${email.id}`}>
+                  <button
+                    type="button"
+                    className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                  >
+                    <PenTool className="h-3.5 w-3.5" />
+                    Continue Editing Draft
+                  </button>
+                </Link>
+                {onMoveToTrash && (
+                  <button
+                    type="button"
+                    onClick={() => onMoveToTrash(email.id)}
+                    className="px-3.5 py-2 rounded-lg bg-white border border-slate-200 hover:bg-rose-50 hover:border-rose-200 hover:text-rose-700 text-slate-700 text-xs font-semibold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                    title="Move to Trash"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
                   </button>
                 )}
               </>

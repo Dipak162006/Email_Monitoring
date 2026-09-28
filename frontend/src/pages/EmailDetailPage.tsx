@@ -19,6 +19,7 @@ import {
   RotateCcw,
   CheckCircle2,
   X,
+  PenTool,
 } from "lucide-react";
 import { emailsApi } from "../services/api";
 import { Card, CardContent } from "../components/ui/Card";
@@ -227,6 +228,25 @@ export function EmailDetailPage() {
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 Delete Permanently
+              </Button>
+            </>
+          ) : email.status === "DRAFT" ? (
+            <>
+              <Link to={`/compose?draft_id=${email.id}`}>
+                <Button size="sm" className="gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white">
+                  <PenTool className="h-3.5 w-3.5" />
+                  Continue Editing Draft
+                </Button>
+              </Link>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => deleteMutation.mutate()}
+                disabled={deleteMutation.isPending}
+                className="gap-1.5 text-rose-600 hover:bg-rose-50 border-slate-200"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Discard Draft
               </Button>
             </>
           ) : (

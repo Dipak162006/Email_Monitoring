@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   Send,
@@ -71,16 +71,28 @@ export function ComposePage() {
   const [subject, setSubject] = useState("");
   const [bodyHtml, setBodyHtml] = useState("");
   const [bodyText, setBodyText] = useState("");
-  
-  // Attachments: server attachments (saved to draft) + staged local files
-  const [serverAttachments, setServerAttachments] = useState<AttachmentItem[]>([]);
-  const [stagedFiles, setStagedFiles] = useState<File[]>([]);
 
+  // Attachments: server attachments persisted directly to the active draft
+  const [serverAttachments, setServerAttachments] = useState<AttachmentItem[]>([]);
+
+  // Draft & Autosave State
   const [draftId, setDraftId] = useState<number | null>(null);
+  const draftIdRef = useRef<number | null>(null);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
   const [selectedSignature, setSelectedSignature] = useState<EmailSignatureItem | null>(null);
 
+  // Concurrency & Lifecycle Refs
+  const isSavingRef = useRef(false);
+  const pendingSaveRef = useRef(false);
+  const isSendingRef = useRef(false);
+  const isDiscardingRef = useRef(false);
+  const hasUnsavedChangesRef = useRef(false);
+  const autosaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   // UI Modals & Loading
+  const [isSending, setIsSending] = useState(false);
+  const [isDiscarding, setIsDiscarding] = useState(false);
   const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
   const [isSignatureModalOpen, setIsSignatureModalOpen] = useState(false);
   const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
@@ -94,12 +106,74 @@ export function ComposePage() {
     staleTime: 60000,
   });
 
-  // Set default account when accounts load
+  // Keep draftIdRef synchronized with draftId state
+  useEffect(() => {
+    draftIdRef.current = draftId;
+  }, [draftId]);
+
+  // Set default account when accounts load (if none selected yet)
   useEffect(() => {
     if (accounts.length > 0 && selectedAccountId === null) {
       setSelectedAccountId(accounts[0].id);
     }
   }, [accounts, selectedAccountId]);
+
+  // Keep latest state ref up to date for reliable autosave reads
+  const latestStateRef = useRef({
+    selectedAccountId,
+    toRecipients,
+    ccRecipients,
+    bccRecipients,
+    subject,
+    bodyHtml,
+    bodyText,
+    replyThreadId,
+    replyInReplyTo,
+    selectedSignature,
+    serverAttachments,
+  });
+
+  useEffect(() => {
+    latestStateRef.current = {
+      selectedAccountId,
+      toRecipients,
+      ccRecipients,
+      bccRecipients,
+      subject,
+      bodyHtml,
+      bodyText,
+      replyThreadId,
+      replyInReplyTo,
+      selectedSignature,
+      serverAttachments,
+    };
+  }, [
+    selectedAccountId,
+    toRecipients,
+    ccRecipients,
+    bccRecipients,
+    subject,
+    bodyHtml,
+    bodyText,
+    replyThreadId,
+    replyInReplyTo,
+    selectedSignature,
+    serverAttachments,
+  ]);
+
+  // Check if there is meaningful content to warrant creating or updating a draft
+  const hasMeaningfulContent = useCallback(() => {
+    const s = latestStateRef.current;
+    return (
+      s.toRecipients.length > 0 ||
+      s.ccRecipients.length > 0 ||
+      s.bccRecipients.length > 0 ||
+      s.subject.trim().length > 0 ||
+      s.bodyText.trim().length > 0 ||
+      (s.bodyHtml.trim().length > 0 && s.bodyHtml !== "<p></p>" && s.bodyHtml !== "<p><br></p>") ||
+      s.serverAttachments.length > 0
+    );
+  }, []);
 
   // Handle Reply, Forward, or existing Draft pre-population
   useEffect(() => {
@@ -109,6 +183,7 @@ export function ComposePage() {
         try {
           const draftEmail = await emailsApi.getEmailById(Number(draftParamId));
           setDraftId(draftEmail.id);
+          draftIdRef.current = draftEmail.id;
           if (draftEmail.email_account_id) {
             setSelectedAccountId(draftEmail.email_account_id);
           }
@@ -141,6 +216,13 @@ export function ComposePage() {
           const atts = await emailsApi.getAttachments(draftEmail.id);
           if (atts?.attachments) {
             setServerAttachments(atts.attachments);
+          }
+          const saveDate = draftEmail.updated_at || draftEmail.created_at;
+          if (saveDate) {
+            setLastSavedTime(
+              new Date(saveDate).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+            );
+            setSaveStatus("saved");
           }
           return;
         } catch (err) {
@@ -195,200 +277,148 @@ export function ComposePage() {
     loadReferencedEmail();
   }, [replyToId, forwardId, draftParamId]);
 
-  const selectedAccount = accounts.find((a: AuthorizedEmailAccount) => a.id === selectedAccountId);
+  // Core save routine with race-condition protection and serialization
+  const performSave = useCallback(async (): Promise<number | null> => {
+    if (isSendingRef.current || isDiscardingRef.current) return null;
+    const cur = latestStateRef.current;
+    if (!cur.selectedAccountId) return null;
+    if (!hasMeaningfulContent()) return null;
 
-  // Combine server attachments and staged local files
-  const combinedAttachments: ComposeAttachment[] = [
-    ...serverAttachments.map((att) => ({
-      id: att.id,
-      file_name: att.file_name,
-      file_size: att.file_size,
-      content_type: att.content_type,
-      isPending: false,
-    })),
-    ...stagedFiles.map((file, idx) => ({
-      id: `staged-${idx}-${file.name}`,
-      file_name: file.name,
-      file_size: file.size,
-      content_type: file.type || "application/octet-stream",
-      isPending: true,
-    })),
-  ];
+    // If another save is currently in-flight, mark pending and return current ID
+    if (isSavingRef.current) {
+      pendingSaveRef.current = true;
+      return draftIdRef.current;
+    }
 
-  // Save Draft Mutation
-  const saveDraftMutation = useMutation({
-    mutationFn: async (): Promise<number> => {
-      if (!selectedAccountId) {
-        throw new Error(
-          "A sender email account is required to save drafts. Please select an authorized account from the 'From' selector."
-        );
-      }
+    isSavingRef.current = true;
+    setSaveStatus("saving");
 
+    try {
+      const state = latestStateRef.current;
       const payload: EmailDraftPayload = {
-        email_account_id: selectedAccountId,
-        to: toRecipients,
-        cc: ccRecipients.length > 0 ? ccRecipients : undefined,
-        bcc: bccRecipients.length > 0 ? bccRecipients : undefined,
-        subject,
-        body_text: bodyText || undefined,
-        body_html: bodyHtml || undefined,
-        thread_id: replyThreadId,
-        in_reply_to: replyInReplyTo,
+        email_account_id: state.selectedAccountId!,
+        to: state.toRecipients,
+        cc: state.ccRecipients.length > 0 ? state.ccRecipients : undefined,
+        bcc: state.bccRecipients.length > 0 ? state.bccRecipients : undefined,
+        subject: state.subject,
+        body_text: state.bodyText || undefined,
+        body_html: state.bodyHtml || undefined,
+        thread_id: state.replyThreadId,
+        in_reply_to: state.replyInReplyTo,
       };
 
-      let activeDraftId = draftId;
-      if (activeDraftId) {
-        const updated = await emailsApi.updateDraft(activeDraftId, payload);
-        activeDraftId = updated.id;
+      let activeId = draftIdRef.current;
+      if (activeId) {
+        const updated = await emailsApi.updateDraft(activeId, payload);
+        activeId = updated.id;
       } else {
         const created = await emailsApi.createDraft(payload);
-        activeDraftId = created.id;
+        activeId = created.id;
+        draftIdRef.current = created.id;
         setDraftId(created.id);
       }
 
-      // If there are staged files, upload them now to the draft
-      if (stagedFiles.length > 0) {
-        setIsUploadingAttachment(true);
-        const remaining = [...stagedFiles];
-        try {
-          while (remaining.length > 0) {
-            const file = remaining[0];
-            const uploaded = await emailsApi.uploadDraftAttachment(activeDraftId, file);
-            setServerAttachments((prev) => [...prev, uploaded]);
-            remaining.shift();
-            setStagedFiles([...remaining]);
-          }
-        } catch (uploadErr) {
-          remaining.shift();
-          setStagedFiles([...remaining]);
-          throw uploadErr;
-        }
-      }
-
-      return activeDraftId;
-    },
-    onSuccess: () => {
-      setLastSavedTime(new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
+      const timeStr = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      setLastSavedTime(timeStr);
+      setSaveStatus("saved");
+      hasUnsavedChangesRef.current = false;
       queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
-      setErrorMessage(null);
-    },
-    onError: (err: Error) => {
-      setErrorMessage(err.message || "Failed to save draft.");
-    },
-    onSettled: () => {
-      setIsUploadingAttachment(false);
-    },
-  });
-
-  // Send Mutation
-  const sendMutation = useMutation({
-    mutationFn: async () => {
-      if (!selectedAccountId) {
-        throw new Error(
-          "A sender email account is required before sending. Please select an authorized account from the 'From' selector."
-        );
-      }
-      if (toRecipients.length === 0) {
-        throw new Error("Please provide at least one recipient in the 'To' field.");
-      }
-      if (!bodyText.trim() && !bodyHtml.trim()) {
-        throw new Error("Please enter email body content before sending.");
-      }
-
-      // If we have staged files or existing server attachments, we must send via the draft workflow
-      let activeDraftId = draftId;
-      if (!activeDraftId && (stagedFiles.length > 0 || serverAttachments.length > 0)) {
-        const created = await emailsApi.createDraft({
-          email_account_id: selectedAccountId,
-          to: toRecipients,
-          cc: ccRecipients.length > 0 ? ccRecipients : undefined,
-          bcc: bccRecipients.length > 0 ? bccRecipients : undefined,
-          subject,
-          body_text: bodyText,
-          body_html: bodyHtml,
-          thread_id: replyThreadId,
-          in_reply_to: replyInReplyTo,
-        });
-        activeDraftId = created.id;
-        setDraftId(created.id);
-      }
-
-      // Upload any staged files to the draft
-      if (activeDraftId && stagedFiles.length > 0) {
-        setIsUploadingAttachment(true);
-        const remaining = [...stagedFiles];
-        try {
-          while (remaining.length > 0) {
-            const file = remaining[0];
-            const uploaded = await emailsApi.uploadDraftAttachment(activeDraftId, file);
-            setServerAttachments((prev) => [...prev, uploaded]);
-            remaining.shift();
-            setStagedFiles([...remaining]);
-          }
-        } catch (uploadErr) {
-          remaining.shift();
-          setStagedFiles([...remaining]);
-          throw uploadErr;
-        }
-      }
-
-      // Transmit via draft if a draft exists
-      if (activeDraftId) {
-        await emailsApi.updateDraft(activeDraftId, {
-          email_account_id: selectedAccountId,
-          to: toRecipients,
-          cc: ccRecipients.length > 0 ? ccRecipients : undefined,
-          bcc: bccRecipients.length > 0 ? bccRecipients : undefined,
-          subject,
-          body_text: bodyText,
-          body_html: bodyHtml,
-          thread_id: replyThreadId,
-          in_reply_to: replyInReplyTo,
-        });
-        return emailsApi.sendDraft(activeDraftId);
-      }
-
-      // Direct send when there are no attachments
-      const payload: EmailSendPayload = {
-        email_account_id: selectedAccountId,
-        to: toRecipients,
-        cc: ccRecipients.length > 0 ? ccRecipients : undefined,
-        bcc: bccRecipients.length > 0 ? bccRecipients : undefined,
-        subject,
-        body_text: bodyText || undefined,
-        body_html: bodyHtml || undefined,
-        signature_id: selectedSignature ? selectedSignature.id : undefined,
-        thread_id: replyThreadId,
-        in_reply_to: replyInReplyTo,
-      };
-
-      return emailsApi.sendEmail(payload);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["emails"] });
-      queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
-      navigate("/mailbox?folder=sent");
-    },
-    onError: (err: Error) => {
-      setErrorMessage(err.message || "Failed to send email. Please check your recipient addresses and SMTP settings.");
-    },
-    onSettled: () => {
-      setIsUploadingAttachment(false);
-    },
-  });
-
-  // Handle Discard
-  const handleDiscard = async () => {
-    if (draftId) {
-      try {
-        await emailsApi.discardDraft(draftId);
-      } catch (err) {
-        console.error("Error discarding draft:", err);
+      return activeId;
+    } catch (err: unknown) {
+      console.error("Autosave draft error:", err);
+      setSaveStatus("error");
+      return null;
+    } finally {
+      isSavingRef.current = false;
+      // If changes occurred during the in-flight request, process the pending save immediately
+      if (pendingSaveRef.current && !isSendingRef.current && !isDiscardingRef.current) {
+        pendingSaveRef.current = false;
+        performSave();
       }
     }
-    setStagedFiles([]);
-    setServerAttachments([]);
-    navigate("/mailbox");
+  }, [hasMeaningfulContent, queryClient]);
+
+  // Debounced autosave trigger (900ms delay)
+  const triggerAutosave = useCallback(() => {
+    if (isSendingRef.current || isDiscardingRef.current) return;
+    hasUnsavedChangesRef.current = true;
+
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current);
+    }
+
+    autosaveTimerRef.current = setTimeout(() => {
+      if (!isSendingRef.current && !isDiscardingRef.current) {
+        performSave();
+      }
+    }, 900);
+  }, [performSave]);
+
+  // Input Handlers with automatic autosave triggers
+  const handleToRecipientsChange = (recipients: string[]) => {
+    setToRecipients(recipients);
+    latestStateRef.current.toRecipients = recipients;
+    triggerAutosave();
+  };
+
+  const handleCcRecipientsChange = (recipients: string[]) => {
+    setCcRecipients(recipients);
+    latestStateRef.current.ccRecipients = recipients;
+    triggerAutosave();
+  };
+
+  const handleBccRecipientsChange = (recipients: string[]) => {
+    setBccRecipients(recipients);
+    latestStateRef.current.bccRecipients = recipients;
+    triggerAutosave();
+  };
+
+  const handleSubjectChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setSubject(val);
+    latestStateRef.current.subject = val;
+    triggerAutosave();
+  };
+
+  const handleBodyChange = (html: string, text: string) => {
+    setBodyHtml(html);
+    setBodyText(text);
+    latestStateRef.current.bodyHtml = html;
+    latestStateRef.current.bodyText = text;
+    triggerAutosave();
+  };
+
+  const handleAccountChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const accId = Number(e.target.value);
+    setSelectedAccountId(accId);
+    latestStateRef.current.selectedAccountId = accId;
+    triggerAutosave();
+  };
+
+  const handleSelectTemplate = (template: EmailTemplateItem) => {
+    if (template.subject) {
+      setSubject(template.subject);
+      latestStateRef.current.subject = template.subject;
+    }
+    if (template.body_html) {
+      setBodyHtml(template.body_html);
+      setBodyText(template.body_text || "");
+      latestStateRef.current.bodyHtml = template.body_html;
+      latestStateRef.current.bodyText = template.body_text || "";
+    } else if (template.body_text) {
+      const html = `<p>${template.body_text.replace(/\n/g, "<br/>")}</p>`;
+      setBodyHtml(html);
+      setBodyText(template.body_text);
+      latestStateRef.current.bodyHtml = html;
+      latestStateRef.current.bodyText = template.body_text;
+    }
+    triggerAutosave();
+  };
+
+  const handleSelectSignature = (sig: EmailSignatureItem) => {
+    setSelectedSignature(sig);
+    latestStateRef.current.selectedSignature = sig;
+    triggerAutosave();
   };
 
   // Handle Attachment Selection
@@ -398,7 +428,6 @@ export function ComposePage() {
 
     const files = Array.from(fileList);
 
-    // Clear previous attachment-related error when a new selection begins
     if (isAttachmentError(errorMessage)) {
       setErrorMessage(null);
     }
@@ -416,27 +445,54 @@ export function ComposePage() {
 
     if (oversizedFiles.length > 0) {
       const names = oversizedFiles.map((f) => `"${f.name}"`).join(", ");
-      setErrorMessage(
-        `File ${names} exceeds the maximum attachment limit of 25 MB.`
-      );
+      setErrorMessage(`File ${names} exceeds the maximum attachment limit of 25 MB.`);
     }
 
-    // Process valid files if any
     if (validFiles.length > 0) {
+      if (!selectedAccountId) {
+        setErrorMessage("Please select an authorized sender account before attaching files.");
+        return;
+      }
+
       try {
-        if (draftId) {
-          setIsUploadingAttachment(true);
-          for (const file of validFiles) {
-            const uploaded = await emailsApi.uploadDraftAttachment(draftId, file);
-            setServerAttachments((prev) => [...prev, uploaded]);
-          }
-        } else {
-          // Stage files locally until user saves or sends
-          setStagedFiles((prev) => [...prev, ...validFiles]);
+        setIsUploadingAttachment(true);
+        setSaveStatus("saving");
+
+        // Ensure draft exists prior to uploading attachment
+        let activeDraftId = draftIdRef.current;
+        if (!activeDraftId) {
+          const payload: EmailDraftPayload = {
+            email_account_id: selectedAccountId,
+            to: toRecipients,
+            cc: ccRecipients.length > 0 ? ccRecipients : undefined,
+            bcc: bccRecipients.length > 0 ? bccRecipients : undefined,
+            subject,
+            body_text: bodyText || undefined,
+            body_html: bodyHtml || undefined,
+            thread_id: replyThreadId,
+            in_reply_to: replyInReplyTo,
+          };
+          const created = await emailsApi.createDraft(payload);
+          activeDraftId = created.id;
+          draftIdRef.current = created.id;
+          setDraftId(created.id);
         }
+
+        // Upload attachments directly to the server draft
+        for (const file of validFiles) {
+          const uploaded = await emailsApi.uploadDraftAttachment(activeDraftId, file);
+          setServerAttachments((prev) => [...prev, uploaded]);
+        }
+
+        const timeStr = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        setLastSavedTime(timeStr);
+        setSaveStatus("saved");
+        hasUnsavedChangesRef.current = false;
+        queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "Failed to upload attachment.";
         setErrorMessage(msg);
+        setSaveStatus("error");
       } finally {
         setIsUploadingAttachment(false);
       }
@@ -449,96 +505,226 @@ export function ComposePage() {
 
   // Handle Attachment Removal
   const handleRemoveAttachment = async (id: number | string) => {
-    // Clear attachment error when an attachment is removed
     if (isAttachmentError(errorMessage)) {
       setErrorMessage(null);
     }
 
-    if (typeof id === "string") {
-      // Staged local file (e.g., staged-0-filename)
-      const parts = id.split("-");
-      const idx = parseInt(parts[1], 10);
-      setStagedFiles((prev) => prev.filter((_, i) => i !== idx));
+    const activeDraftId = draftIdRef.current;
+    if (activeDraftId && typeof id === "number") {
+      try {
+        await emailsApi.deleteDraftAttachment(activeDraftId, id);
+        setServerAttachments((prev) => prev.filter((a) => a.id !== id));
+        queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+      } catch (err) {
+        console.error("Failed to delete attachment:", err);
+        setErrorMessage("Failed to remove attachment from server.");
+      }
     } else {
-      // Server attachment
-      if (draftId) {
-        try {
-          await emailsApi.deleteDraftAttachment(draftId, id);
-          setServerAttachments((prev) => prev.filter((a) => a.id !== id));
-        } catch (err) {
-          console.error("Failed to delete attachment:", err);
-          setErrorMessage("Failed to remove attachment from server.");
-        }
+      setServerAttachments((prev) => prev.filter((a) => a.id !== id));
+    }
+  };
+
+  // Discard Handler
+  const handleDiscard = async () => {
+    isDiscardingRef.current = true;
+    setIsDiscarding(true);
+
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    pendingSaveRef.current = false;
+
+    const activeDraftId = draftIdRef.current;
+    if (activeDraftId) {
+      try {
+        await emailsApi.discardDraft(activeDraftId);
+      } catch (err) {
+        console.error("Error discarding draft:", err);
       }
     }
+
+    setServerAttachments([]);
+    queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+    queryClient.invalidateQueries({ queryKey: ["emails"] });
+    navigate("/mailbox");
   };
 
-  // Handle Template Insertion
-  const handleSelectTemplate = (template: EmailTemplateItem) => {
-    if (template.subject) {
-      setSubject(template.subject);
+  // Back Navigation Handler: saves any pending meaningful changes before leaving
+  const handleBackToMailbox = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (isDiscardingRef.current || isSendingRef.current) {
+      navigate("/mailbox");
+      return;
     }
-    if (template.body_html) {
-      setBodyHtml(template.body_html);
-      setBodyText(template.body_text || "");
-    } else if (template.body_text) {
-      setBodyHtml(`<p>${template.body_text.replace(/\n/g, "<br/>")}</p>`);
-      setBodyText(template.body_text);
-    } 
+
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+
+    if (hasUnsavedChangesRef.current && hasMeaningfulContent() && selectedAccountId) {
+      try {
+        await performSave();
+      } catch (err) {
+        console.error("Failed to save draft on exit:", err);
+      }
+    }
+    navigate("/mailbox");
   };
 
-  // Handle Signature Insertion
-  const handleSelectSignature = (sig: EmailSignatureItem) => {
-    setSelectedSignature(sig);
+  // Send Message Handler
+  const handleSend = async () => {
+    if (!selectedAccountId) {
+      setErrorMessage(
+        "A sender email account is required before sending. Please select an authorized account from the 'From' selector."
+      );
+      return;
+    }
+    if (toRecipients.length === 0) {
+      setErrorMessage("Please provide at least one recipient in the 'To' field.");
+      return;
+    }
+    if (!bodyText.trim() && !bodyHtml.trim()) {
+      setErrorMessage("Please enter email body content before sending.");
+      return;
+    }
+
+    // 1. Mark as sending to stop autosaves
+    isSendingRef.current = true;
+    setIsSending(true);
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    pendingSaveRef.current = false;
+
+    // 2. Wait for any in-flight autosave to settle
+    while (isSavingRef.current) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    try {
+      const cur = latestStateRef.current;
+      const activeDraftId = draftIdRef.current;
+
+      // Case B: Draft exists
+      if (activeDraftId) {
+        // Persist latest state to the draft before sending
+        await emailsApi.updateDraft(activeDraftId, {
+          email_account_id: cur.selectedAccountId!,
+          to: cur.toRecipients,
+          cc: cur.ccRecipients.length > 0 ? cur.ccRecipients : undefined,
+          bcc: cur.bccRecipients.length > 0 ? cur.bccRecipients : undefined,
+          subject: cur.subject,
+          body_text: cur.bodyText || undefined,
+          body_html: cur.bodyHtml || undefined,
+          thread_id: cur.replyThreadId,
+          in_reply_to: cur.replyInReplyTo,
+        });
+
+        await emailsApi.sendDraft(activeDraftId);
+      } else {
+        // Case A: No draft exists yet (direct send)
+        const payload: EmailSendPayload = {
+          email_account_id: cur.selectedAccountId!,
+          to: cur.toRecipients,
+          cc: cur.ccRecipients.length > 0 ? cur.ccRecipients : undefined,
+          bcc: cur.bccRecipients.length > 0 ? cur.bccRecipients : undefined,
+          subject: cur.subject,
+          body_text: cur.bodyText || undefined,
+          body_html: cur.bodyHtml || undefined,
+          signature_id: cur.selectedSignature ? cur.selectedSignature.id : undefined,
+          thread_id: cur.replyThreadId,
+          in_reply_to: cur.replyInReplyTo,
+        };
+        await emailsApi.sendEmail(payload);
+      }
+
+      queryClient.invalidateQueries({ queryKey: ["emails"] });
+      queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+      navigate("/mailbox?folder=sent");
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : "Failed to send email. Please check your recipient addresses and SMTP settings.";
+      setErrorMessage(msg);
+      isSendingRef.current = false;
+      setIsSending(false);
+    }
   };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+      }
+    };
+  }, []);
+
+  const selectedAccount = accounts.find((a: AuthorizedEmailAccount) => a.id === selectedAccountId);
+
+  const combinedAttachments: ComposeAttachment[] = serverAttachments.map((att) => ({
+    id: att.id,
+    file_name: att.file_name,
+    file_size: att.file_size,
+    content_type: att.content_type,
+    isPending: false,
+  }));
 
   return (
     <div className="w-full max-w-5xl mx-auto space-y-4">
       {/* Top Action Bar */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         {/* Back to Mailbox Button */}
-        <Link
-          to="/mailbox"
-          className="inline-flex items-center gap-2 px-3 py-1.5 text-xs sm:text-sm font-medium text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg shadow-2xs transition-colors"
+        <button
+          type="button"
+          onClick={handleBackToMailbox}
+          className="inline-flex items-center gap-2 px-3 py-1.5 text-xs sm:text-sm font-medium text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg shadow-2xs transition-colors cursor-pointer"
         >
           <ArrowLeft className="h-4 w-4" />
           <span>Back to Mailbox</span>
-        </Link>
+        </button>
 
         {/* Status and Action Buttons */}
         <div className="flex items-center gap-3">
-          {lastSavedTime && (
+          {saveStatus === "saving" && (
+            <span className="text-xs text-slate-500 font-medium flex items-center gap-1.5 mr-1 animate-pulse">
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-600" />
+              <span>Saving...</span>
+            </span>
+          )}
+          {saveStatus === "saved" && lastSavedTime && (
             <span className="text-xs text-slate-500 font-medium flex items-center gap-1.5 mr-1">
               <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-              <span>Draft saved at {lastSavedTime}</span>
+              <span>Saved {lastSavedTime}</span>
+            </span>
+          )}
+          {saveStatus === "error" && (
+            <span className="text-xs text-rose-500 font-medium flex items-center gap-1.5 mr-1">
+              <AlertCircle className="h-4 w-4 text-rose-500" />
+              <span>Save failed</span>
             </span>
           )}
 
           <button
             type="button"
             onClick={handleDiscard}
-            className="text-slate-500 hover:text-rose-600 text-xs sm:text-sm font-medium transition-colors px-3 py-1.5 rounded-lg hover:bg-rose-50"
+            disabled={isSending || isDiscarding}
+            className="text-slate-500 hover:text-rose-600 text-xs sm:text-sm font-medium transition-colors px-3 py-1.5 rounded-lg hover:bg-rose-50 disabled:opacity-50 cursor-pointer"
           >
             Discard
           </button>
 
           <button
             type="button"
-            onClick={() => saveDraftMutation.mutate()}
-            disabled={saveDraftMutation.isPending}
-            className="border border-slate-300 text-slate-700 bg-white px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-medium hover:bg-slate-50 transition-colors shadow-2xs flex items-center gap-1.5 disabled:opacity-50"
+            onClick={handleSend}
+            disabled={isSending || isUploadingAttachment}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-lg text-xs sm:text-sm font-medium flex items-center gap-2 shadow-xs transition-all disabled:opacity-50 cursor-pointer"
           >
-            {saveDraftMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            <span>Save Draft</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => sendMutation.mutate()}
-            disabled={sendMutation.isPending}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-lg text-xs sm:text-sm font-medium flex items-center gap-2 shadow-xs transition-all disabled:opacity-50"
-          >
-            {sendMutation.isPending ? (
+            {isSending ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
                 <span>Sending...</span>
@@ -575,9 +761,11 @@ export function ComposePage() {
         {/* Card Header */}
         <div className="px-6 sm:px-8 pt-6 pb-4 border-b border-slate-100 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <h1 className="text-lg sm:text-xl font-semibold text-slate-900">New Message</h1>
+            <h1 className="text-lg sm:text-xl font-semibold text-slate-900">
+              {draftId ? "Edit Draft" : "New Message"}
+            </h1>
             <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
-              {draftId ? "Draft Saved" : "New"}
+              {draftId ? "Draft" : "New"}
             </span>
           </div>
         </div>
@@ -599,7 +787,7 @@ export function ComposePage() {
                 <div className="relative flex items-center">
                   <select
                     value={selectedAccountId ?? ""}
-                    onChange={(e) => setSelectedAccountId(Number(e.target.value))}
+                    onChange={handleAccountChange}
                     className="appearance-none bg-slate-50 hover:bg-slate-100 rounded-lg text-slate-900 text-xs sm:text-sm font-medium py-1.5 pl-7 pr-8 border border-slate-200 shadow-2xs outline-none focus:ring-1 focus:ring-indigo-600 focus:border-indigo-600 cursor-pointer transition-colors"
                   >
                     {accounts.map((acc: AuthorizedEmailAccount) => (
@@ -625,7 +813,7 @@ export function ComposePage() {
           <RecipientInput
             label="To"
             recipients={toRecipients}
-            onChange={setToRecipients}
+            onChange={handleToRecipientsChange}
             placeholder="Add recipients (press Enter)..."
             rightAction={
               <button
@@ -646,7 +834,7 @@ export function ComposePage() {
             <RecipientInput
               label="Cc"
               recipients={ccRecipients}
-              onChange={setCcRecipients}
+              onChange={handleCcRecipientsChange}
               placeholder="Add CC recipients..."
             />
           )}
@@ -656,7 +844,7 @@ export function ComposePage() {
             <RecipientInput
               label="Bcc"
               recipients={bccRecipients}
-              onChange={setBccRecipients}
+              onChange={handleBccRecipientsChange}
               placeholder="Add BCC recipients..."
             />
           )}
@@ -667,7 +855,7 @@ export function ComposePage() {
             <input
               type="text"
               value={subject}
-              onChange={(e) => setSubject(e.target.value)}
+              onChange={handleSubjectChange}
               placeholder="Enter email subject"
               className="flex-1 text-slate-900 font-medium text-sm sm:text-base outline-none placeholder-slate-400 py-0.5 bg-transparent"
             />
@@ -678,14 +866,11 @@ export function ComposePage() {
         <div className="p-6 sm:p-8 space-y-4">
           <RichTextEditor
             initialHtml={bodyHtml}
-            onChange={(html, text) => {
-              setBodyHtml(html);
-              setBodyText(text);
-            }}
+            onChange={handleBodyChange}
             placeholder="Write your email message here..."
           />
 
-          {/* Attachment Upload List (server attachments + staged files) */}
+          {/* Attachment Upload List */}
           <AttachmentUploadList
             attachments={combinedAttachments}
             onRemove={handleRemoveAttachment}
@@ -754,31 +939,41 @@ export function ComposePage() {
 
           {/* Right Actions */}
           <div className="flex items-center gap-3">
+            {saveStatus === "saving" && (
+              <span className="text-xs text-slate-400 font-medium flex items-center gap-1.5 mr-1 animate-pulse">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-500" />
+                <span>Saving...</span>
+              </span>
+            )}
+            {saveStatus === "saved" && lastSavedTime && (
+              <span className="text-xs text-slate-400 font-medium flex items-center gap-1.5 mr-1">
+                <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                <span>Saved {lastSavedTime}</span>
+              </span>
+            )}
+            {saveStatus === "error" && (
+              <span className="text-xs text-rose-500 font-medium flex items-center gap-1.5 mr-1">
+                <AlertCircle className="h-4 w-4 text-rose-500" />
+                <span>Save failed</span>
+              </span>
+            )}
+
             <button
               type="button"
               onClick={handleDiscard}
-              className="text-slate-500 hover:text-rose-600 text-xs sm:text-sm font-medium transition-colors px-3 py-1.5 rounded-lg hover:bg-rose-50"
+              disabled={isSending || isDiscarding}
+              className="text-slate-500 hover:text-rose-600 text-xs sm:text-sm font-medium transition-colors px-3 py-1.5 rounded-lg hover:bg-rose-50 disabled:opacity-50 cursor-pointer"
             >
               Discard
             </button>
 
             <button
               type="button"
-              onClick={() => saveDraftMutation.mutate()}
-              disabled={saveDraftMutation.isPending}
-              className="border border-slate-300 text-slate-700 bg-white px-4 py-2 rounded-lg text-xs sm:text-sm font-medium hover:bg-slate-50 transition-colors shadow-2xs flex items-center gap-1.5 disabled:opacity-50"
+              onClick={handleSend}
+              disabled={isSending || isUploadingAttachment}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg text-xs sm:text-sm font-medium flex items-center gap-2 shadow-xs transition-all disabled:opacity-50 cursor-pointer"
             >
-              {saveDraftMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-              <span>Save as Draft</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => sendMutation.mutate()}
-              disabled={sendMutation.isPending}
-              className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg text-xs sm:text-sm font-medium flex items-center gap-2 shadow-xs transition-all disabled:opacity-50"
-            >
-              {sendMutation.isPending ? (
+              {isSending ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" />
                   <span>Sending...</span>
