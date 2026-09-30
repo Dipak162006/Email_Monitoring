@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>POST /api/v1/emails/send — Flow Diagram</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap');
+
+:root{
+  --bg:#0d1117; --surface:#161b22; --surface2:#21262d; --border:#30363d;
+  --text:#e6edf3; --dim:#8b949e; --muted:#484f58;
+  --fe:#58a6ff; --fe-bg:#0d2137; --fe-bdr:#1f6feb;
+  --api:#56d364; --api-bg:#0a1f0e; --api-bdr:#2ea043;
+  --svc:#e3b341; --svc-bg:#211800; --svc-bdr:#bb8009;
+  --smtp:#d2a8ff; --smtp-bg:#1a0d2e; --smtp-bdr:#8957e5;
+  --db:#ff7b72; --db-bg:#1f0d0d; --db-bdr:#da3633;
+  --auth:#ffa657; --auth-bg:#1f1200; --auth-bdr:#9e6a03;
+}
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;overflow:hidden;}
+
+/* ── TOP BAR ── */
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:.75rem 1.5rem;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;z-index:10;}
+.topbar-left h1{font-size:1rem;font-weight:700;color:var(--text);}
+.topbar-left p{font-size:.75rem;color:var(--dim);margin-top:.1rem;}
+.topbar-controls{display:flex;gap:.5rem;}
+.ctrl-btn{cursor:pointer;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--dim);padding:.35rem .65rem;font-size:.82rem;font-weight:600;transition:all .15s;}
+.ctrl-btn:hover{background:var(--border);color:var(--text);}
+
+/* ── LAYOUT ── */
+.workspace{display:flex;flex:1;overflow:hidden;}
+
+/* ── CANVAS AREA ── */
+.canvas-wrap{flex:1;overflow:auto;position:relative;background:var(--bg);}
+.canvas-wrap::-webkit-scrollbar{width:8px;height:8px;}
+.canvas-wrap::-webkit-scrollbar-track{background:var(--bg);}
+.canvas-wrap::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px;}
+
+.canvas{position:relative;min-width:1100px;padding:2rem 1.5rem 4rem;}
+
+/* ── SWIMLANE HEADERS ── */
+.lanes{display:grid;grid-template-columns:80px repeat(6,1fr);gap:0;margin-bottom:0;}
+.lane-hdr{text-align:center;padding:.6rem .4rem;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;border-radius:8px 8px 0 0;border:1px solid;border-bottom:none;cursor:pointer;transition:all .2s;position:relative;z-index:2;}
+.lane-hdr.num{background:transparent;border-color:transparent;color:var(--muted);}
+.lane-hdr.fe   {background:var(--fe-bg);  border-color:var(--fe-bdr);  color:var(--fe);}
+.lane-hdr.api  {background:var(--api-bg); border-color:var(--api-bdr); color:var(--api);}
+.lane-hdr.auth {background:var(--auth-bg);border-color:var(--auth-bdr);color:var(--auth);}
+.lane-hdr.svc  {background:var(--svc-bg); border-color:var(--svc-bdr); color:var(--svc);}
+.lane-hdr.smtp {background:var(--smtp-bg);border-color:var(--smtp-bdr);color:var(--smtp);}
+.lane-hdr.db   {background:var(--db-bg);  border-color:var(--db-bdr);  color:var(--db);}
+.lane-hdr:hover{filter:brightness(1.3);}
+.lane-hdr .icon{font-size:1.1rem;display:block;margin-bottom:.2rem;}
+
+/* ── DIAGRAM BODY ── */
+.diagram{display:grid;grid-template-columns:80px repeat(6,1fr);gap:0;position:relative;}
+
+/* vertical lane stripes */
+.lane-col{border:1px solid var(--border);border-top:none;border-bottom:none;min-height:100%;position:relative;}
+.lane-col.fe   {background:rgba(31,111,235,.03);}
+.lane-col.api  {background:rgba(46,160,67,.03);}
+.lane-col.auth {background:rgba(158,106,3,.04);}
+.lane-col.svc  {background:rgba(187,128,9,.03);}
+.lane-col.smtp {background:rgba(137,87,229,.04);}
+.lane-col.db   {background:rgba(218,54,51,.03);}
+.lane-col.num  {border-color:transparent;background:transparent;}
+
+/* ── STEP ROWS ── */
+.step-row{display:contents;}
+
+.row-num{display:flex;align-items:center;justify-content:center;height:70px;}
+.row-badge{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:700;background:var(--surface2);color:var(--dim);border:1.5px solid var(--border);}
+
+.cell{height:70px;display:flex;align-items:center;justify-content:center;position:relative;}
+
+/* node box */
+.node{
+  position:relative;
+  padding:.45rem .7rem;
+  border-radius:8px;
+  border:1.5px solid;
+  font-size:.78rem;
+  font-weight:600;
+  text-align:center;
+  cursor:pointer;
+  transition:all .2s;
+  line-height:1.3;
+  max-width:140px;
+  z-index:3;
+  user-select:none;
+}
+.node.fe   {background:var(--fe-bg);  border-color:var(--fe-bdr);  color:var(--fe);}
+.node.api  {background:var(--api-bg); border-color:var(--api-bdr); color:var(--api);}
+.node.auth {background:var(--auth-bg);border-color:var(--auth-bdr);color:var(--auth);}
+.node.svc  {background:var(--svc-bg); border-color:var(--svc-bdr); color:var(--svc);}
+.node.smtp {background:var(--smtp-bg);border-color:var(--smtp-bdr);color:var(--smtp);}
+.node.db   {background:var(--db-bg);  border-color:var(--db-bdr);  color:var(--db);}
+
+.node:hover,
+.node.active{filter:brightness(1.25);box-shadow:0 0 0 2px currentColor, 0 8px 24px rgba(0,0,0,.5);}
+
+/* diamond decision node */
+.node.diamond{transform:rotate(45deg);width:52px;height:52px;padding:0;display:flex;align-items:center;justify-content:center;border-radius:4px;}
+.node.diamond span{transform:rotate(-45deg);font-size:.65rem;display:block;text-align:center;line-height:1.1;}
+
+/* ── ARROWS SVG OVERLAY ── */
+#arrow-layer{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2;}
+
+/* ── DETAIL PANEL ── */
+.detail-panel{
+  width:340px;flex-shrink:0;
+  background:var(--surface);
+  border-left:1px solid var(--border);
+  display:flex;flex-direction:column;
+  overflow-y:auto;
+}
+.detail-panel::-webkit-scrollbar{width:6px;}
+.detail-panel::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px;}
+
+.panel-header{
+  padding:1.25rem 1.25rem .75rem;
+  border-bottom:1px solid var(--border);
+  position:sticky;top:0;background:var(--surface);z-index:1;
+}
+.panel-header .step-label{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin-bottom:.35rem;}
+.panel-header h2{font-size:1rem;font-weight:700;color:var(--text);line-height:1.35;}
+.panel-header .layer-chip{display:inline-block;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:.18rem .55rem;border-radius:9999px;margin-top:.4rem;}
+
+.panel-body{padding:1.25rem;display:flex;flex-direction:column;gap:1rem;}
+
+.meta-row{display:flex;flex-direction:column;gap:.2rem;}
+.meta-row label{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);}
+.meta-row .val{font-size:.84rem;color:var(--dim);}
+.meta-row code{font-family:'Fira Code',monospace;font-size:.78rem;background:var(--surface2);padding:.12rem .4rem;border-radius:4px;color:#a5d6ff;display:inline-block;margin:.05rem 0;}
+
+.detail-divider{height:1px;background:var(--border);margin:.25rem 0;}
+
+.detail-desc{font-size:.87rem;color:var(--dim);line-height:1.65;}
+.detail-desc strong{color:var(--text);}
+.detail-desc ul{list-style:disc;padding-left:1.25rem;margin-top:.4rem;}
+.detail-desc ul li{margin-bottom:.3rem;}
+
+.panel-placeholder{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.75rem;padding:2rem;text-align:center;color:var(--muted);}
+.panel-placeholder .ph-icon{font-size:2.5rem;opacity:.3;}
+.panel-placeholder p{font-size:.85rem;line-height:1.55;}
+
+/* ── LEGEND ── */
+.legend{display:flex;flex-wrap:wrap;gap:.5rem;padding:.75rem 1.5rem;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;}
+.leg-item{display:flex;align-items:center;gap:.4rem;font-size:.72rem;color:var(--dim);}
+.leg-line{width:24px;height:2px;}
+.leg-line.solid{background:var(--dim);}
+.leg-line.dashed{background:repeating-linear-gradient(90deg,var(--dim) 0,var(--dim) 4px,transparent 4px,transparent 8px);}
+.leg-line.error{background:#ff7b72;}
+
+/* highlight dimming */
+.dim-lane .node:not(.layer-match){opacity:.18;filter:none;}
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="topbar">
+  <div class="topbar-left">
+    <h1>POST /api/v1/emails/send — Execution Flow</h1>
+    <p>PulseMail · Click any node to see file, function, and full explanation</p>
+  </div>
+  <div class="topbar-controls">
+    <button class="ctrl-btn" onclick="zoomBy(-0.15)">− Zoom</button>
+    <button class="ctrl-btn" onclick="zoomBy(0.15)">+ Zoom</button>
+    <button class="ctrl-btn" onclick="resetZoom()">Fit</button>
+    <button class="ctrl-btn" onclick="clearHighlight()" id="clear-btn" style="display:none;color:var(--fe)">✕ Clear filter</button>
+  </div>
+</div>
+
+<!-- LEGEND -->
+<div class="legend">
+  <div class="leg-item"><svg width="28" height="10"><line x1="0" y1="5" x2="28" y2="5" stroke="#58a6ff" stroke-width="2" marker-end="url(#ah-b)"/></svg> <span>Call / Request</span></div>
+  <div class="leg-item"><svg width="28" height="10"><line x1="0" y1="5" x2="28" y2="5" stroke="#8b949e" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#ah-d)"/></svg> <span>Response</span></div>
+  <div class="leg-item"><svg width="28" height="10"><line x1="0" y1="5" x2="28" y2="5" stroke="#ff7b72" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#ah-e)"/></svg> <span>Error path</span></div>
+  <div class="leg-item"><div style="width:16px;height:16px;background:#211800;border:1.5px solid #bb8009;border-radius:4px;transform:rotate(45deg)"></div> <span style="margin-left:.3rem">Decision</span></div>
+  <div class="leg-item" style="margin-left:auto;font-size:.72rem;color:var(--muted)">Click a lane header to filter by layer</div>
+</div>
+
+<!-- WORKSPACE -->
+<div class="workspace">
+
+  <!-- CANVAS -->
+  <div class="canvas-wrap" id="canvas-wrap">
+    <div class="canvas" id="canvas" style="transform-origin:top left;">
+
+      <!-- SWIMLANE HEADERS -->
+      <div class="lanes">
+        <div class="lane-hdr num">#</div>
+        <div class="lane-hdr fe"   onclick="filterLayer('fe')"   title="Click to highlight"><span class="icon">🖥️</span>Frontend</div>
+        <div class="lane-hdr api"  onclick="filterLayer('api')"  title="Click to highlight"><span class="icon">⚡</span>FastAPI Router</div>
+        <div class="lane-hdr auth" onclick="filterLayer('auth')" title="Click to highlight"><span class="icon">🔒</span>Auth / Authz</div>
+        <div class="lane-hdr svc"  onclick="filterLayer('svc')"  title="Click to highlight"><span class="icon">⚙️</span>Service Layer</div>
+        <div class="lane-hdr smtp" onclick="filterLayer('smtp')" title="Click to highlight"><span class="icon">📡</span>SMTP</div>
+        <div class="lane-hdr db"   onclick="filterLayer('db')"   title="Click to highlight"><span class="icon">🗄️</span>Database</div>
+      </div>
+
+      <!-- DIAGRAM GRID -->
+      <div class="diagram" id="diagram">
+
+        <!-- LANE BACKGROUND COLS (7 columns) -->
+        <div class="lane-col num"  id="col-num"  style="grid-row:1/100"></div>
+        <div class="lane-col fe"   id="col-fe"   style="grid-row:1/100"></div>
+        <div class="lane-col api"  id="col-api"  style="grid-row:1/100"></div>
+        <div class="lane-col auth" id="col-auth" style="grid-row:1/100"></div>
+        <div class="lane-col svc"  id="col-svc"  style="grid-row:1/100"></div>
+        <div class="lane-col smtp" id="col-smtp" style="grid-row:1/100"></div>
+        <div class="lane-col db"   id="col-db"   style="grid-row:1/100"></div>
+
+        <!-- ROW 1 — User clicks Send -->
+        <div class="row-num" style="grid-column:1;grid-row:1"><div class="row-badge">1</div></div>
+        <div class="cell" style="grid-column:2;grid-row:1">
+          <div class="node fe layer-match" id="n1" data-step="1" onclick="showStep(1)">
+            User clicks<br/>Send Message
+          </div>
+        </div>
+
+        <!-- ROW 2 — handleSend() validation -->
+        <div class="row-num" style="grid-column:1;grid-row:2"><div class="row-badge">2</div></div>
+        <div class="cell" style="grid-column:2;grid-row:2">
+          <div class="node fe layer-match" id="n2" data-step="2" onclick="showStep(2)">
+            handleSend()<br/>validates inputs
+          </div>
+        </div>
+
+        <!-- ROW 3 — Decision: draft? -->
+        <div class="row-num" style="grid-column:1;grid-row:3"><div class="row-badge">3</div></div>
+        <div class="cell" style="grid-column:2;grid-row:3">
+          <div class="node svc diamond layer-match" id="n3" data-step="3" onclick="showStep(3)" style="--node-c:var(--fe);background:var(--fe-bg);border-color:var(--fe-bdr);">
+            <span>Draft<br/>exists?</span>
+          </div>
+        </div>
+
+        <!-- ROW 4 — HTTP call -->
+        <div class="row-num" style="grid-column:1;grid-row:4"><div class="row-badge">4</div></div>
+        <div class="cell" style="grid-column:2;grid-row:4">
+          <div class="node fe layer-match" id="n4" data-step="4" onclick="showStep(4)">
+            api.ts sends<br/>HTTP POST
+          </div>
+        </div>
+        <div class="cell" style="grid-column:3;grid-row:4">
+          <div class="node api layer-match" id="n4b" data-step="4" onclick="showStep(4)">
+            /emails/send<br/>or /drafts/{id}/send
+          </div>
+        </div>
+
+        <!-- ROW 5 — get_current_user -->
+        <div class="row-num" style="grid-column:1;grid-row:5"><div class="row-badge">5</div></div>
+        <div class="cell" style="grid-column:3;grid-row:5">
+          <div class="node api layer-match" id="n5" data-step="5" onclick="showStep(5)">
+            send_email()<br/>route handler
+          </div>
+        </div>
+        <div class="cell" style="grid-column:4;grid-row:5">
+          <div class="node auth layer-match" id="n5b" data-step="5" onclick="showStep(5)">
+            get_current_<br/>user()
+          </div>
+        </div>
+        <div class="cell" style="grid-column:6;grid-row:5">
+          <div class="node db layer-match" id="n5c" data-step="5" onclick="showStep(5)">
+            SELECT user<br/>by email
+          </div>
+        </div>
+
+        <!-- ROW 6 — verify access -->
+        <div class="row-num" style="grid-column:1;grid-row:6"><div class="row-badge">6</div></div>
+        <div class="cell" style="grid-column:4;grid-row:6">
+          <div class="node auth layer-match" id="n6" data-step="6" onclick="showStep(6)">
+            verify_user_can_<br/>send_from_account()
+          </div>
+        </div>
+        <div class="cell" style="grid-column:6;grid-row:6">
+          <div class="node db layer-match" id="n6b" data-step="6" onclick="showStep(6)">
+            3× DB checks<br/>account/membership
+          </div>
+        </div>
+
+        <!-- ROW 7 — EmailService -->
+        <div class="row-num" style="grid-column:1;grid-row:7"><div class="row-badge">7</div></div>
+        <div class="cell" style="grid-column:3;grid-row:7">
+          <div class="node api layer-match" id="n7" data-step="7" onclick="showStep(7)">
+            EmailService()<br/>.send_email()
+          </div>
+        </div>
+        <div class="cell" style="grid-column:5;grid-row:7">
+          <div class="node svc layer-match" id="n7b" data-step="7" onclick="showStep(7)">
+            Validate smtp_host<br/>is_active
+          </div>
+        </div>
+
+        <!-- ROW 8 — Signature -->
+        <div class="row-num" style="grid-column:1;grid-row:8"><div class="row-badge">8</div></div>
+        <div class="cell" style="grid-column:5;grid-row:8">
+          <div class="node svc layer-match" id="n8" data-step="8" onclick="showStep(8)">
+            SignatureService<br/>resolve + apply
+          </div>
+        </div>
+        <div class="cell" style="grid-column:6;grid-row:8">
+          <div class="node db layer-match" id="n8b" data-step="8" onclick="showStep(8)">
+            SELECT<br/>EmailSignature
+          </div>
+        </div>
+
+        <!-- ROW 9 — Thread -->
+        <div class="row-num" style="grid-column:1;grid-row:9"><div class="row-badge">9</div></div>
+        <div class="cell" style="grid-column:5;grid-row:9">
+          <div class="node svc layer-match" id="n9" data-step="9" onclick="showStep(9)">
+            resolve_or_create<br/>_outgoing_thread()
+          </div>
+        </div>
+        <div class="cell" style="grid-column:6;grid-row:9">
+          <div class="node db layer-match" id="n9b" data-step="9" onclick="showStep(9)">
+            SELECT / INSERT<br/>EmailThread
+          </div>
+        </div>
+
+        <!-- ROW 10 — MIME -->
+        <div class="row-num" style="grid-column:1;grid-row:10"><div class="row-badge">10</div></div>
+        <div class="cell" style="grid-column:5;grid-row:10">
+          <div class="node svc layer-match" id="n10" data-step="10" onclick="showStep(10)">
+            build_mime_message()<br/>sanitize_html()
+          </div>
+        </div>
+
+        <!-- ROW 11 — SMTP Adapter -->
+        <div class="row-num" style="grid-column:1;grid-row:11"><div class="row-badge">11</div></div>
+        <div class="cell" style="grid-column:5;grid-row:11">
+          <div class="node svc layer-match" id="n11" data-step="11" onclick="showStep(11)">
+            StandardSMTP<br/>Adapter.send()
+          </div>
+        </div>
+        <div class="cell" style="grid-column:6;grid-row:11">
+          <div class="node smtp layer-match" id="n11b" data-step="11" onclick="showStep(11)">
+            decrypt creds<br/>resolve port
+          </div>
+        </div>
+
+        <!-- ROW 12 — SMTPClient -->
+        <div class="row-num" style="grid-column:1;grid-row:12"><div class="row-badge">12</div></div>
+        <div class="cell" style="grid-column:6;grid-row:12">
+          <div class="node smtp layer-match" id="n12" data-step="12" onclick="showStep(12)">
+            SMTPClient<br/>send_email_sync()
+          </div>
+        </div>
+
+        <!-- ROW 13 — SMTP server external -->
+        <div class="row-num" style="grid-column:1;grid-row:13"><div class="row-badge">13</div></div>
+        <div class="cell" style="grid-column:6;grid-row:13">
+          <div class="node smtp layer-match" id="n13" data-step="13" onclick="showStep(13)">
+            smtplib<br/>send_message()
+          </div>
+        </div>
+
+        <!-- ROW 14 — DB persist -->
+        <div class="row-num" style="grid-column:1;grid-row:14"><div class="row-badge">14</div></div>
+        <div class="cell" style="grid-column:5;grid-row:14">
+          <div class="node svc layer-match" id="n14" data-step="14" onclick="showStep(14)">
+            INSERT Email<br/>status=SENT
+          </div>
+        </div>
+        <div class="cell" style="grid-column:7;grid-row:14">
+          <div class="node db layer-match" id="n14b" data-step="14" onclick="showStep(14)">
+            db.commit()<br/>db.refresh()
+          </div>
+        </div>
+
+        <!-- ROW 15 — Response -->
+        <div class="row-num" style="grid-column:1;grid-row:15"><div class="row-badge">15</div></div>
+        <div class="cell" style="grid-column:3;grid-row:15">
+          <div class="node api layer-match" id="n15" data-step="15" onclick="showStep(15)">
+            201 EmailRead<br/>response
+          </div>
+        </div>
+        <div class="cell" style="grid-column:2;grid-row:15">
+          <div class="node fe layer-match" id="n15b" data-step="15" onclick="showStep(15)">
+            Invalidate cache<br/>navigate /sent
+          </div>
+        </div>
+
+      </div><!-- /diagram -->
+
+      <!-- SVG ARROW LAYER -->
+      <svg id="arrow-layer" style="overflow:visible;">
+        <defs>
+          <marker id="ah" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0,8 3,0 6" fill="#58a6ff"/>
+          </marker>
+          <marker id="ah-resp" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0,8 3,0 6" fill="#8b949e"/>
+          </marker>
+          <marker id="ah-err" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0,8 3,0 6" fill="#ff7b72"/>
+          </marker>
+          <marker id="ah-b" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0,8 3,0 6" fill="#58a6ff"/>
+          </marker>
+          <marker id="ah-d" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0,8 3,0 6" fill="#8b949e"/>
+          </marker>
+          <marker id="ah-e" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0,8 3,0 6" fill="#ff7b72"/>
+          </marker>
+        </defs>
+      </svg>
+
+    </div><!-- /canvas -->
+  </div><!-- /canvas-wrap -->
+
+  <!-- DETAIL PANEL -->
+  <div class="detail-panel" id="detail-panel">
+    <div class="panel-placeholder" id="panel-placeholder">
+      <div class="ph-icon">👆</div>
+      <p>Click any node in the diagram to see the file path, function name, line numbers, and a full explanation of what happens at that step.</p>
+    </div>
+    <div id="panel-content" style="display:none;flex-direction:column;">
+      <div class="panel-header" id="ph">
+        <div class="step-label" id="ph-step">Step 1</div>
+        <h2 id="ph-title">—</h2>
+        <span class="layer-chip" id="ph-chip"></span>
+      </div>
+      <div class="panel-body" id="pb"></div>
+    </div>
+  </div>
+
+</div><!-- /workspace -->
+
+<script>
+// ── Step data ───────────────────────────────────────────────
+const STEPS = {
+  1:{
+    title:"User clicks 'Send Message'",layer:"fe",
+    file:"frontend/src/pages/ComposePage.tsx",fn:"handleSend()",lines:"L588–667",
+    desc:`<strong>Entry point:</strong> the user clicks the Send button in the Compose UI. This triggers <code>handleSend()</code> which is bound to both the header and bottom toolbar Send buttons.
+    <ul>
+      <li>Guard check: <code>selectedAccountId</code> must be set, <code>toRecipients[]</code> must not be empty, and either <code>bodyText</code> or <code>bodyHtml</code> must have content.</li>
+      <li>Sets <code>isSendingRef.current = true</code> — this flag prevents autosave from firing while send is in progress.</li>
+      <li>Clears <code>autosaveTimerRef</code> — cancels any pending debounced autosave.</li>
+      <li>Polls <code>isSavingRef.current</code> in a 50ms loop until any already-running autosave API call completes.</li>
+    </ul>`
+  },
+  2:{
+    title:"handleSend() validates inputs",layer:"fe",
+    file:"frontend/src/pages/ComposePage.tsx",fn:"handleSend()",lines:"L588–611",
+    desc:`<strong>Three hard guards</strong> before any network call:
+    <ul>
+      <li>No sender account → error message shown, function returns early.</li>
+      <li>No recipients in the To field → error message shown.</li>
+      <li>Both <code>bodyText</code> and <code>bodyHtml</code> are blank → error message shown.</li>
+    </ul>
+    If all guards pass, the autosave timer is cancelled (<code>clearTimeout</code>) and <code>pendingSaveRef.current = false</code> so no further autosaves are queued.`
+  },
+  3:{
+    title:"Decision: draft already exists?",layer:"fe",
+    file:"frontend/src/pages/ComposePage.tsx",fn:"handleSend()",lines:"L620–652",
+    desc:`<strong>Branch point:</strong>
+    <ul>
+      <li><strong>YES (Case B — draft exists):</strong> calls <code>emailsApi.updateDraft(activeDraftId, payload)</code> to flush the very latest field values to the draft, then calls <code>emailsApi.sendDraft(activeDraftId)</code> → <code>POST /api/v1/emails/drafts/{id}/send</code></li>
+      <li><strong>NO (Case A — direct send):</strong> builds an <code>EmailSendPayload</code> object from <code>latestStateRef.current</code> and calls <code>emailsApi.sendEmail(payload)</code> → <code>POST /api/v1/emails/send</code></li>
+    </ul>
+    Both paths converge at the FastAPI router.`
+  },
+  4:{
+    title:"api.ts dispatches HTTP POST with JWT",layer:"fe",
+    file:"frontend/src/services/api.ts",fn:"sendEmail() / sendDraft()",lines:"L313, L329",
+    desc:`<strong>sendEmail(payload)</strong> → <code>apiClient.post("/api/v1/emails/send", payload)</code><br/>
+    <strong>sendDraft(draftId)</strong> → <code>apiClient.post("/api/v1/emails/drafts/{id}/send")</code>
+    <ul>
+      <li>The <code>apiClient</code> wrapper automatically attaches <code>Authorization: Bearer {JWT}</code> from <code>tokenStorage.get()</code>.</li>
+      <li>Payload fields: <code>email_account_id</code>, <code>to</code>, <code>cc</code>, <code>bcc</code>, <code>subject</code>, <code>body_text</code>, <code>body_html</code>, <code>signature_id</code>, <code>thread_id</code>, <code>in_reply_to</code>.</li>
+      <li>Response type: <code>EmailItem</code> (serialized from <code>EmailRead</code> Pydantic schema).</li>
+    </ul>`
+  },
+  5:{
+    title:"FastAPI route + JWT authentication",layer:"api",
+    file:"backend/app/modules/emails/routes.py + auth/dependencies.py",fn:"send_email() + get_current_user()",lines:"L61–91, L15",
+    desc:`<strong>FastAPI dependency injection fires in order:</strong>
+    <ul>
+      <li><code>get_db()</code> — opens an <code>AsyncSession</code> from <code>AsyncSessionLocal</code>.</li>
+      <li><code>get_current_user(HTTPBearer)</code>:
+        <ul>
+          <li>Extracts JWT from <code>Authorization: Bearer …</code> header.</li>
+          <li>Calls <code>decode_access_token(token)</code> from <code>core/security.py</code> — verifies RS256/HS256 signature and expiry.</li>
+          <li>Extracts <code>sub</code> claim as <code>user_email</code>.</li>
+          <li>Calls <code>AuthService.get_user_by_email(db, email)</code> — SELECT on <code>users</code> table.</li>
+          <li>Checks <code>user.is_active</code> — raises HTTP 403 if deactivated.</li>
+        </ul>
+      </li>
+    </ul>
+    Raises 401 if token missing, expired, or invalid.`
+  },
+  6:{
+    title:"Account authorization check",layer:"auth",
+    file:"backend/app/modules/emails/dependencies.py",fn:"verify_user_can_send_from_account()",lines:"L10–59",
+    desc:`<strong>Three sequential database checks:</strong>
+    <ul>
+      <li><strong>1. Account exists:</strong> <code>EmailAccountService.get_email_account(db, account_id)</code> — raises HTTP 404 if not found.</li>
+      <li><strong>2. Company membership:</strong> <code>CompanyService.get_user_membership(db, company_id, user_id)</code> — raises HTTP 403 if the user doesn't belong to the company that owns the account.</li>
+      <li><strong>3. Per-account access:</strong> <code>EmailAccountService.check_user_access(db, account, user_id, role)</code> — company owners and admins pass automatically; regular members need an explicit access grant row. Raises HTTP 403 if missing.</li>
+    </ul>
+    On success, returns the fully-loaded <code>EmailAccount</code> ORM object.`
+  },
+  7:{
+    title:"EmailService.send_email() — entry & account validation",layer:"svc",
+    file:"backend/app/modules/emails/service.py",fn:"EmailService.send_email()",lines:"L118–135",
+    desc:`The route handler instantiates <code>EmailService()</code> (with <code>StandardSMTPAdapter</code> as default) and calls <code>send_email(db, current_user, account, send_req)</code>.
+    <ul>
+      <li>Raises HTTP 400 if <code>account.is_active == False</code>.</li>
+      <li>Raises HTTP 400 if <code>account.smtp_host</code> is null or empty.</li>
+    </ul>
+    These are fail-fast guards before any expensive operations like signature resolution or thread lookup.`
+  },
+  8:{
+    title:"Signature resolution & application",layer:"svc",
+    file:"backend/app/modules/emails/signature_service.py",fn:"get_signature() / get_default_signature() / apply_signature_to_content()",lines:"L253, L458, L514",
+    desc:`<strong>Resolution logic:</strong>
+    <ul>
+      <li>If <code>send_req.signature_id</code> is set → <code>SignatureService.get_signature()</code> loads it and validates it belongs to the same account. Raises HTTP 400 if not.</li>
+      <li>Otherwise → <code>get_default_signature()</code> queries for <code>EmailSignature WHERE account_id=? AND is_default=true</code>.</li>
+    </ul>
+    <strong>Application:</strong> <code>apply_signature_to_content(body_text, body_html, sig)</code> appends the signature HTML below body HTML and plain-text below body text.
+    <br/><br/>If no signature was found but body_html is set → <code>sanitize_html(body_html)</code> is called directly for security.
+    <br/><br/>If <code>body_text</code> is absent but <code>body_html</code> exists → auto-generates plain text by stripping HTML tags with regex.`
+  },
+  9:{
+    title:"Thread resolution or creation",layer:"svc",
+    file:"backend/app/modules/emails/thread_service.py",fn:"resolve_or_create_outgoing_thread()",lines:"L160",
+    desc:`<strong>Three scenarios:</strong>
+    <ul>
+      <li>If <code>send_req.thread_id</code> is provided → loads that existing <code>EmailThread</code> (for continuing a conversation).</li>
+      <li>Else if <code>send_req.in_reply_to</code> is set → tries to find the parent email by Message-ID and use its thread.</li>
+      <li>Otherwise → creates a brand-new <code>EmailThread</code> with the subject derived from <code>send_req.subject</code>.</li>
+    </ul>
+    Returns <code>(thread, parent_email)</code>. The <code>parent_email</code> is used in the next step to build correct <code>In-Reply-To</code> and <code>References</code> MIME headers, so replies thread correctly in Gmail, Outlook, etc.`
+  },
+  10:{
+    title:"MIME construction & HTML sanitization",layer:"svc",
+    file:"backend/app/modules/emails/service.py + core/sanitizer.py + core/css_inliner.py",fn:"build_mime_message() + sanitize_html()",lines:"L39–116, sanitizer.py, css_inliner.py",
+    desc:`<strong>MIME headers set:</strong>
+    <ul>
+      <li><code>From</code> — derived server-side from <code>account.email_address</code> — never trusted from the client payload.</li>
+      <li><code>To</code>, <code>Cc</code> — joined address strings. BCC deliberately omitted from headers.</li>
+      <li><code>Subject</code>, <code>Message-ID</code> (generated with <code>make_msgid(domain=...)</code>), <code>Date</code>.</li>
+      <li><code>In-Reply-To</code> + <code>References</code> — built from the parent_email chain for correct email client threading.</li>
+    </ul>
+    <strong>Body:</strong> <code>sanitize_html(body_html)</code> runs XSS sanitization (blocks <code>script</code>, <code>onerror=</code>, <code>javascript:</code> etc.) AND inlines all CSS <code>&lt;style&gt;</code> block rules into element <code>style=""</code> attributes via <code>css_inliner.py</code> — so HTML email styling renders correctly in Outlook, Gmail, Apple Mail.
+    <br/>Result is attached as <code>multipart/alternative</code> (text + html).`
+  },
+  11:{
+    title:"StandardSMTPAdapter — credential decryption & handoff",layer:"smtp",
+    file:"backend/app/services/smtp/adapter.py",fn:"StandardSMTPAdapter.send()",lines:"L45–76",
+    desc:`<ul>
+      <li><strong>Port resolution:</strong> uses <code>account.smtp_port</code> if set; otherwise defaults: SSL → 465, STARTTLS → 587, NONE → 25.</li>
+      <li><strong>Credential decryption:</strong> calls <code>decrypt_credential(account.smtp_password_encrypted)</code> from <code>core/security.py</code>. The plaintext password exists in memory only for the duration of this function call — it is never logged or stored.</li>
+      <li><strong>Async handoff:</strong> uses <code>asyncio.to_thread()</code> to run the blocking <code>smtplib</code> call in a thread pool executor, keeping the FastAPI event loop free for other requests.</li>
+    </ul>`
+  },
+  12:{
+    title:"SMTPClient — TCP connection & authentication",layer:"smtp",
+    file:"backend/app/services/smtp/client.py",fn:"SMTPClient.send_email_sync()",lines:"L34–110",
+    desc:`<strong>Connection by security mode:</strong>
+    <ul>
+      <li><strong>SSL:</strong> <code>smtplib.SMTP_SSL(host, port, ssl_context)</code></li>
+      <li><strong>STARTTLS:</strong> <code>smtplib.SMTP(host, port)</code> → <code>server.starttls(context)</code> → re-EHLO</li>
+      <li><strong>NONE:</strong> plain <code>smtplib.SMTP(host, port)</code></li>
+    </ul>
+    <strong>Authentication:</strong> <code>server.login(username, password)</code> if username is provided. Catches <code>SMTPAuthenticationError</code> and translates it to a safe domain exception (never leaks credentials).`
+  },
+  13:{
+    title:"smtplib transmits the message",layer:"smtp",
+    file:"backend/app/services/smtp/client.py",fn:"server.send_message()",lines:"L98–110",
+    desc:`<code>server.send_message(msg=message, from_addr=from_addr, to_addrs=to_addrs)</code>
+    <ul>
+      <li>Returns a dict of refused recipients if some failed — raises <code>SMTPRecipientRejectedError</code> if any are in it.</li>
+      <li>On full success, logs: <code>"SMTP message successfully sent to N recipients via host:port"</code>.</li>
+      <li>The <code>finally</code> block always calls <code>server.quit()</code> (falls back to <code>server.close()</code> if quit fails).</li>
+    </ul>
+    <strong>Exception translation:</strong> all low-level <code>smtplib</code> errors are caught and re-raised as domain exceptions: <code>SMTPConnectionError</code>, <code>SMTPAuthenticationError</code>, <code>SMTPRecipientRejectedError</code>, <code>SMTPSendError</code> — none expose credentials.`
+  },
+  14:{
+    title:"Database persistence — Email committed",layer:"db",
+    file:"backend/app/modules/emails/service.py + emails/models.py + core/database.py",fn:"db.add() + db.flush() + db.commit() + db.refresh()",lines:"L238–270 (success), L278–310 (failure)",
+    desc:`<strong>On SMTP success:</strong>
+    <ul>
+      <li>Creates <code>Email(status=SENT, direction=OUTGOING, sent_at=datetime.now(UTC))</code> with all header/body fields populated.</li>
+      <li><code>EmailThreadService.attach_email_to_thread(thread, email_record)</code> links it to the conversation thread.</li>
+      <li>Attachment rows get <code>att.email_id = email_record.id</code> back-filled.</li>
+      <li><code>db.flush()</code> → <code>db.commit()</code> → <code>db.refresh(email_record)</code>.</li>
+    </ul>
+    <strong>On SMTP failure:</strong> inserts <code>Email(status=FAILED, error_message=safe_msg)</code> — still commits for audit trail — then raises HTTP 400 (config error) or HTTP 502 (transport error).
+    <br/><br/>The <code>AsyncSession</code> itself is created by <code>get_db()</code> (<code>core/database.py L47</code>) via <code>AsyncSessionLocal()</code> bound to PostgreSQL.`
+  },
+  15:{
+    title:"201 response → cache invalidation → navigate to Sent",layer:"fe",
+    file:"frontend/src/pages/ComposePage.tsx",fn:"handleSend() success block",lines:"L655–657",
+    desc:`<strong>On HTTP 201 Created:</strong>
+    <ul>
+      <li><code>queryClient.invalidateQueries({ queryKey: ["emails"] })</code> — forces the email list to refetch.</li>
+      <li><code>queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] })</code> — updates sidebar badge counts.</li>
+      <li><code>navigate("/mailbox?folder=sent")</code> — user lands on the Sent folder showing their new email.</li>
+    </ul>
+    <strong>On error:</strong> the error message from the API response is set via <code>setErrorMessage(msg)</code> and displayed in the compose view. <code>isSendingRef.current</code> is reset to <code>false</code> so the user can retry.`
+  },
+};
+
+// ── Layer colors ────────────────────────────────────────────
+const LAYER={
+  fe:  {label:'Frontend',     color:'#58a6ff',bg:'#0d2137',border:'#1f6feb'},
+  api: {label:'FastAPI Router',color:'#56d364',bg:'#0a1f0e',border:'#2ea043'},
+  auth:{label:'Auth / Authz', color:'#ffa657',bg:'#1f1200',border:'#9e6a03'},
+  svc: {label:'Service Layer',color:'#e3b341',bg:'#211800',border:'#bb8009'},
+  smtp:{label:'SMTP',         color:'#d2a8ff',bg:'#1a0d2e',border:'#8957e5'},
+  db:  {label:'Database',     color:'#ff7b72',bg:'#1f0d0d',border:'#da3633'},
+};
+
+function showStep(n){
+  const s=STEPS[n]; if(!s) return;
+  const L=LAYER[s.layer];
+
+  // highlight nodes
+  document.querySelectorAll('.node').forEach(nd=>{
+    nd.classList.toggle('active', parseInt(nd.dataset.step)===n);
+  });
+
+  // panel
+  document.getElementById('panel-placeholder').style.display='none';
+  const pc=document.getElementById('panel-content');
+  pc.style.display='flex';
+
+  document.getElementById('ph-step').textContent=`Step ${n} of 15`;
+  document.getElementById('ph-title').textContent=s.title;
+
+  const chip=document.getElementById('ph-chip');
+  chip.textContent=L.label;
+  chip.style.cssText=`background:${L.bg};color:${L.color};border:1px solid ${L.border};`;
+
+  const pb=document.getElementById('pb');
+  pb.innerHTML=`
+    <div class="meta-row">
+      <label>File(s)</label>
+      ${s.file.split('+').map(f=>`<code>${f.trim()}</code>`).join('')}
+    </div>
+    <div class="meta-row">
+      <label>Function</label>
+      <code>${s.fn}</code>
+    </div>
+    <div class="meta-row">
+      <label>Lines</label>
+      <div class="val">${s.lines}</div>
+    </div>
+    <div class="detail-divider"></div>
+    <div class="detail-desc">${s.desc}</div>
+  `;
+}
+
+// ── Zoom ────────────────────────────────────────────────────
+let scale=1;
+function zoomBy(d){
+  scale=Math.min(2,Math.max(0.4,scale+d));
+  document.getElementById('canvas').style.transform=`scale(${scale})`;
+}
+function resetZoom(){scale=1;document.getElementById('canvas').style.transform='';}
+
+// ── Layer filter ────────────────────────────────────────────
+const LAYER_NODE_MAP={
+  fe:['n1','n2','n3','n4','n15b'],
+  api:['n4b','n5','n7','n15'],
+  auth:['n5b','n5c','n6','n6b'],
+  svc:['n7b','n8','n9','n10','n11','n14'],
+  smtp:['n11b','n12','n13'],
+  db:['n8b','n9b','n14b'],
+};
+let activeLayer=null;
+
+function filterLayer(layer){
+  if(activeLayer===layer){clearHighlight();return;}
+  activeLayer=layer;
+  document.getElementById('clear-btn').style.display='';
+
+  document.querySelectorAll('.node').forEach(nd=>{
+    const inLayer=LAYER_NODE_MAP[layer]&&LAYER_NODE_MAP[layer].includes(nd.id);
+    nd.style.opacity=inLayer?'1':'0.15';
+    nd.style.filter=inLayer?'':'none';
+  });
+}
+function clearHighlight(){
+  activeLayer=null;
+  document.getElementById('clear-btn').style.display='none';
+  document.querySelectorAll('.node').forEach(nd=>{nd.style.opacity='';nd.style.filter='';});
+}
+
+// ── Draw arrows after layout ────────────────────────────────
+function midPoint(el){
+  const r=el.getBoundingClientRect();
+  const cr=document.getElementById('canvas').getBoundingClientRect();
+  return{x:(r.left+r.right)/2-cr.left, y:(r.top+r.bottom)/2-cr.top};
+}
+function getCenter(id){
+  const el=document.getElementById(id);
+  if(!el)return null;
+  return midPoint(el);
+}
+
+function drawArrow(svg,x1,y1,x2,y2,opts={}){
+  const{dashed=false,color='#58a6ff',label='',err=false}=opts;
+  const mc=err?'#ff7b72':dashed?'#8b949e':color;
+  const mId=err?'ah-err':dashed?'ah-resp':'ah';
+
+  const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+  // curved path
+  const dx=x2-x1, dy=y2-y1;
+  const cx=x1+dx*0.5, cy=y1+dy*0.1;
+  const d=`M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
+  path.setAttribute('d',d);
+  path.setAttribute('fill','none');
+  path.setAttribute('stroke',mc);
+  path.setAttribute('stroke-width','1.5');
+  if(dashed||err) path.setAttribute('stroke-dasharray','5 3');
+  path.setAttribute('marker-end',`url(#${mId})`);
+  svg.appendChild(path);
+
+  if(label){
+    const t=document.createElementNS('http://www.w3.org/2000/svg','text');
+    t.setAttribute('x',(x1+x2)/2+4);
+    t.setAttribute('y',(y1+y2)/2-5);
+    t.setAttribute('fill',mc);
+    t.setAttribute('font-size','9');
+    t.setAttribute('font-family','Inter,sans-serif');
+    t.textContent=label;
+    svg.appendChild(t);
+  }
+}
+
+function drawAllArrows(){
+  const svg=document.getElementById('arrow-layer');
+  // remove old paths/texts
+  [...svg.querySelectorAll('path,text')].forEach(e=>e.remove());
+
+  const pairs=[
+    // format: [fromId, toId, {dashed, label, err}]
+    ['n1','n2',{}],
+    ['n2','n3',{}],
+    ['n3','n4',{label:'No draft'}],
+    ['n3','n4b',{label:'Has draft'}],
+    ['n4','n4b',{}],
+    ['n4b','n5',{}],
+    ['n5','n5b',{}],
+    ['n5b','n5c',{}],
+    ['n5c','n5b',{dashed:true,label:'User'}],
+    ['n5b','n6',{}],
+    ['n6','n6b',{}],
+    ['n6b','n6',{dashed:true,label:'account'}],
+    ['n6','n7',{}],
+    ['n7','n7b',{}],
+    ['n7b','n8',{}],
+    ['n8','n8b',{}],
+    ['n8b','n8',{dashed:true,label:'sig'}],
+    ['n8','n9',{}],
+    ['n9','n9b',{}],
+    ['n9b','n9',{dashed:true,label:'thread'}],
+    ['n9','n10',{}],
+    ['n10','n11',{}],
+    ['n11','n11b',{}],
+    ['n11b','n12',{}],
+    ['n12','n13',{}],
+    ['n13','n14',{label:'success'}],
+    ['n14','n14b',{}],
+    ['n14b','n15',{dashed:true}],
+    ['n15','n15b',{dashed:true}],
+  ];
+
+  pairs.forEach(([a,b,opts])=>{
+    const pa=getCenter(a), pb=getCenter(b);
+    if(pa&&pb) drawArrow(svg,pa.x,pa.y,pb.x,pb.y,opts);
+  });
+}
+
+window.addEventListener('load',()=>{
+  setTimeout(drawAllArrows,200);
+});
+window.addEventListener('resize',drawAllArrows);
+document.getElementById('canvas-wrap').addEventListener('scroll',drawAllArrows);
+</script>
+</body>
+</html>

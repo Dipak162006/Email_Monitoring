@@ -3,6 +3,22 @@
     "development"
   ],
   "hints": {
-    "typescript-config/consistent-casing": "off"
-  }
+    "typescript-config/consistent-casing": "off",
+    "axe/keyboard": [
+      "default",
+      {
+        "nested-interactive": "off"
+      }
+    ],
+    "no-inline-styles": "off"
+  },
+  "browserslist": [
+    "defaults",
+    "not ie 11",
+    "not chrome <= 109",
+    "not ios_saf <= 26.4",
+    "not safari <= 26.4",
+    "not chrome <= 112",
+    "not samsung <= 29"
+  ]
 }
