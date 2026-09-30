@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useCallback } from "react";
+import React, { useRef, useEffect, useState, useCallback, useImperativeHandle } from "react";
 import {
   Bold,
   Italic,
@@ -15,10 +15,20 @@ import {
   ChevronDown,
 } from "lucide-react";
 
-interface RichTextEditorProps {
+export interface RichTextEditorRef {
+  insertHtml: (html: string) => void;
+  insertText: (text: string) => void;
+  focus: () => void;
+  getHtml: () => string;
+  getText: () => string;
+  setHtml: (html: string) => void;
+}
+
+export interface RichTextEditorProps {
   initialHtml?: string;
   onChange: (html: string, text: string) => void;
   placeholder?: string;
+  minHeightClass?: string;
 }
 
 interface ActiveStates {
@@ -58,11 +68,12 @@ const STYLE_OPTIONS = [
   { label: "Heading 3", value: "h3" },
 ];
 
-export const RichTextEditor: React.FC<RichTextEditorProps> = ({
+export const RichTextEditor = React.forwardRef<RichTextEditorRef, RichTextEditorProps>(({
   initialHtml = "",
   onChange,
   placeholder = "Write your email message here...",
-}) => {
+  minHeightClass = "min-h-[360px]",
+}, ref) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const savedRangeRef = useRef<Range | null>(null);
@@ -224,6 +235,37 @@ export const RichTextEditor: React.FC<RichTextEditorProps> = ({
       // Ignored for detached ranges
     }
   }, []);
+
+  useImperativeHandle(ref, () => ({
+    insertHtml: (html: string) => {
+      restoreSelection();
+      editorRef.current?.focus();
+      restoreSelection();
+      document.execCommand("insertHTML", false, html);
+      handleInput();
+      updateActiveStates();
+    },
+    insertText: (text: string) => {
+      restoreSelection();
+      editorRef.current?.focus();
+      restoreSelection();
+      document.execCommand("insertText", false, text);
+      handleInput();
+      updateActiveStates();
+    },
+    focus: () => {
+      editorRef.current?.focus();
+    },
+    getHtml: () => editorRef.current?.innerHTML || "",
+    getText: () => editorRef.current?.innerText || "",
+    setHtml: (html: string) => {
+      if (editorRef.current) {
+        editorRef.current.innerHTML = html;
+        lastReportedHtmlRef.current = html;
+        handleInput();
+      }
+    },
+  }), [restoreSelection, handleInput, updateActiveStates]);
 
   // Listen to selection changes across the document
   useEffect(() => {
@@ -701,8 +743,10 @@ export const RichTextEditor: React.FC<RichTextEditorProps> = ({
         onKeyUp={updateActiveStates}
         onMouseUp={updateActiveStates}
         data-placeholder={placeholder}
-        className="compose-editor p-6 sm:p-8 min-h-[360px] max-h-[600px] overflow-y-auto text-slate-800 text-sm sm:text-base leading-relaxed outline-none focus:ring-0"
+        className={`compose-editor p-6 sm:p-8 ${minHeightClass} max-h-[600px] overflow-y-auto text-slate-800 text-sm sm:text-base leading-relaxed outline-none focus:ring-0`}
       />
     </div>
   );
-};
+});
+
+RichTextEditor.displayName = "RichTextEditor";

@@ -206,6 +206,26 @@ export interface EmailTemplateItem {
 export interface EmailTemplateListResponse {
   templates: EmailTemplateItem[];
   total: number;
+  limit?: number;
+  offset?: number;
+}
+
+export interface EmailTemplateCreatePayload {
+  name: string;
+  subject?: string;
+  body_text?: string | null;
+  body_html?: string | null;
+  email_account_id?: number | null;
+  is_active?: boolean;
+}
+
+export interface EmailTemplateUpdatePayload {
+  name?: string;
+  subject?: string;
+  body_text?: string | null;
+  body_html?: string | null;
+  email_account_id?: number | null;
+  is_active?: boolean;
 }
 
 export interface EmailSignatureItem {

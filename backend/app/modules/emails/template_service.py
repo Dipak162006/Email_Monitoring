@@ -1,8 +1,10 @@
 import logging
+import re
 from typing import List, Optional, Tuple
 from fastapi import HTTPException, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.sanitizer import sanitize_html
 from app.modules.auth.models import User
 from app.modules.companies.service import CompanyService
 from app.modules.email_accounts.service import EmailAccountService
@@ -88,6 +90,9 @@ class EmailTemplateService:
                     detail="You do not have permission to create templates for this email account.",
                 )
 
+        # Sanitize HTML if provided
+        sanitized_html = sanitize_html(template_in.body_html) if template_in.body_html else None
+
         template = EmailTemplate(
             company_id=effective_company_id,
             email_account_id=template_in.email_account_id,
@@ -95,7 +100,7 @@ class EmailTemplateService:
             name=template_in.name,
             subject=template_in.subject or "",
             body_text=template_in.body_text,
-            body_html=template_in.body_html,
+            body_html=sanitized_html,
             is_active=template_in.is_active,
         )
         db.add(template)
@@ -199,7 +204,12 @@ class EmailTemplateService:
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="You do not have access to this email account.",
                     )
-                conditions.append(EmailTemplate.email_account_id == email_account_id)
+                conditions.append(
+                    or_(
+                        EmailTemplate.email_account_id.is_(None),
+                        EmailTemplate.email_account_id == email_account_id,
+                    )
+                )
             else:
                 if accessible_acc_ids:
                     conditions.append(
@@ -228,7 +238,12 @@ class EmailTemplateService:
                     if email_account_id in acc_ids:
                         company_conditions.append(
                             (EmailTemplate.company_id == comp.id)
-                            & (EmailTemplate.email_account_id == email_account_id)
+                            & (
+                                or_(
+                                    EmailTemplate.email_account_id.is_(None),
+                                    EmailTemplate.email_account_id == email_account_id,
+                                )
+                            )
                         )
                 else:
                     if acc_ids:
@@ -315,10 +330,13 @@ class EmailTemplateService:
             template.name = template_update.name
         if template_update.subject is not None:
             template.subject = template_update.subject
+        if template_update.body_html is not None:
+            template.body_html = sanitize_html(template_update.body_html) if template_update.body_html else None
         if template_update.body_text is not None:
             template.body_text = template_update.body_text
-        if template_update.body_html is not None:
-            template.body_html = template_update.body_html
+        elif template_update.body_html is not None and not template.body_text and template.body_html:
+            clean_txt = re.sub(r"<[^>]+>", " ", template.body_html)
+            template.body_text = re.sub(r"\s+", " ", clean_txt).strip() or None
         if template_update.is_active is not None:
             template.is_active = template_update.is_active
 
@@ -455,8 +473,14 @@ class EmailTemplateService:
 
         # 7. Copy template content into draft
         draft.subject = template.subject or ""
-        draft.body_text = template.body_text
         draft.body_html = template.body_html
+        if template.body_text:
+            draft.body_text = template.body_text
+        elif template.body_html:
+            clean_txt = re.sub(r"<[^>]+>", " ", template.body_html)
+            draft.body_text = re.sub(r"\s+", " ", clean_txt).strip() or None
+        else:
+            draft.body_text = None
 
         # 8. M11 Signature Integration: Apply selected or default signature
         from app.modules.emails.signature_service import SignatureService

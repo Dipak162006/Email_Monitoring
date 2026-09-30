@@ -396,15 +396,26 @@ export function ComposePage() {
   };
 
   const handleSelectTemplate = (template: EmailTemplateItem) => {
+    if (!template.is_active) {
+      setErrorMessage("Cannot apply an inactive email template.");
+      queryClient.invalidateQueries({ queryKey: ["templates"], refetchType: "all" });
+      return;
+    }
     if (template.subject) {
       setSubject(template.subject);
       latestStateRef.current.subject = template.subject;
     }
     if (template.body_html) {
       setBodyHtml(template.body_html);
-      setBodyText(template.body_text || "");
+      const cleanHtmlForText = template.body_html
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ");
+      const textFallback =
+        template.body_text ||
+        cleanHtmlForText.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      setBodyText(textFallback);
       latestStateRef.current.bodyHtml = template.body_html;
-      latestStateRef.current.bodyText = template.body_text || "";
+      latestStateRef.current.bodyText = textFallback;
     } else if (template.body_text) {
       const html = `<p>${template.body_text.replace(/\n/g, "<br/>")}</p>`;
       setBodyHtml(html);
@@ -995,6 +1006,7 @@ export function ComposePage() {
         onClose={() => setIsTemplateModalOpen(false)}
         onSelectTemplate={handleSelectTemplate}
         hasExistingContent={Boolean(subject.trim() || bodyText.trim())}
+        selectedAccountId={selectedAccountId}
       />
 
       <SignatureModal

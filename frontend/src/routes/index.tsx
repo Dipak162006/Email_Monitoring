@@ -11,6 +11,7 @@ import { EmailDetailPage } from "../pages/EmailDetailPage";
 import { ComposePage } from "../pages/ComposePage";
 import { EmailAccountsPage } from "../pages/EmailAccountsPage";
 import { TemplatesPage } from "../pages/TemplatesPage";
+import { TemplateEditorPage } from "../pages/TemplateEditorPage";
 import { SignaturesPage } from "../pages/SignaturesPage";
 import { TeamPage } from "../pages/TeamPage";
 import { DiagnosticsPage } from "../pages/DiagnosticsPage";
@@ -35,6 +36,8 @@ export function AppRoutes() {
           <Route path="/compose" element={<ComposePage />} />
           <Route path="/email-accounts" element={<EmailAccountsPage />} />
           <Route path="/templates" element={<TemplatesPage />} />
+          <Route path="/templates/new" element={<TemplateEditorPage />} />
+          <Route path="/templates/:templateId/edit" element={<TemplateEditorPage />} />
           <Route path="/signatures" element={<SignaturesPage />} />
           <Route path="/team" element={<TeamPage />} />
           <Route path="/diagnostics" element={<DiagnosticsPage />} />

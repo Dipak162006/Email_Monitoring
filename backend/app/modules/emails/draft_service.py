@@ -3,10 +3,12 @@ from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 from datetime import datetime, timezone
 import logging
+import re
 from typing import List, Optional, Tuple
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.sanitizer import sanitize_html
 from app.modules.auth.models import User
 from app.modules.companies.service import CompanyService
 from app.modules.email_accounts.models import EmailAccount
@@ -162,7 +164,12 @@ class EmailDraftService:
             )
 
         body_text_val = draft_in.body_text
-        body_html_val = draft_in.body_html
+        body_html_val = sanitize_html(draft_in.body_html) if draft_in.body_html else None
+        if not body_text_val and body_html_val:
+            clean_txt = re.sub(r"<style[^>]*>[\s\S]*?<\/style>", " ", body_html_val, flags=re.IGNORECASE)
+            clean_txt = re.sub(r"<script[^>]*>[\s\S]*?<\/script>", " ", clean_txt, flags=re.IGNORECASE)
+            clean_txt = re.sub(r"<[^>]+>", " ", clean_txt)
+            body_text_val = re.sub(r"\s+", " ", clean_txt).strip() or None
         if target_sig:
             body_text_val, body_html_val = SignatureService.apply_signature_to_content(
                 body_text_val, body_html_val, target_sig
@@ -407,7 +414,12 @@ class EmailDraftService:
         if draft_update.body_text is not None:
             draft.body_text = draft_update.body_text
         if draft_update.body_html is not None:
-            draft.body_html = draft_update.body_html
+            draft.body_html = sanitize_html(draft_update.body_html) if draft_update.body_html else None
+        if not draft.body_text and draft.body_html:
+            clean_txt = re.sub(r"<style[^>]*>[\s\S]*?<\/style>", " ", draft.body_html, flags=re.IGNORECASE)
+            clean_txt = re.sub(r"<script[^>]*>[\s\S]*?<\/script>", " ", clean_txt, flags=re.IGNORECASE)
+            clean_txt = re.sub(r"<[^>]+>", " ", clean_txt)
+            draft.body_text = re.sub(r"\s+", " ", clean_txt).strip() or None
         if draft_update.reply_to is not None:
             draft.reply_to = str(draft_update.reply_to) if draft_update.reply_to else None
 
@@ -695,11 +707,15 @@ class EmailDraftService:
             references_val = " ".join(combined_refs)
             mime_msg["References"] = references_val
 
-        if draft.body_text and draft.body_html:
-            mime_msg.set_content(draft.body_text)
-            mime_msg.add_alternative(draft.body_html, subtype="html")
-        elif draft.body_html:
-            mime_msg.set_content(draft.body_html, subtype="html")
+        has_text = bool(draft.body_text and draft.body_text.strip())
+        has_html = bool(draft.body_html and draft.body_html.strip())
+        if has_html:
+            final_html = sanitize_html(draft.body_html) or draft.body_html
+            if has_text:
+                mime_msg.set_content(draft.body_text)
+                mime_msg.add_alternative(final_html, subtype="html")
+            else:
+                mime_msg.set_content(final_html, subtype="html")
         else:
             mime_msg.set_content(draft.body_text or "")
 

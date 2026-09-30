@@ -3,10 +3,12 @@ import email.utils
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 import logging
+import re
 from typing import List, Optional, Tuple
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.sanitizer import sanitize_html
 from app.modules.auth.models import User
 from app.modules.email_accounts.models import EmailAccount
 from app.modules.emails.models import Email, EmailDirection, EmailStatus, EmailThread
@@ -93,11 +95,15 @@ class EmailService:
             msg["References"] = references_val
 
         # 4. Message Bodies (Text and/or HTML)
-        if send_req.body_text and send_req.body_html:
-            msg.set_content(send_req.body_text)
-            msg.add_alternative(send_req.body_html, subtype="html")
-        elif send_req.body_html:
-            msg.set_content(send_req.body_html, subtype="html")
+        has_text = bool(send_req.body_text and send_req.body_text.strip())
+        has_html = bool(send_req.body_html and send_req.body_html.strip())
+        if has_html:
+            final_html = sanitize_html(send_req.body_html) or send_req.body_html
+            if has_text:
+                msg.set_content(send_req.body_text)
+                msg.add_alternative(final_html, subtype="html")
+            else:
+                msg.set_content(final_html, subtype="html")
         else:
             msg.set_content(send_req.body_text or "")
 
@@ -172,6 +178,14 @@ class EmailService:
             send_req.body_text, send_req.body_html = SignatureService.apply_signature_to_content(
                 send_req.body_text, send_req.body_html, target_sig
             )
+        elif send_req.body_html:
+            send_req.body_html = sanitize_html(send_req.body_html)
+
+        if not send_req.body_text and send_req.body_html:
+            clean_txt = re.sub(r"<style[^>]*>[\s\S]*?<\/style>", " ", send_req.body_html, flags=re.IGNORECASE)
+            clean_txt = re.sub(r"<script[^>]*>[\s\S]*?<\/script>", " ", clean_txt, flags=re.IGNORECASE)
+            clean_txt = re.sub(r"<[^>]+>", " ", clean_txt)
+            send_req.body_text = re.sub(r"\s+", " ", clean_txt).strip() or None
 
         # 1c. Resolve and Validate Attachments for Direct Send
         from app.modules.emails.attachment_service import AttachmentService

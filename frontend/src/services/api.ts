@@ -21,8 +21,10 @@ import type {
   EmailSignatureListResponse,
   EmailSyncJobResponse,
   EmailSyncResult,
+  EmailTemplateCreatePayload,
   EmailTemplateItem,
   EmailTemplateListResponse,
+  EmailTemplateUpdatePayload,
   EmailThreadDetail,
 } from "../types/emails";
 export type { ApiError } from "../types/api";
@@ -347,6 +349,15 @@ export const emailsApi = {
     return apiClient.delete<void>(`/api/v1/emails/drafts/${draftId}/attachments/${attachmentId}`);
   },
 
+  applyTemplateToDraft: async (
+    draftId: number,
+    templateId: number,
+    signatureId?: number
+  ): Promise<EmailItem> => {
+    const qs = signatureId ? `?signature_id=${signatureId}` : "";
+    return apiClient.post<EmailItem>(`/api/v1/emails/drafts/${draftId}/apply-template/${templateId}${qs}`);
+  },
+
   getRecentEmails: async (limit: number = 7, companyId?: number): Promise<EmailListResponse> => {
     const searchParams = new URLSearchParams();
     searchParams.set("limit", String(limit));
@@ -405,11 +416,99 @@ export const emailsApi = {
   },
 };
 
+export interface TemplateFilterParams {
+  companyId?: number;
+  emailAccountId?: number;
+  isActive?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
 export const templatesApi = {
-  listTemplates: async (accountId?: number): Promise<EmailTemplateItem[]> => {
-    const url = accountId ? `/api/v1/templates?email_account_id=${accountId}` : "/api/v1/templates";
-    const res = await apiClient.get<EmailTemplateListResponse>(url);
+  listTemplates: async (
+    paramsOrAccountId?: number | TemplateFilterParams
+  ): Promise<EmailTemplateItem[]> => {
+    let params: TemplateFilterParams = {};
+    if (typeof paramsOrAccountId === "number") {
+      params = { emailAccountId: paramsOrAccountId };
+    } else if (paramsOrAccountId) {
+      params = paramsOrAccountId;
+    }
+    const searchParams = new URLSearchParams();
+    if (params.companyId) searchParams.set("company_id", String(params.companyId));
+    if (params.emailAccountId) searchParams.set("email_account_id", String(params.emailAccountId));
+    if (params.isActive !== undefined) searchParams.set("is_active", String(params.isActive));
+    if (params.limit) searchParams.set("limit", String(params.limit));
+    if (params.offset) searchParams.set("offset", String(params.offset));
+    const qs = searchParams.toString();
+    const endpoint = params.companyId
+      ? `/api/v1/companies/${params.companyId}/templates${qs ? `?${qs}` : ""}`
+      : `/api/v1/templates${qs ? `?${qs}` : ""}`;
+    const res = await apiClient.get<EmailTemplateListResponse>(endpoint);
     return res.templates;
+  },
+
+  listTemplatesWithTotal: async (
+    params?: TemplateFilterParams
+  ): Promise<EmailTemplateListResponse> => {
+    const searchParams = new URLSearchParams();
+    if (params?.companyId) searchParams.set("company_id", String(params.companyId));
+    if (params?.emailAccountId) searchParams.set("email_account_id", String(params.emailAccountId));
+    if (params?.isActive !== undefined) searchParams.set("is_active", String(params.isActive));
+    if (params?.limit) searchParams.set("limit", String(params.limit));
+    if (params?.offset) searchParams.set("offset", String(params.offset));
+    const qs = searchParams.toString();
+    const endpoint = params?.companyId
+      ? `/api/v1/companies/${params.companyId}/templates${qs ? `?${qs}` : ""}`
+      : `/api/v1/templates${qs ? `?${qs}` : ""}`;
+    return apiClient.get<EmailTemplateListResponse>(endpoint);
+  },
+
+  getTemplate: async (templateId: number, companyId?: number): Promise<EmailTemplateItem> => {
+    const endpoint = companyId
+      ? `/api/v1/companies/${companyId}/templates/${templateId}`
+      : `/api/v1/templates/${templateId}`;
+    return apiClient.get<EmailTemplateItem>(endpoint);
+  },
+
+  createTemplate: async (
+    payload: EmailTemplateCreatePayload,
+    companyId?: number
+  ): Promise<EmailTemplateItem> => {
+    const endpoint = companyId
+      ? `/api/v1/companies/${companyId}/templates`
+      : `/api/v1/templates`;
+    return apiClient.post<EmailTemplateItem>(endpoint, payload);
+  },
+
+  updateTemplate: async (
+    templateId: number,
+    payload: EmailTemplateUpdatePayload,
+    companyId?: number
+  ): Promise<EmailTemplateItem> => {
+    const endpoint = companyId
+      ? `/api/v1/companies/${companyId}/templates/${templateId}`
+      : `/api/v1/templates/${templateId}`;
+    return apiClient.put<EmailTemplateItem>(endpoint, payload);
+  },
+
+  deleteTemplate: async (templateId: number, companyId?: number): Promise<void> => {
+    const endpoint = companyId
+      ? `/api/v1/companies/${companyId}/templates/${templateId}`
+      : `/api/v1/templates/${templateId}`;
+    return apiClient.delete<void>(endpoint);
+  },
+
+  toggleTemplateActive: async (
+    templateId: number,
+    isActive?: boolean,
+    companyId?: number
+  ): Promise<EmailTemplateItem> => {
+    const endpoint = companyId
+      ? `/api/v1/companies/${companyId}/templates/${templateId}/active`
+      : `/api/v1/templates/${templateId}/active`;
+    const body = isActive !== undefined ? { is_active: isActive } : undefined;
+    return apiClient.patch<EmailTemplateItem>(endpoint, body);
   },
 };
 

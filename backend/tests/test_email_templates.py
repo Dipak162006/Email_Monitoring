@@ -940,3 +940,619 @@ async def test_28_member_without_access_cannot_create_or_access_account_template
         },
     )
     assert resp.status_code == 403
+
+
+# =============================================================================
+# 8. Regression Tests: Inactive Exclusion, Account Scoping, Rich MIME & HTML (29 - 33)
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_29_compose_active_templates_filter_and_account_scoping(async_client: AsyncClient, db_session: AsyncSession):
+    """29. Inactive templates are excluded from Compose's active-template API query.
+    Global active templates + active templates for selected account are returned.
+    Inactive global templates, inactive account templates, and other accounts' templates are excluded.
+    """
+    token = await register_and_login(async_client, "tmpl_user_29@test.com")
+    comp_id = await create_company_helper(async_client, token, "Company 29")
+    acc1_id = await create_account_helper(async_client, token, comp_id, name="Acc 1", email="acc1_29@comp.com")
+    acc2_id = await create_account_helper(async_client, token, comp_id, name="Acc 2", email="acc2_29@comp.com")
+
+    # 1. Global Active Template
+    resp_g_act = await async_client.post(
+        f"/api/v1/companies/{comp_id}/templates",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Global Active", "subject": "Sub G Act", "body_text": "Text", "is_active": True},
+    )
+    assert resp_g_act.status_code == 201
+    g_act_id = resp_g_act.json()["id"]
+
+    # 2. Global Inactive Template
+    resp_g_inact = await async_client.post(
+        f"/api/v1/companies/{comp_id}/templates",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Global Inactive", "subject": "Sub G Inact", "body_text": "Text", "is_active": False},
+    )
+    assert resp_g_inact.status_code == 201
+    g_inact_id = resp_g_inact.json()["id"]
+
+    # 3. Acc1 Active Template
+    resp_a1_act = await async_client.post(
+        f"/api/v1/companies/{comp_id}/templates",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Acc1 Active", "subject": "Sub A1 Act", "body_text": "Text", "email_account_id": acc1_id, "is_active": True},
+    )
+    assert resp_a1_act.status_code == 201
+    a1_act_id = resp_a1_act.json()["id"]
+
+    # 4. Acc1 Inactive Template
+    resp_a1_inact = await async_client.post(
+        f"/api/v1/companies/{comp_id}/templates",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Acc1 Inactive", "subject": "Sub A1 Inact", "body_text": "Text", "email_account_id": acc1_id, "is_active": False},
+    )
+    assert resp_a1_inact.status_code == 201
+    a1_inact_id = resp_a1_inact.json()["id"]
+
+    # 5. Acc2 Active Template
+    resp_a2_act = await async_client.post(
+        f"/api/v1/companies/{comp_id}/templates",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Acc2 Active", "subject": "Sub A2 Act", "body_text": "Text", "email_account_id": acc2_id, "is_active": True},
+    )
+    assert resp_a2_act.status_code == 201
+    a2_act_id = resp_a2_act.json()["id"]
+
+    # Query templates for Compose when Acc1 is selected (is_active=true & email_account_id=acc1_id)
+    resp = await async_client.get(
+        f"/api/v1/templates?email_account_id={acc1_id}&is_active=true",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    returned_ids = [t["id"] for t in resp.json()["templates"]]
+
+    # Must include Global Active and Acc1 Active
+    assert g_act_id in returned_ids
+    assert a1_act_id in returned_ids
+
+    # Must NOT include Inactive templates
+    assert g_inact_id not in returned_ids
+    assert a1_inact_id not in returned_ids
+
+    # Must NOT include templates scoped to another account (Acc2)
+    assert a2_act_id not in returned_ids
+
+
+@pytest.mark.asyncio
+async def test_30_mime_level_multipart_alternative_rich_email(async_client: AsyncClient, db_session: AsyncSession):
+    """30. MIME-level regression test:
+    Construct rich email with body_text and body_html.
+    Verify:
+    1. multipart/alternative when both representations exist
+    2. contains text/plain part with readable fallback
+    3. contains text/html part with unescaped HTML elements (<h1 style="...">, <strong>Alex</strong>)
+    4. plain-text fallback remains readable
+    """
+    from app.modules.email_accounts.models import EmailAccount
+    from app.modules.emails.schemas import EmailSendRequest
+    from app.modules.emails.service import EmailService
+
+    account = EmailAccount(
+        id=999,
+        company_id=1,
+        name="PulseMail Sender",
+        email_address="sender@pulsemail.io",
+        smtp_host="smtp.pulsemail.io",
+        smtp_port=587,
+        is_active=True,
+    )
+
+    body_text_sample = "Hello Alex,\nWelcome to PulseMail.\nThank you for joining us."
+    body_html_sample = '<h1 style="color:#4f46e5;">Welcome to PulseMail</h1>\n<p>Hello <strong>Alex</strong>,</p>\n<p>Thank you for joining us.</p>'
+
+    send_req = EmailSendRequest(
+        email_account_id=account.id,
+        to=["alex@example.com"],
+        subject="Welcome to PulseMail",
+        body_text=body_text_sample,
+        body_html=body_html_sample,
+    )
+
+    svc = EmailService(smtp_adapter=AsyncMock())
+    mime_msg, message_id, recipients, in_reply_to, references = svc.build_mime_message(
+        account=account,
+        send_req=send_req,
+    )
+
+    # 1. Must be multipart/alternative
+    assert mime_msg.is_multipart() is True
+    assert mime_msg.get_content_type() == "multipart/alternative"
+
+    # 2 & 3. Inspect parts
+    payload_parts = mime_msg.get_payload()
+    assert len(payload_parts) == 2
+
+    plain_part = payload_parts[0]
+    html_part = payload_parts[1]
+
+    assert plain_part.get_content_type() == "text/plain"
+    assert html_part.get_content_type() == "text/html"
+
+    plain_content = plain_part.get_content()
+    html_content = html_part.get_content()
+
+    # 4. Verify HTML tags preserved and unescaped
+    assert '<h1 style="color:#4f46e5;">Welcome to PulseMail</h1>' in html_content
+    assert "<strong>Alex</strong>" in html_content
+    assert "Thank you for joining us." in html_content
+    assert "&lt;h1" not in html_content
+
+    # 5. Verify plain text readable fallback
+    assert "Hello Alex," in plain_content
+    assert "Thank you for joining us." in plain_content
+
+
+@pytest.mark.asyncio
+async def test_31_template_to_draft_to_mime_end_to_end(async_client: AsyncClient, db_session: AsyncSession):
+    """31. End-to-End: Create rich HTML template -> Apply to Draft -> Verify Draft DB body_html -> Send Draft -> Verify MIME."""
+    token = await register_and_login(async_client, "tmpl_user_31@test.com")
+    comp_id = await create_company_helper(async_client, token, "Company 31")
+    acc_id = await create_account_helper(async_client, token, comp_id, email="support31@comp.com")
+
+    html_content = '<h1 style="color:#4f46e5;">Welcome to PulseMail</h1><p>Hello <strong>Alex</strong>,</p><p>Thank you for joining us.</p>'
+
+    # 1. Create rich HTML template
+    tmpl_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/templates",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Rich Onboarding Template",
+            "subject": "Welcome to PulseMail!",
+            "body_html": html_content,
+            "body_text": "Welcome to PulseMail! Hello Alex, Thank you for joining us.",
+            "email_account_id": acc_id,
+            "is_active": True,
+        },
+    )
+    assert tmpl_resp.status_code == 201
+    tmpl_data = tmpl_resp.json()
+    assert tmpl_data["body_html"] == html_content
+    assert tmpl_data["body_text"] is not None
+    assert "Welcome to PulseMail" in tmpl_data["body_text"]
+    tmpl_id = tmpl_data["id"]
+
+    # 2. Create draft
+    draft_id = await create_draft_helper(async_client, token, acc_id)
+
+    # 3. Apply template to draft
+    apply_resp = await async_client.post(
+        f"/api/v1/emails/drafts/{draft_id}/apply-template/{tmpl_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert apply_resp.status_code == 200
+    applied_data = apply_resp.json()
+    assert applied_data["subject"] == "Welcome to PulseMail!"
+    assert applied_data["body_html"] == html_content
+    assert applied_data["body_text"] is not None
+
+    # 4. Verify draft in DB
+    db_draft = await db_session.get(Email, draft_id)
+    assert db_draft is not None
+    assert db_draft.body_html == html_content
+    assert "<h1" in db_draft.body_html
+    assert "<strong>Alex</strong>" in db_draft.body_html
+
+    # 5. Send draft with mocked SMTP adapter
+    mock_send = AsyncMock()
+    with patch("app.modules.emails.draft_service.StandardSMTPAdapter") as mock_adapter_cls:
+        instance = mock_adapter_cls.return_value
+        instance.send = mock_send
+
+        send_resp = await async_client.post(
+            f"/api/v1/emails/drafts/{draft_id}/send",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert send_resp.status_code == 200
+        assert mock_send.await_count == 1
+
+        call_kwargs = mock_send.call_args.kwargs
+        captured_mime = call_kwargs["message"]
+
+        # Verify MIME structure
+        assert captured_mime.is_multipart() is True
+        assert captured_mime.get_content_type() == "multipart/alternative"
+
+        parts = captured_mime.get_payload()
+        assert len(parts) == 2
+        assert parts[0].get_content_type() == "text/plain"
+        assert parts[1].get_content_type() == "text/html"
+
+        html_payload = parts[1].get_content()
+        assert '<h1 style="color:#4f46e5;">Welcome to PulseMail</h1>' in html_payload
+        assert "<strong>Alex</strong>" in html_payload
+        assert "&lt;h1" not in html_payload
+
+
+@pytest.mark.asyncio
+async def test_32_inactive_template_rejected_on_apply(async_client: AsyncClient, db_session: AsyncSession):
+    """32. Backend rejects applying inactive templates even if requested directly."""
+    token = await register_and_login(async_client, "tmpl_user_32@test.com")
+    comp_id = await create_company_helper(async_client, token, "Company 32")
+    acc_id = await create_account_helper(async_client, token, comp_id, email="support32@comp.com")
+
+    # Create inactive template
+    tmpl_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/templates",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Inactive Template",
+            "subject": "Inactive",
+            "body_text": "Content",
+            "is_active": False,
+        },
+    )
+    assert tmpl_resp.status_code == 201
+    tmpl_id = tmpl_resp.json()["id"]
+
+    draft_id = await create_draft_helper(async_client, token, acc_id)
+
+    # Attempt to apply inactive template
+    resp = await async_client.post(
+        f"/api/v1/emails/drafts/{draft_id}/apply-template/{tmpl_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    assert "inactive" in resp.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_33_rich_template_survives_draft_autosave(async_client: AsyncClient, db_session: AsyncSession):
+    """33. Rich template body_html and body_text survive draft creation and autosave updates."""
+    token = await register_and_login(async_client, "tmpl_user_33@test.com")
+    comp_id = await create_company_helper(async_client, token, "Company 33")
+    acc_id = await create_account_helper(async_client, token, comp_id, email="support33@comp.com")
+
+    rich_html = '<h1 style="color:#4f46e5;">Product Update</h1><p>Check out our <strong>new features</strong>.</p><a href="https://example.com">Learn More</a>'
+    plain_text = "Product Update Check out our new features. Learn More"
+
+    # Autosave create payload
+    create_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc_id,
+            "to": ["client@example.com"],
+            "subject": "Product Update",
+            "body_html": rich_html,
+            "body_text": plain_text,
+        },
+    )
+    assert create_resp.status_code == 201
+    draft_id = create_resp.json()["id"]
+
+    # Verify retrieval
+    get_resp = await async_client.get(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert get_resp.status_code == 200
+    assert get_resp.json()["body_html"] == rich_html
+    assert get_resp.json()["body_text"] == plain_text
+
+    # Autosave update payload sending both updated body_html and body_text (as Compose does)
+    updated_html = '<h1 style="color:#4f46e5;">Product Update v2</h1><p>Added <strong>more details</strong>.</p>'
+    updated_text = "Product Update v2 Added more details."
+    update_resp = await async_client.put(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "subject": "Product Update v2",
+            "body_html": updated_html,
+            "body_text": updated_text,
+        },
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["body_html"] == updated_html
+    assert update_resp.json()["body_text"] == updated_text
+
+
+@pytest.mark.asyncio
+async def test_34_full_html_template_with_meta_and_style_sends_non_empty_mime(async_client: AsyncClient, db_session: AsyncSession):
+    """34. Regression test: Full HTML template with DOCTYPE, meta, style, and tables
+    must not have its body emptied by sanitization, autosave, or send, and must generate
+    a valid non-empty multipart/alternative MIME message.
+    """
+    token = await register_and_login(async_client, "tmpl_user_34@test.com")
+    comp_id = await create_company_helper(async_client, token, "Company 34")
+    acc_id = await create_account_helper(async_client, token, comp_id, email="support34@comp.com")
+
+    full_template_html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Special Product Offer</title>
+    <style>
+        body { margin: 0; padding: 0; background-color: #f4f4f7; }
+        .main { background-color: #ffffff; max-width: 600px; }
+        .btn { background-color: #007bff; color: #ffffff; }
+    </style>
+</head>
+<body>
+    <table class="main" width="100%">
+        <tr>
+            <td>
+                <h1>Special Product Offer</h1>
+                <p>Upgrade your daily routine with our newly released item.</p>
+                <a href="https://example.com" class="btn">Shop Now</a>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>"""
+
+    # 1. Create draft simulating Compose autosave with template content
+    create_draft_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc_id,
+            "to": ["customer34@example.com"],
+            "subject": "Special Product Offer",
+            "body_html": full_template_html,
+        },
+    )
+    assert create_draft_resp.status_code == 201
+    draft_id = create_draft_resp.json()["id"]
+
+    # 2. Verify draft content in database is non-empty and retains HTML elements
+    db_draft = await db_session.get(Email, draft_id)
+    assert db_draft is not None
+    assert db_draft.body_html is not None
+    assert len(db_draft.body_html) > 100
+    assert "Special Product Offer" in db_draft.body_html
+    assert "<table" in db_draft.body_html
+    assert "<style>" in db_draft.body_html
+    assert db_draft.body_text is not None
+    assert "Special Product Offer" in db_draft.body_text
+    # Ensure CSS was not dumped into plain text
+    assert "background-color: #f4f4f7" not in db_draft.body_text
+
+    # 3. Transmit draft via SMTP and inspect the generated MIME message
+    mock_send = AsyncMock()
+    with patch("app.modules.emails.draft_service.StandardSMTPAdapter") as mock_adapter_cls:
+        instance = mock_adapter_cls.return_value
+        instance.send = mock_send
+
+        send_resp = await async_client.post(
+            f"/api/v1/emails/drafts/{draft_id}/send",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert send_resp.status_code == 200
+        assert mock_send.await_count == 1
+
+        call_kwargs = mock_send.call_args.kwargs
+        mime_msg = call_kwargs["message"]
+
+        # Validate MIME is multipart/alternative
+        assert mime_msg.is_multipart() is True
+        assert mime_msg.get_content_type() == "multipart/alternative"
+
+        parts = mime_msg.get_payload()
+        assert len(parts) == 2
+
+        plain_part = parts[0]
+        html_part = parts[1]
+
+        assert plain_part.get_content_type() == "text/plain"
+        assert html_part.get_content_type() == "text/html"
+
+        plain_text = plain_part.get_content()
+        html_text = html_part.get_content()
+
+        # Both parts must be non-empty and contain the template message
+        assert len(plain_text.strip()) > 0
+        assert len(html_text.strip()) > 0
+        assert "Special Product Offer" in html_text
+        assert "Upgrade your daily routine" in html_text
+        assert "<table" in html_text
+        assert "<style>" in html_text
+        assert "Special Product Offer" in plain_text
+
+
+@pytest.mark.asyncio
+async def test_35_template_styling_and_css_inlining_preserved_in_mime(async_client: AsyncClient, db_session: AsyncSession):
+    """35. Regression test: Template styling & CSS inlining preserved in final MIME HTML for email clients.
+    Verifies:
+    1. Final MIME HTML part is not empty.
+    2. HTML structure (table, tr, td, h1, p, a, etc.) is preserved.
+    3. Relevant presentation/styling from <style> classes (.main, .header, .btn, etc.) is inlined into style="..." attributes.
+    4. The HTML sent by SMTP contains the expected inline styling (background-color, max-width, margin, padding, color).
+    5. Responsive <style> block is preserved alongside inline styles.
+    """
+    token = await register_and_login(async_client, "tmpl_user_35@test.com")
+    comp_id = await create_company_helper(async_client, token, "Company 35")
+    acc_id = await create_account_helper(async_client, token, comp_id, email="support35@comp.com")
+
+    styled_template_html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Promotional Campaign</title>
+    <style>
+        body { margin: 0; padding: 0; background-color: #f4f4f7; font-family: Arial, sans-serif; }
+        .wrapper { width: 100%; background-color: #f4f4f7; padding-bottom: 40px; }
+        .main { background-color: #ffffff; margin: 0 auto; width: 100%; max-width: 600px; color: #333333; }
+        .header { background-color: #1a1a1a; padding: 20px 0; text-align: center; }
+        .header h1 { color: #ffffff; font-size: 24px; margin: 0; }
+        .content { padding: 30px 40px; text-align: center; }
+        .content h2 { font-size: 22px; color: #111111; margin-top: 0; }
+        .btn { background-color: #007bff; color: #ffffff !important; padding: 12px 25px; border-radius: 4px; display: inline-block; text-decoration: none; }
+        @media only screen and (max-width: 600px) {
+            .main { width: 100% !important; }
+        }
+    </style>
+</head>
+<body>
+    <table class="wrapper" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+            <td align="center">
+                <table class="main" width="100%" cellpadding="0" cellspacing="0">
+                    <tr>
+                        <td class="header">
+                            <h1>Acme Inc</h1>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="content">
+                            <h2>Special Spring Offer</h2>
+                            <p>Get 20% off all subscriptions this week only.</p>
+                            <a href="https://example.com/shop" class="btn" target="_blank">Claim Offer</a>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>"""
+
+    # 1. Create template via API
+    tmpl_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/templates",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Promotional Spring Offer",
+            "subject": "Exclusive Spring Offer Inside",
+            "body_html": styled_template_html,
+            "email_account_id": acc_id,
+            "is_active": True,
+        },
+    )
+    assert tmpl_resp.status_code == 201
+    tmpl_data = tmpl_resp.json()
+
+    # Verify template in DB has inlined styles on elements
+    db_html = tmpl_data["body_html"]
+    assert "background-color: #1a1a1a" in db_html
+    assert "max-width: 600px" in db_html
+    assert "color: #ffffff" in db_html
+
+    # 2. Create Draft using this template
+    draft_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc_id,
+            "to": ["target_customer@example.com"],
+            "subject": "Exclusive Spring Offer Inside",
+            "body_html": db_html,
+        },
+    )
+    assert draft_resp.status_code == 201
+    draft_id = draft_resp.json()["id"]
+
+    # 3. Transmit draft via SMTP and inspect the generated MIME HTML part
+    mock_send = AsyncMock()
+    with patch("app.modules.emails.draft_service.StandardSMTPAdapter") as mock_adapter_cls:
+        instance = mock_adapter_cls.return_value
+        instance.send = mock_send
+
+        send_resp = await async_client.post(
+            f"/api/v1/emails/drafts/{draft_id}/send",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert send_resp.status_code == 200
+        assert mock_send.await_count == 1
+
+        call_kwargs = mock_send.call_args.kwargs
+        mime_msg = call_kwargs["message"]
+
+        # Validate MIME properties
+        assert mime_msg.is_multipart() is True
+        assert mime_msg.get_content_type() == "multipart/alternative"
+
+        html_part = mime_msg.get_body(preferencelist=("html",))
+        assert html_part is not None
+        mime_html = html_part.get_content()
+
+        # 1. Final MIME HTML part is not empty
+        assert len(mime_html.strip()) > 0
+
+        # 2. Important HTML structure is preserved
+        assert "<table" in mime_html
+        assert "</table>" in mime_html
+        assert "<tr" in mime_html
+        assert "<td" in mime_html
+        assert "<h1" in mime_html
+        assert "<h2" in mime_html
+        assert "<p" in mime_html
+        assert "<a href=" in mime_html
+
+        # 3. Relevant styling and presentation is preserved via inline styles
+        # Centered container styling on .main table
+        assert 'class="main"' in mime_html
+        assert "max-width: 600px" in mime_html
+        assert "margin: 0 auto" in mime_html
+        assert "background-color: #ffffff" in mime_html
+
+        # Header background and padding
+        assert 'class="header"' in mime_html
+        assert "background-color: #1a1a1a" in mime_html
+        assert "padding: 20px 0" in mime_html
+        assert "text-align: center" in mime_html
+
+        # Heading color and typography
+        assert "color: #ffffff" in mime_html
+        assert "font-size: 24px" in mime_html
+
+        # Button styling: background color, padding, border-radius, display
+        assert 'class="btn"' in mime_html
+        assert "background-color: #007bff" in mime_html
+        assert "padding: 12px 25px" in mime_html
+        assert "border-radius: 4px" in mime_html
+        assert "display: inline-block" in mime_html
+        assert "text-decoration: none" in mime_html
+
+        # 4. Responsive @media query stays in <style> block for supporting clients
+        assert "@media" in mime_html
+
+
+@pytest.mark.asyncio
+async def test_36_security_sanitization_blocks_malicious_inlined_and_stylesheet_css(async_client: AsyncClient):
+    """36. Regression test: Security sanitization still blocks unsafe HTML, scripts, and CSS injections."""
+    from app.core.sanitizer import sanitize_html
+
+    # Unsafe script tags, event handlers, and javascript URLs
+    malicious_html = """<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        .pwn { background-image: url('javascript:alert(1)'); }
+        .expr { width: expression(alert(2)); }
+        @import url('https://evil.com/leak.css');
+    </style>
+</head>
+<body>
+    <script>alert('xss');</script>
+    <div class="pwn" onclick="steal()">Click me</div>
+    <div class="expr" style="background: expression(alert(3));">Bad style</div>
+    <a href="javascript:alert(4)">Malicious link</a>
+    <img src="javascript:alert(5)" onerror="alert(6)">
+</body>
+</html>"""
+
+    sanitized = sanitize_html(malicious_html)
+    assert sanitized is not None
+
+    # Verify all malicious attack vectors are completely stripped/blocked
+    assert "<script" not in sanitized.lower()
+    assert "onclick" not in sanitized.lower()
+    assert "onerror" not in sanitized.lower()
+    assert "javascript:" not in sanitized.lower()
+    assert "expression(" not in sanitized.lower()
+    assert "@import" not in sanitized.lower() or "/* @import blocked */" in sanitized
+    assert "href=\"javascript:" not in sanitized.lower()
+    assert "src=\"javascript:" not in sanitized.lower()
+
+
+

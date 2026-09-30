@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { X, FileText, Check, AlertTriangle } from "lucide-react";
+import { X, FileText, Check, AlertTriangle, RefreshCw } from "lucide-react";
 import { templatesApi } from "../../services/api";
 import type { EmailTemplateItem } from "../../types/emails";
 
@@ -9,6 +9,7 @@ interface TemplateModalProps {
   onClose: () => void;
   onSelectTemplate: (template: EmailTemplateItem) => void;
   hasExistingContent: boolean;
+  selectedAccountId?: number | null;
 }
 
 export const TemplateModal: React.FC<TemplateModalProps> = ({
@@ -16,16 +17,51 @@ export const TemplateModal: React.FC<TemplateModalProps> = ({
   onClose,
   onSelectTemplate,
   hasExistingContent,
+  selectedAccountId,
 }) => {
   const [selectedTemplate, setSelectedTemplate] = useState<EmailTemplateItem | null>(null);
   const [showWarning, setShowWarning] = useState(false);
 
-  const { data: templates = [], isLoading } = useQuery({
-    queryKey: ["templates"],
-    queryFn: () => templatesApi.listTemplates(),
+  const {
+    data: templates = [],
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
+    queryKey: ["templates", selectedAccountId, "active"],
+    queryFn: () =>
+      templatesApi.listTemplates({
+        emailAccountId: selectedAccountId || undefined,
+        isActive: true,
+      }),
     enabled: isOpen,
-    staleTime: 30000,
+    staleTime: 0,
+    refetchOnMount: "always",
   });
+
+  // Explicitly refetch whenever modal is opened
+  useEffect(() => {
+    if (isOpen) {
+      refetch();
+    }
+  }, [isOpen, refetch]);
+
+  // Client-side defensive filter ensuring inactive templates and other-account templates are excluded
+  const visibleTemplates = useMemo(() => {
+    return templates.filter((tpl) => {
+      if (!tpl.is_active) return false;
+      if (
+        selectedAccountId &&
+        tpl.email_account_id !== null &&
+        tpl.email_account_id !== undefined &&
+        tpl.email_account_id !== selectedAccountId
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [templates, selectedAccountId]);
 
   if (!isOpen) return null;
 
@@ -94,6 +130,26 @@ export const TemplateModal: React.FC<TemplateModalProps> = ({
             </div>
           )}
 
+          {isError && (
+            <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 space-y-2">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 text-rose-600 shrink-0" />
+                <p className="text-xs font-semibold">Failed to load templates</p>
+              </div>
+              <p className="text-xs text-rose-600">
+                {error instanceof Error ? error.message : "Unable to fetch active templates from the server."}
+              </p>
+              <button
+                type="button"
+                onClick={() => refetch()}
+                className="mt-1 inline-flex items-center gap-1.5 px-3 py-1 bg-white border border-rose-200 text-rose-700 hover:bg-rose-100 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+              >
+                <RefreshCw className="h-3 w-3" />
+                <span>Retry</span>
+              </button>
+            </div>
+          )}
+
           {isLoading && (
             <div className="space-y-2">
               {[...Array(3)].map((_, i) => (
@@ -102,17 +158,17 @@ export const TemplateModal: React.FC<TemplateModalProps> = ({
             </div>
           )}
 
-          {!isLoading && templates.length === 0 && (
+          {!isLoading && !isError && visibleTemplates.length === 0 && (
             <div className="p-8 text-center text-slate-500 space-y-2">
-              <p className="text-sm font-medium">No templates available</p>
+              <p className="text-sm font-medium">No active templates available</p>
               <p className="text-xs text-slate-400">
                 You can create reusable email templates in the Templates configuration section.
               </p>
             </div>
           )}
 
-          {!isLoading &&
-            templates.map((tpl) => (
+          {!isLoading && !isError &&
+            visibleTemplates.map((tpl) => (
               <div
                 key={tpl.id}
                 onClick={() => handleApply(tpl)}
@@ -133,7 +189,7 @@ export const TemplateModal: React.FC<TemplateModalProps> = ({
                   </p>
                 )}
                 <p className="text-xs text-slate-400 mt-0.5 line-clamp-2">
-                  {tpl.body_text || "No preview text"}
+                  {tpl.body_text || "Rich HTML template"}
                 </p>
               </div>
             ))}
