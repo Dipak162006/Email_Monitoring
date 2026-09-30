@@ -17,8 +17,10 @@ import type {
   EmailListParams,
   EmailListResponse,
   EmailSendPayload,
+  EmailSignatureCreatePayload,
   EmailSignatureItem,
   EmailSignatureListResponse,
+  EmailSignatureUpdatePayload,
   EmailSyncJobResponse,
   EmailSyncResult,
   EmailTemplateCreatePayload,
@@ -513,10 +515,41 @@ export const templatesApi = {
 };
 
 export const signaturesApi = {
-  listSignatures: async (accountId?: number): Promise<EmailSignatureItem[]> => {
-    const url = accountId ? `/api/v1/signatures?email_account_id=${accountId}` : "/api/v1/signatures";
+  listSignatures: async (accountId?: number, companyId?: number): Promise<EmailSignatureItem[]> => {
+    const params = new URLSearchParams();
+    if (accountId) params.append("email_account_id", String(accountId));
+    if (companyId) params.append("company_id", String(companyId));
+    params.append("limit", "100");
+    const url = `/api/v1/signatures?${params.toString()}`;
     const res = await apiClient.get<EmailSignatureListResponse>(url);
     return res.signatures;
+  },
+
+  getSignature: async (signatureId: number): Promise<EmailSignatureItem> => {
+    return apiClient.get<EmailSignatureItem>(`/api/v1/signatures/${signatureId}`);
+  },
+
+  createSignature: async (data: EmailSignatureCreatePayload): Promise<EmailSignatureItem> => {
+    return apiClient.post<EmailSignatureItem>("/api/v1/signatures", data);
+  },
+
+  updateSignature: async (
+    signatureId: number,
+    data: EmailSignatureUpdatePayload
+  ): Promise<EmailSignatureItem> => {
+    return apiClient.put<EmailSignatureItem>(`/api/v1/signatures/${signatureId}`, data);
+  },
+
+  deleteSignature: async (signatureId: number): Promise<void> => {
+    return apiClient.delete<void>(`/api/v1/signatures/${signatureId}`);
+  },
+
+  setDefaultSignature: async (signatureId: number): Promise<EmailSignatureItem> => {
+    return apiClient.post<EmailSignatureItem>(`/api/v1/signatures/${signatureId}/set-default`);
+  },
+
+  getDefaultSignature: async (accountId: number): Promise<EmailSignatureItem | null> => {
+    return apiClient.get<EmailSignatureItem | null>(`/api/v1/signatures/default?email_account_id=${accountId}`);
   },
 };
 

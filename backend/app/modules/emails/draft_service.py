@@ -423,8 +423,9 @@ class EmailDraftService:
         if draft_update.reply_to is not None:
             draft.reply_to = str(draft_update.reply_to) if draft_update.reply_to else None
 
+        from app.modules.emails.signature_service import SignatureService
+        target_sig = None
         if draft_update.signature_id is not None:
-            from app.modules.emails.signature_service import SignatureService
             target_sig = await SignatureService.get_signature(
                 db=db,
                 current_user=current_user,
@@ -436,6 +437,15 @@ class EmailDraftService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Signature does not belong to this draft's email account.",
                 )
+        else:
+            target_sig = await SignatureService.get_default_signature(
+                db=db,
+                current_user=current_user,
+                account_id=draft.email_account_id,
+                company_id=draft.company_id,
+            )
+
+        if target_sig:
             draft.body_text, draft.body_html = SignatureService.apply_signature_to_content(
                 draft.body_text, draft.body_html, target_sig
             )

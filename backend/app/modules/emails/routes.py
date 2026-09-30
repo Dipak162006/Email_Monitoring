@@ -1687,6 +1687,7 @@ async def create_company_account_signature(
 )
 async def list_signatures(
     email_account_id: Optional[int] = Query(None, description="Filter signatures by EmailAccount ID"),
+    account_id: Optional[int] = Query(None, description="Filter signatures by EmailAccount ID (alias)"),
     company_id: Optional[int] = Query(None, description="Filter signatures by Company ID"),
     limit: int = Query(50, ge=1, le=100, description="Max signatures to return"),
     offset: int = Query(0, ge=0, description="Number of signatures to skip"),
@@ -1694,11 +1695,12 @@ async def list_signatures(
     db: AsyncSession = Depends(get_db),
 ) -> EmailSignatureListResponse:
     """List email signatures for authorized accounts/companies."""
+    target_account_id = email_account_id if email_account_id is not None else account_id
     signatures, total = await SignatureService.list_signatures(
         db=db,
         current_user=current_user,
         company_id=company_id,
-        account_id=email_account_id,
+        account_id=target_account_id,
         limit=limit,
         offset=offset,
     )

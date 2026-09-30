@@ -15,6 +15,7 @@ import {
 import {
   emailsApi,
   emailAccountsApi,
+  signaturesApi,
 } from "../services/api";
 import type {
   AuthorizedEmailAccount,
@@ -106,6 +107,17 @@ export function ComposePage() {
     staleTime: 60000,
   });
 
+  // Fetch default signature for selected account
+  const { data: defaultSignature } = useQuery({
+    queryKey: ["default-signature", selectedAccountId],
+    queryFn: () => (selectedAccountId ? signaturesApi.getDefaultSignature(selectedAccountId) : null),
+    enabled: Boolean(selectedAccountId),
+    staleTime: 30000,
+  });
+
+  // Effective signature is explicit selectedSignature if chosen, otherwise account defaultSignature
+  const effectiveSignature = selectedSignature || defaultSignature || null;
+
   // Keep draftIdRef synchronized with draftId state
   useEffect(() => {
     draftIdRef.current = draftId;
@@ -171,7 +183,8 @@ export function ComposePage() {
       s.subject.trim().length > 0 ||
       s.bodyText.trim().length > 0 ||
       (s.bodyHtml.trim().length > 0 && s.bodyHtml !== "<p></p>" && s.bodyHtml !== "<p><br></p>") ||
-      s.serverAttachments.length > 0
+      s.serverAttachments.length > 0 ||
+      s.selectedSignature !== null
     );
   }, []);
 
@@ -303,6 +316,7 @@ export function ComposePage() {
         subject: state.subject,
         body_text: state.bodyText || undefined,
         body_html: state.bodyHtml || undefined,
+        signature_id: state.selectedSignature ? state.selectedSignature.id : undefined,
         thread_id: state.replyThreadId,
         in_reply_to: state.replyInReplyTo,
       };
@@ -392,6 +406,10 @@ export function ComposePage() {
     const accId = Number(e.target.value);
     setSelectedAccountId(accId);
     latestStateRef.current.selectedAccountId = accId;
+    if (selectedSignature && selectedSignature.email_account_id !== accId) {
+      setSelectedSignature(null);
+      latestStateRef.current.selectedSignature = null;
+    }
     triggerAutosave();
   };
 
@@ -480,6 +498,7 @@ export function ComposePage() {
             subject,
             body_text: bodyText || undefined,
             body_html: bodyHtml || undefined,
+            signature_id: latestStateRef.current.selectedSignature ? latestStateRef.current.selectedSignature.id : undefined,
             thread_id: replyThreadId,
             in_reply_to: replyInReplyTo,
           };
@@ -630,6 +649,7 @@ export function ComposePage() {
           subject: cur.subject,
           body_text: cur.bodyText || undefined,
           body_html: cur.bodyHtml || undefined,
+          signature_id: cur.selectedSignature ? cur.selectedSignature.id : undefined,
           thread_id: cur.replyThreadId,
           in_reply_to: cur.replyInReplyTo,
         });
@@ -888,19 +908,41 @@ export function ComposePage() {
             isUploading={isUploadingAttachment}
           />
 
-          {/* Signature Preview if selected */}
-          {selectedSignature && (
+          {/* Signature Preview if selected or default */}
+          {effectiveSignature && (
             <div className="pt-4 border-t border-dashed border-slate-200 text-xs sm:text-sm">
-              <div className="flex items-start gap-3 text-slate-600">
-                <div className="w-8 h-8 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs border border-indigo-100 shrink-0">
-                  {selectedSignature.name.slice(0, 2).toUpperCase()}
+              <div className="flex items-start justify-between gap-3 text-slate-600">
+                <div className="flex items-start gap-3">
+                  <div className="w-8 h-8 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs border border-indigo-100 shrink-0">
+                    {effectiveSignature.name.slice(0, 2).toUpperCase()}
+                  </div>
+                  <div className="flex flex-col">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-slate-900">{effectiveSignature.name}</span>
+                      {effectiveSignature.is_default && !selectedSignature && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                          Default
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs text-slate-500">
+                      {effectiveSignature.body_text || "Custom Signature"}
+                    </span>
+                  </div>
                 </div>
-                <div className="flex flex-col">
-                  <span className="font-semibold text-slate-900">{selectedSignature.name}</span>
-                  <span className="text-xs text-slate-500">
-                    {selectedSignature.body_text || "Custom Signature"}
-                  </span>
-                </div>
+                {selectedSignature && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedSignature(null);
+                      latestStateRef.current.selectedSignature = null;
+                      triggerAutosave();
+                    }}
+                    className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline cursor-pointer"
+                  >
+                    Reset to default
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -1011,6 +1053,7 @@ export function ComposePage() {
 
       <SignatureModal
         isOpen={isSignatureModalOpen}
+        accountId={selectedAccountId || undefined}
         onClose={() => setIsSignatureModalOpen(false)}
         onSelectSignature={handleSelectSignature}
       />

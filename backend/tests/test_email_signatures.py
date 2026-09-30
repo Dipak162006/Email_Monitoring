@@ -713,8 +713,10 @@ async def test_19_editing_draft_does_not_duplicate_signature(async_client: Async
         json={"body_text": "Updated draft text without sig"},
     )
     assert update_resp.status_code == 200
-    # Because update_draft doesn't force default sig when not passed, it keeps user content
-    assert update_resp.json()["body_text"] == "Updated draft text without sig"
+    # Because account has default sig, update_draft preserves default sig without duplication
+    assert "Updated draft text without sig" in update_resp.json()["body_text"]
+    assert "-- \nDraft Sig" in update_resp.json()["body_text"]
+    assert update_resp.json()["body_text"].count("Draft Sig") == 1
 
 
 @pytest.mark.asyncio
@@ -1066,3 +1068,797 @@ async def test_28_plain_text_signatures_not_broken(async_client: AsyncClient, db
         data = send_resp.json()
         assert "Hello there!" in data["body_text"]
         assert "-- \nPlain Text Engineer\nAcme Corp" in data["body_text"]
+
+
+@pytest.mark.asyncio
+async def test_29_list_signatures_without_filter_regression(async_client: AsyncClient, db_session: AsyncSession):
+    """29. Regression: GET /api/v1/signatures lists all accessible signatures without role AttributeError.
+    
+    Verifies:
+    1. Authenticated user belonging to a company can call GET /api/v1/signatures without query params.
+    2. Endpoint succeeds with HTTP 200 without raising AttributeError on comp_user role string.
+    3. Returned signatures are correctly listed across accessible accounts.
+    4. Account-scoped listing works via GET /api/v1/signatures?account_id=<authorized_account_id>
+       and GET /api/v1/signatures?email_account_id=<authorized_account_id>.
+    5. MEMBER role without full access only sees permitted account signatures.
+    """
+    token = await register_and_login(async_client, "owner29@example.com")
+    comp_id = await create_company_helper(async_client, token, "Regress Corp")
+    acc1_id = await create_account_helper(async_client, token, comp_id, "Support", "support@regress.com")
+    acc2_id = await create_account_helper(async_client, token, comp_id, "Billing", "billing@regress.com")
+
+    # Create signatures on both accounts
+    sig1_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Support Sig",
+            "email_account_id": acc1_id,
+            "body_text": "-- Support",
+            "is_default": True,
+        },
+    )
+    assert sig1_resp.status_code == 201
+    sig1_id = sig1_resp.json()["id"]
+
+    sig2_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Billing Sig",
+            "email_account_id": acc2_id,
+            "body_text": "-- Billing",
+            "is_default": False,
+        },
+    )
+    assert sig2_resp.status_code == 201
+    sig2_id = sig2_resp.json()["id"]
+
+    # 1. Unfiltered listing: exercises CompanyService.get_user_companies() authorization path
+    list_resp = await async_client.get(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert list_resp.status_code == 200
+    list_data = list_resp.json()
+    assert list_data["total"] >= 2
+    returned_ids = [s["id"] for s in list_data["signatures"]]
+    assert sig1_id in returned_ids
+    assert sig2_id in returned_ids
+
+    # 2. Account-scoped listing using ?account_id=
+    scoped_resp = await async_client.get(
+        f"/api/v1/signatures?account_id={acc1_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert scoped_resp.status_code == 200
+    scoped_data = scoped_resp.json()
+    assert scoped_data["total"] == 1
+    assert len(scoped_data["signatures"]) == 1
+    assert scoped_data["signatures"][0]["id"] == sig1_id
+
+    # 3. Account-scoped listing using ?email_account_id=
+    scoped_resp2 = await async_client.get(
+        f"/api/v1/signatures?email_account_id={acc2_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert scoped_resp2.status_code == 200
+    scoped_data2 = scoped_resp2.json()
+    assert scoped_data2["total"] == 1
+    assert len(scoped_data2["signatures"]) == 1
+    assert scoped_data2["signatures"][0]["id"] == sig2_id
+
+    # 4. Member role with granted access only to acc1_id
+    member_token = await register_and_login(async_client, "member29@example.com")
+    member_user_id = await add_company_member_helper(async_client, token, comp_id, "member29@example.com", "MEMBER")
+    await grant_account_access_helper(async_client, token, comp_id, acc1_id, member_user_id)
+
+    member_list_resp = await async_client.get(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+    assert member_list_resp.status_code == 200
+    member_data = member_list_resp.json()
+    member_sig_ids = [s["id"] for s in member_data["signatures"]]
+    assert sig1_id in member_sig_ids
+    assert sig2_id not in member_sig_ids
+
+
+# =============================================================================
+# 6. Compose Draft Signature Propagation & MIME Regression Tests (30 - 33)
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_30_draft_create_with_signature_id_and_mime_send(async_client: AsyncClient, db_session: AsyncSession):
+    """30. Regression: Draft create with signature_id applies signature to body_text/body_html
+    and sending draft generates MIME containing the signature.
+    """
+    token = await register_and_login(async_client, "owner30@example.com")
+    comp_id = await create_company_helper(async_client, token, "Draft Sig Corp 30")
+    acc1_id = await create_account_helper(async_client, token, comp_id, "Support", "support30@test.com")
+    acc2_id = await create_account_helper(async_client, token, comp_id, "Sales", "sales30@test.com")
+
+    # Create Signature A on Acc1
+    sig_a_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Sig A",
+            "email_account_id": acc1_id,
+            "body_text": "-- \nSupport Agent Alpha",
+            "body_html": "<p>-- <br><b>Support Agent Alpha</b></p>",
+            "is_default": False,
+        },
+    )
+    assert sig_a_resp.status_code == 201
+    sig_a_id = sig_a_resp.json()["id"]
+
+    # Create Signature B on Acc2
+    sig_b_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Sig B",
+            "email_account_id": acc2_id,
+            "body_text": "-- \nSales Rep Beta",
+            "body_html": "<p>-- <br><b>Sales Rep Beta</b></p>",
+            "is_default": False,
+        },
+    )
+    assert sig_b_resp.status_code == 201
+    sig_b_id = sig_b_resp.json()["id"]
+
+    # 1. Wrong-account signature is rejected on draft create
+    wrong_acc_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc1_id,
+            "to": ["customer@test.com"],
+            "subject": "Inquiry",
+            "body_text": "Hello there",
+            "signature_id": sig_b_id,
+        },
+    )
+    assert wrong_acc_resp.status_code == 400
+    assert "Signature does not belong to the selected email account" in wrong_acc_resp.json()["detail"]
+
+    # 2. Draft create with signature_id on authorized account
+    create_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc1_id,
+            "to": ["customer@test.com"],
+            "subject": "Help Request",
+            "body_text": "Hello customer,",
+            "body_html": "<p>Hello customer,</p>",
+            "signature_id": sig_a_id,
+        },
+    )
+    assert create_resp.status_code == 201
+    draft_data = create_resp.json()
+    draft_id = draft_data["id"]
+
+    # Verify signature is applied to both body_text and body_html
+    assert "Hello customer," in draft_data["body_text"]
+    assert "-- \nSupport Agent Alpha" in draft_data["body_text"]
+    assert "<p>Hello customer,</p>" in draft_data["body_html"]
+    assert "<b>Support Agent Alpha</b>" in draft_data["body_html"]
+
+    # 3. Sending the resulting draft produces MIME containing the signature
+    captured_kwargs = {}
+
+    def mock_send(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+
+    with patch.object(SMTPClient, "send_email_sync", side_effect=mock_send):
+        send_resp = await async_client.post(
+            f"/api/v1/emails/drafts/{draft_id}/send",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert send_resp.status_code == 200
+        sent_data = send_resp.json()
+        assert sent_data["status"] == "SENT"
+
+        # Verify MIME message
+        mime_msg = captured_kwargs["message"]
+        assert mime_msg is not None
+
+        plain_part = None
+        html_part = None
+        for part in mime_msg.walk():
+            ct = part.get_content_type()
+            if ct == "text/plain":
+                plain_part = part.get_content()
+            elif ct == "text/html":
+                html_part = part.get_content()
+
+        assert plain_part is not None
+        assert "Hello customer," in plain_part
+        assert "-- \nSupport Agent Alpha" in plain_part
+
+        assert html_part is not None
+        assert "Hello customer," in html_part
+        assert "<b>Support Agent Alpha</b>" in html_part
+
+
+@pytest.mark.asyncio
+async def test_31_draft_update_with_signature_id_and_repeated_autosave(async_client: AsyncClient, db_session: AsyncSession):
+    """31. Regression: Updating draft with signature_id applies signature,
+    and repeated updates/autosaves do not duplicate the signature.
+    """
+    token = await register_and_login(async_client, "owner31@example.com")
+    comp_id = await create_company_helper(async_client, token, "Draft Sig Corp 31")
+    acc1_id = await create_account_helper(async_client, token, comp_id, "Support", "support31@test.com")
+    acc2_id = await create_account_helper(async_client, token, comp_id, "Sales", "sales31@test.com")
+
+    # Create Signature A on Acc1
+    sig_a_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Sig A 31",
+            "email_account_id": acc1_id,
+            "body_text": "-- \nSupport Lead 31",
+            "body_html": "<p>-- <br><b>Support Lead 31</b></p>",
+            "is_default": False,
+        },
+    )
+    sig_a_id = sig_a_resp.json()["id"]
+
+    # Create Signature B on Acc2
+    sig_b_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Sig B 31",
+            "email_account_id": acc2_id,
+            "body_text": "-- \nSales Lead 31",
+            "body_html": "<p>-- <br><b>Sales Lead 31</b></p>",
+            "is_default": False,
+        },
+    )
+    sig_b_id = sig_b_resp.json()["id"]
+
+    # 1. Create draft without signature
+    draft_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc1_id,
+            "to": ["partner@test.com"],
+            "subject": "Proposal",
+            "body_text": "Draft v1 text",
+            "body_html": "<p>Draft v1 text</p>",
+        },
+    )
+    assert draft_resp.status_code == 201
+    draft_id = draft_resp.json()["id"]
+    assert "Support Lead 31" not in draft_resp.json()["body_text"]
+
+    # 2. Reject wrong-account signature_id on draft update
+    bad_update = await async_client.put(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "signature_id": sig_b_id,
+        },
+    )
+    assert bad_update.status_code == 400
+    assert "Signature does not belong to this draft's email account" in bad_update.json()["detail"]
+
+    # 3. User selects Signature A -> autosave update with signature_id
+    update_1 = await async_client.put(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "body_text": "Draft v1 text",
+            "body_html": "<p>Draft v1 text</p>",
+            "signature_id": sig_a_id,
+        },
+    )
+    assert update_1.status_code == 200
+    u1_data = update_1.json()
+    assert "Draft v1 text" in u1_data["body_text"]
+    assert "-- \nSupport Lead 31" in u1_data["body_text"]
+    assert "<b>Support Lead 31</b>" in u1_data["body_html"]
+
+    # 4. User continues typing -> second autosave update with more text and same signature_id
+    update_2 = await async_client.put(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "body_text": "Draft v1 text with more info added",
+            "body_html": "<p>Draft v1 text with more info added</p>",
+            "signature_id": sig_a_id,
+        },
+    )
+    assert update_2.status_code == 200
+    u2_data = update_2.json()
+    assert "Draft v1 text with more info added" in u2_data["body_text"]
+    # Verify signature appears EXACTLY ONCE
+    assert u2_data["body_text"].count("Support Lead 31") == 1
+    assert u2_data["body_html"].count("Support Lead 31") == 1
+
+    # 5. Third autosave (e.g. subject changed or attachment added) -> repeated update
+    update_3 = await async_client.put(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "subject": "Proposal - Final Version",
+            "body_text": "Draft v1 text with more info added",
+            "body_html": "<p>Draft v1 text with more info added</p>",
+            "signature_id": sig_a_id,
+        },
+    )
+    assert update_3.status_code == 200
+    u3_data = update_3.json()
+    assert u3_data["subject"] == "Proposal - Final Version"
+    assert u3_data["body_text"].count("Support Lead 31") == 1
+    assert u3_data["body_html"].count("Support Lead 31") == 1
+
+    # 6. Send draft and verify final MIME
+    captured_kwargs = {}
+
+    def mock_send(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+
+    with patch.object(SMTPClient, "send_email_sync", side_effect=mock_send):
+        send_resp = await async_client.post(
+            f"/api/v1/emails/drafts/{draft_id}/send",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert send_resp.status_code == 200
+
+        mime_msg = captured_kwargs["message"]
+        for part in mime_msg.walk():
+            if part.get_content_type() == "text/plain":
+                plain_part = part.get_content()
+                assert "Draft v1 text with more info added" in plain_part
+                assert plain_part.count("Support Lead 31") == 1
+            elif part.get_content_type() == "text/html":
+                html_part = part.get_content()
+                assert "Draft v1 text with more info added" in html_part
+                assert html_part.count("Support Lead 31") == 1
+
+
+@pytest.mark.asyncio
+async def test_32_draft_close_reopen_and_send_preserves_signature(async_client: AsyncClient, db_session: AsyncSession):
+    """32. Regression: Reopening an existing draft with an applied signature
+    and sending it preserves the signature without duplicates.
+    """
+    token = await register_and_login(async_client, "owner32@example.com")
+    comp_id = await create_company_helper(async_client, token, "Draft Sig Corp 32")
+    acc_id = await create_account_helper(async_client, token, comp_id, "Desk", "desk32@test.com")
+
+    # Create Signature
+    sig_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Sig 32",
+            "email_account_id": acc_id,
+            "body_text": "-- \nDesk Officer 32",
+            "body_html": "<p>-- <br><b>Desk Officer 32</b></p>",
+            "is_default": False,
+        },
+    )
+    sig_id = sig_resp.json()["id"]
+
+    # Create draft with Signature
+    draft_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc_id,
+            "to": ["recipient32@test.com"],
+            "subject": "Reopen Test",
+            "body_text": "Original draft body text",
+            "body_html": "<p>Original draft body text</p>",
+            "signature_id": sig_id,
+        },
+    )
+    assert draft_resp.status_code == 201
+    draft_id = draft_resp.json()["id"]
+
+    # Simulate close and reopen: GET the draft
+    get_resp = await async_client.get(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert get_resp.status_code == 200
+    reopened_draft = get_resp.json()
+    assert "Original draft body text" in reopened_draft["body_text"]
+    assert "Desk Officer 32" in reopened_draft["body_text"]
+    assert "Desk Officer 32" in reopened_draft["body_html"]
+
+    # In Compose, reopened draft body contains the signature.
+    # User edits more text and autosaves:
+    edited_text = "Original draft body text with additions\n\n-- \nDesk Officer 32"
+    edited_html = "<p>Original draft body text with additions</p><br><br><p>-- <br><b>Desk Officer 32</b></p>"
+    update_resp = await async_client.put(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "body_text": edited_text,
+            "body_html": edited_html,
+            "signature_id": sig_id,  # Even if signature_id is passed again
+        },
+    )
+    assert update_resp.status_code == 200
+    updated_data = update_resp.json()
+    assert updated_data["body_text"].count("Desk Officer 32") == 1
+    assert updated_data["body_html"].count("Desk Officer 32") == 1
+
+    # Send the reopened draft and verify MIME
+    captured_kwargs = {}
+
+    def mock_send(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+
+    with patch.object(SMTPClient, "send_email_sync", side_effect=mock_send):
+        send_resp = await async_client.post(
+            f"/api/v1/emails/drafts/{draft_id}/send",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert send_resp.status_code == 200
+
+        mime_msg = captured_kwargs["message"]
+        for part in mime_msg.walk():
+            if part.get_content_type() == "text/plain":
+                plain_part = part.get_content()
+                assert "Original draft body text with additions" in plain_part
+                assert plain_part.count("Desk Officer 32") == 1
+            elif part.get_content_type() == "text/html":
+                html_part = part.get_content()
+                assert "Original draft body text with additions" in html_part
+                assert html_part.count("Desk Officer 32") == 1
+
+
+@pytest.mark.asyncio
+async def test_33_template_plus_signature_in_draft_send(async_client: AsyncClient, db_session: AsyncSession):
+    """33. Regression: Combining rich template HTML with a selected signature in a draft
+    preserves template styling and appends the signature cleanly in sent MIME.
+    """
+    token = await register_and_login(async_client, "owner33@example.com")
+    comp_id = await create_company_helper(async_client, token, "Draft Sig Corp 33")
+    acc_id = await create_account_helper(async_client, token, comp_id, "Desk", "desk33@test.com")
+
+    # Create Signature
+    sig_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Sig 33",
+            "email_account_id": acc_id,
+            "body_text": "-- \nEngineer 33",
+            "body_html": "<p>-- <br><b>Engineer 33</b></p>",
+            "is_default": False,
+        },
+    )
+    sig_id = sig_resp.json()["id"]
+
+    # Create HTML Template
+    template_html = "<div style=\"background-color:#f0f4f8;padding:20px;\"><h2>Newsletter Update</h2><p>Welcome to our monthly digest!</p></div>"
+    tmpl_resp = await async_client.post(
+        "/api/v1/emails/templates",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Monthly Digest",
+            "subject": "Monthly Digest",
+            "body_html": template_html,
+            "body_text": "Newsletter Update - Welcome to our monthly digest!",
+        },
+    )
+    assert tmpl_resp.status_code == 201
+    tmpl_id = tmpl_resp.json()["id"]
+
+    # Create draft with template body and signature_id
+    draft_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc_id,
+            "to": ["subscriber@test.com"],
+            "subject": "Monthly Digest",
+            "body_html": template_html,
+            "body_text": "Newsletter Update - Welcome to our monthly digest!",
+            "signature_id": sig_id,
+        },
+    )
+    assert draft_resp.status_code == 201
+    draft_data = draft_resp.json()
+    draft_id = draft_data["id"]
+
+    # Verify both template and signature exist in the draft
+    assert "Newsletter Update" in draft_data["body_html"]
+    assert "<b>Engineer 33</b>" in draft_data["body_html"]
+    assert "Newsletter Update" in draft_data["body_text"]
+    assert "-- \nEngineer 33" in draft_data["body_text"]
+
+    # Send draft via SMTP and verify final MIME
+    captured_kwargs = {}
+
+    def mock_send(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+
+    with patch.object(SMTPClient, "send_email_sync", side_effect=mock_send):
+        send_resp = await async_client.post(
+            f"/api/v1/emails/drafts/{draft_id}/send",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert send_resp.status_code == 200
+
+        mime_msg = captured_kwargs["message"]
+        for part in mime_msg.walk():
+            if part.get_content_type() == "text/plain":
+                plain_part = part.get_content()
+                assert "Newsletter Update" in plain_part
+                assert "-- \nEngineer 33" in plain_part
+                assert plain_part.count("Engineer 33") == 1
+            elif part.get_content_type() == "text/html":
+                html_part = part.get_content()
+                assert "Newsletter Update" in html_part
+                assert "<b>Engineer 33</b>" in html_part
+                assert html_part.count("Engineer 33") == 1
+
+
+@pytest.mark.asyncio
+async def test_34_default_signature_draft_autosave_lifecycle(async_client: AsyncClient, db_session: AsyncSession):
+    """34. Comprehensive regression test for default signature during draft creation, autosave,
+    account switching, explicit override, and MIME sending.
+    """
+    token = await register_and_login(async_client, "owner34@example.com")
+    comp_id = await create_company_helper(async_client, token, "Draft Sig Corp 34")
+    acc_a_id = await create_account_helper(async_client, token, comp_id, "Desk A", "desk_a@corp34.com")
+    acc_b_id = await create_account_helper(async_client, token, comp_id, "Desk B", "desk_b@corp34.com")
+    acc_c_id = await create_account_helper(async_client, token, comp_id, "Desk C", "desk_c@corp34.com")
+
+    # Account A: Default Signature A
+    sig_a_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Default Sig A",
+            "email_account_id": acc_a_id,
+            "body_text": "-- \nSupport Team Alpha",
+            "body_html": "<p>-- <br><b>Support Team Alpha</b></p>",
+            "is_default": True,
+        },
+    )
+    sig_a_id = sig_a_resp.json()["id"]
+
+    # Account A: Explicit Secondary Signature (Non-default)
+    sig_custom_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Custom Sig A",
+            "email_account_id": acc_a_id,
+            "body_text": "-- \nExecutive Escort Alpha",
+            "body_html": "<p>-- <br><b>Executive Escort Alpha</b></p>",
+            "is_default": False,
+        },
+    )
+    sig_custom_id = sig_custom_resp.json()["id"]
+
+    # Account B: Default Signature B
+    sig_b_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Default Sig B",
+            "email_account_id": acc_b_id,
+            "body_text": "-- \nBilling Team Beta",
+            "body_html": "<p>-- <br><b>Billing Team Beta</b></p>",
+            "is_default": True,
+        },
+    )
+    sig_b_id = sig_b_resp.json()["id"]
+
+    # -------------------------------------------------------------------------
+    # Test 1: Default signature applied during draft creation
+    # -------------------------------------------------------------------------
+    create_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc_a_id,
+            "to": ["client@example.com"],
+            "subject": "Initial Discussion",
+            "body_text": "Hello client,",
+            "body_html": "<p>Hello client,</p>",
+        },
+    )
+    assert create_resp.status_code == 201
+    draft_data = create_resp.json()
+    draft_id = draft_data["id"]
+    assert "Hello client," in draft_data["body_text"]
+    assert "-- \nSupport Team Alpha" in draft_data["body_text"]
+    assert "<b>Support Team Alpha</b>" in draft_data["body_html"]
+
+    # -------------------------------------------------------------------------
+    # Test 2: Default signature survives draft update/autosave
+    # -------------------------------------------------------------------------
+    update_1 = await async_client.put(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "body_text": "Hello client, here is paragraph 2.",
+            "body_html": "<p>Hello client, here is paragraph 2.</p>",
+        },
+    )
+    assert update_1.status_code == 200
+    u1_data = update_1.json()
+    assert "paragraph 2" in u1_data["body_text"]
+    assert "-- \nSupport Team Alpha" in u1_data["body_text"]
+    assert "<b>Support Team Alpha</b>" in u1_data["body_html"]
+
+    # -------------------------------------------------------------------------
+    # Test 3: Multiple draft updates do not duplicate default signature
+    # -------------------------------------------------------------------------
+    update_2 = await async_client.put(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "body_text": "Hello client, here is paragraph 2 and 3.",
+            "body_html": "<p>Hello client, here is paragraph 2 and 3.</p>",
+        },
+    )
+    assert update_2.status_code == 200
+    u2_data = update_2.json()
+    assert u2_data["body_text"].count("Support Team Alpha") == 1
+    assert u2_data["body_html"].count("Support Team Alpha") == 1
+
+    # Metadata update
+    update_3 = await async_client.put(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"subject": "Updated Discussion Subject"},
+    )
+    assert update_3.status_code == 200
+    u3_data = update_3.json()
+    assert u3_data["subject"] == "Updated Discussion Subject"
+    assert u3_data["body_text"].count("Support Team Alpha") == 1
+    assert u3_data["body_html"].count("Support Team Alpha") == 1
+
+    # -------------------------------------------------------------------------
+    # Test 6: Sending draft after autosave contains default signature in MIME
+    # -------------------------------------------------------------------------
+    captured_kwargs = {}
+
+    def mock_send(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+
+    with patch.object(SMTPClient, "send_email_sync", side_effect=mock_send):
+        send_resp = await async_client.post(
+            f"/api/v1/emails/drafts/{draft_id}/send",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert send_resp.status_code == 200
+
+        mime_msg = captured_kwargs["message"]
+        for part in mime_msg.walk():
+            if part.get_content_type() == "text/plain":
+                plain_part = part.get_content()
+                assert "Support Team Alpha" in plain_part
+                assert plain_part.count("Support Team Alpha") == 1
+            elif part.get_content_type() == "text/html":
+                html_part = part.get_content()
+                assert "Support Team Alpha" in html_part
+                assert html_part.count("Support Team Alpha") == 1
+
+    # -------------------------------------------------------------------------
+    # Test 4: Explicit signature overrides default signature
+    # -------------------------------------------------------------------------
+    draft4_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc_a_id,
+            "to": ["vip@example.com"],
+            "subject": "VIP Offer",
+            "body_text": "VIP Content",
+            "body_html": "<p>VIP Content</p>",
+            "signature_id": sig_custom_id,
+        },
+    )
+    assert draft4_resp.status_code == 201
+    d4_data = draft4_resp.json()
+    draft4_id = d4_data["id"]
+    assert "Executive Escort Alpha" in d4_data["body_text"]
+    assert "Support Team Alpha" not in d4_data["body_text"]
+
+    d4_update = await async_client.put(
+        f"/api/v1/emails/drafts/{draft4_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "body_text": "VIP Content updated",
+            "body_html": "<p>VIP Content updated</p>",
+            "signature_id": sig_custom_id,
+        },
+    )
+    assert d4_update.status_code == 200
+    d4_up_data = d4_update.json()
+    assert d4_up_data["body_text"].count("Executive Escort Alpha") == 1
+    assert "Support Team Alpha" not in d4_up_data["body_text"]
+
+    # -------------------------------------------------------------------------
+    # Test 5: No default + no explicit signature produces no signature
+    # -------------------------------------------------------------------------
+    draft5_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc_c_id,
+            "to": ["plain@example.com"],
+            "subject": "Plain Message",
+            "body_text": "Clean body without signature",
+            "body_html": "<p>Clean body without signature</p>",
+        },
+    )
+    assert draft5_resp.status_code == 201
+    d5_data = draft5_resp.json()
+    draft5_id = d5_data["id"]
+    assert d5_data["body_text"] == "Clean body without signature"
+    assert d5_data["body_html"] == "<p>Clean body without signature</p>"
+
+    d5_update = await async_client.put(
+        f"/api/v1/emails/drafts/{draft5_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "body_text": "Clean body updated",
+            "body_html": "<p>Clean body updated</p>",
+        },
+    )
+    assert d5_update.status_code == 200
+    assert d5_update.json()["body_text"] == "Clean body updated"
+    assert d5_update.json()["body_html"] == "<p>Clean body updated</p>"
+
+    # -------------------------------------------------------------------------
+    # Test 7: Switching email accounts uses the correct account default
+    # -------------------------------------------------------------------------
+    draft7_resp = await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc_a_id,
+            "to": ["partner@example.com"],
+            "subject": "Switch Account Test",
+            "body_text": "Message to be switched",
+            "body_html": "<p>Message to be switched</p>",
+        },
+    )
+    assert draft7_resp.status_code == 201
+    draft7_id = draft7_resp.json()["id"]
+    assert "Support Team Alpha" in draft7_resp.json()["body_text"]
+
+    switch_resp = await async_client.put(
+        f"/api/v1/emails/drafts/{draft7_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "email_account_id": acc_b_id,
+            "body_text": "Message to be switched",
+            "body_html": "<p>Message to be switched</p>",
+        },
+    )
+    assert switch_resp.status_code == 200
+    switch_data = switch_resp.json()
+    assert switch_data["email_account_id"] == acc_b_id
+    assert "Billing Team Beta" in switch_data["body_text"]
+    assert "<b>Billing Team Beta</b>" in switch_data["body_html"]
+    assert "Support Team Alpha" not in switch_data["body_text"]
+
+    # -------------------------------------------------------------------------
+    # Test 8: Unauthorized/wrong-account signature remains rejected on update
+    # -------------------------------------------------------------------------
+    bad_up = await async_client.put(
+        f"/api/v1/emails/drafts/{draft7_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "signature_id": sig_a_id,
+        },
+    )
+    assert bad_up.status_code == 400
+    assert "Signature does not belong to this draft's email account" in bad_up.json()["detail"]

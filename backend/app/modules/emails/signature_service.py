@@ -229,7 +229,7 @@ class SignatureService:
                     db=db,
                     company_id=comp.id,
                     user_id=current_user.id,
-                    user_role=comp_user.role,
+                    user_role=comp_user,
                 )
                 accessible_account_ids.extend([a.id for a in accounts])
 

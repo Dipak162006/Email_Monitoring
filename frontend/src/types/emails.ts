@@ -187,6 +187,7 @@ export interface EmailDraftPayload {
   reply_to?: string;
   in_reply_to?: string;
   thread_id?: number;
+  signature_id?: number;
 }
 
 export interface EmailTemplateItem {
@@ -244,6 +245,22 @@ export interface EmailSignatureItem {
 export interface EmailSignatureListResponse {
   signatures: EmailSignatureItem[];
   total: number;
+}
+
+export interface EmailSignatureCreatePayload {
+  name: string;
+  email_account_id: number;
+  body_text?: string | null;
+  body_html?: string | null;
+  is_default?: boolean;
+}
+
+export interface EmailSignatureUpdatePayload {
+  name?: string;
+  email_account_id?: number;
+  body_text?: string | null;
+  body_html?: string | null;
+  is_default?: boolean;
 }
 
 export interface EmailSyncResult {
