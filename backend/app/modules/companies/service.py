@@ -1,5 +1,6 @@
 from typing import List, Optional, Tuple
-from sqlalchemy import select
+from fastapi import HTTPException, status
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.modules.companies.models import Company, CompanyRole, CompanyUser
@@ -105,3 +106,100 @@ class CompanyService:
         await db.commit()
         await db.refresh(membership)
         return membership
+
+    @staticmethod
+    async def update_member_role(
+        db: AsyncSession,
+        company_id: int,
+        operator_role: str,
+        target_user_id: int,
+        new_role: CompanyRole,
+    ) -> CompanyUser:
+        """Update a member's role within a company, enforcing ownership protection."""
+        query = (
+            select(CompanyUser)
+            .options(selectinload(CompanyUser.user))
+            .where(
+                CompanyUser.company_id == company_id,
+                CompanyUser.user_id == target_user_id,
+            )
+        )
+        result = await db.execute(query)
+        target_membership = result.scalars().first()
+
+        if not target_membership:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Member not found in this company",
+            )
+
+        if target_membership.role == CompanyRole.OWNER.value:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Cannot modify the role of the workspace Owner",
+            )
+
+        if new_role not in [CompanyRole.ADMIN, CompanyRole.MEMBER]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid role selection. Only ADMIN or MEMBER can be assigned.",
+            )
+
+        target_membership.role = new_role.value
+        await db.commit()
+        await db.refresh(target_membership)
+        return target_membership
+
+    @staticmethod
+    async def remove_member(
+        db: AsyncSession,
+        company_id: int,
+        operator_role: str,
+        target_user_id: int,
+    ) -> bool:
+        """Remove a member from a company and revoke company-specific email account access.
+        
+        The User account itself is NOT deleted, preserving user identity across other companies.
+        The workspace OWNER cannot be removed.
+        """
+        query = (
+            select(CompanyUser)
+            .where(
+                CompanyUser.company_id == company_id,
+                CompanyUser.user_id == target_user_id,
+            )
+        )
+        result = await db.execute(query)
+        target_membership = result.scalars().first()
+
+        if not target_membership:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Member not found in this company",
+            )
+
+        if target_membership.role == CompanyRole.OWNER.value:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN if operator_role == CompanyRole.ADMIN.value else status.HTTP_400_BAD_REQUEST,
+                detail="Cannot remove the workspace Owner. Transfer ownership first.",
+            )
+
+        # Remove explicit email account access permissions for this company's accounts
+        from app.modules.email_accounts.models import EmailAccount, EmailAccountAccess
+
+        delete_access_stmt = (
+            delete(EmailAccountAccess)
+            .where(
+                EmailAccountAccess.user_id == target_user_id,
+                EmailAccountAccess.email_account_id.in_(
+                    select(EmailAccount.id).where(EmailAccount.company_id == company_id)
+                ),
+            )
+        )
+        await db.execute(delete_access_stmt)
+
+        # Remove the company membership
+        await db.delete(target_membership)
+        await db.commit()
+        return True
+

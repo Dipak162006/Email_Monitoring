@@ -32,6 +32,7 @@ class CompanyMemberRead(BaseModel):
     email: EmailStr
     full_name: Optional[str] = None
     role: CompanyRole
+    is_active: bool = True
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -41,3 +42,9 @@ class CompanyMemberAdd(BaseModel):
     """Request schema for inviting/adding an existing user to a company."""
     email: EmailStr
     role: CompanyRole = CompanyRole.MEMBER
+
+
+class CompanyMemberRoleUpdate(BaseModel):
+    """Request schema for updating a company member's role."""
+    role: CompanyRole
+

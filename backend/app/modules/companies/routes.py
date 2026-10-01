@@ -14,6 +14,7 @@ from app.modules.companies.schemas import (
     CompanyCreate,
     CompanyMemberAdd,
     CompanyMemberRead,
+    CompanyMemberRoleUpdate,
     CompanyWithRoleRead,
 )
 from app.modules.companies.service import CompanyService
@@ -112,6 +113,7 @@ async def list_company_members(
             email=member.user.email,
             full_name=member.user.full_name,
             role=CompanyRole(member.role),
+            is_active=member.user.is_active,
             created_at=member.created_at,
         )
         for member in members
@@ -157,5 +159,61 @@ async def add_company_member(
         email=target_user.email,
         full_name=target_user.full_name,
         role=CompanyRole(new_member.role),
+        is_active=target_user.is_active,
         created_at=new_member.created_at,
     )
+
+
+@router.put(
+    "/{company_id}/members/{user_id}/role",
+    response_model=CompanyMemberRead,
+    status_code=status.HTTP_200_OK,
+    summary="Change a company member's role (Admin/Owner only)",
+)
+async def update_company_member_role(
+    company_id: int,
+    user_id: int,
+    role_in: CompanyMemberRoleUpdate,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CompanyMemberRead:
+    """Update a company member's role (Admin or Member). Owner is protected."""
+    updated = await CompanyService.update_member_role(
+        db=db,
+        company_id=company_id,
+        operator_role=membership.role,
+        target_user_id=user_id,
+        new_role=role_in.role,
+    )
+    return CompanyMemberRead(
+        id=updated.id,
+        company_id=updated.company_id,
+        user_id=updated.user_id,
+        email=updated.user.email,
+        full_name=updated.user.full_name,
+        role=CompanyRole(updated.role),
+        is_active=updated.user.is_active,
+        created_at=updated.created_at,
+    )
+
+
+@router.delete(
+    "/{company_id}/members/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a member from the company (Admin/Owner only)",
+)
+async def remove_company_member(
+    company_id: int,
+    user_id: int,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a member from the company and revoke their company email account access."""
+    await CompanyService.remove_member(
+        db=db,
+        company_id=company_id,
+        operator_role=membership.role,
+        target_user_id=user_id,
+    )
+    return None
+

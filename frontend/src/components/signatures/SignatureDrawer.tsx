@@ -206,7 +206,7 @@ export const SignatureDrawer: React.FC<SignatureDrawerProps> = ({
       />
 
       {/* Slide-over Drawer Panel */}
-      <div className="fixed inset-y-0 right-0 w-full max-w-xl bg-white shadow-2xl flex flex-col z-50 transform transition-transform duration-300 ease-out animate-in slide-in-from-right duration-200">
+      <div className="fixed inset-y-0 right-0 w-full max-w-xl bg-white shadow-2xl flex flex-col z-50 animate-in slide-in-from-right duration-200">
         {/* Drawer Header */}
         <div className="px-6 py-5 border-b border-slate-100 flex items-start justify-between bg-white shrink-0">
           <div>

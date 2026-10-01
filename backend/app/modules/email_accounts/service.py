@@ -279,3 +279,30 @@ class EmailAccountService:
             )
             for record in access_records
         ]
+
+    @staticmethod
+    async def get_company_access_list(
+        db: AsyncSession,
+        company_id: int,
+    ) -> List[EmailAccountAccessRead]:
+        """List all explicit user access permissions across all email accounts belonging to a company."""
+        query = (
+            select(EmailAccountAccess)
+            .join(EmailAccount, EmailAccountAccess.email_account_id == EmailAccount.id)
+            .options(selectinload(EmailAccountAccess.user))
+            .where(EmailAccount.company_id == company_id)
+            .order_by(EmailAccountAccess.created_at.asc())
+        )
+        result = await db.execute(query)
+        access_records = result.scalars().all()
+        return [
+            EmailAccountAccessRead(
+                id=record.id,
+                email_account_id=record.email_account_id,
+                user_id=record.user_id,
+                user_email=record.user.email,
+                user_full_name=record.user.full_name,
+                created_at=record.created_at,
+            )
+            for record in access_records
+        ]

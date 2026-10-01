@@ -37,3 +37,32 @@ export interface CompanyWithRole {
   role: "OWNER" | "ADMIN" | "MEMBER";
   created_at: string;
 }
+
+export interface CompanyMember {
+  id: number;
+  company_id: number;
+  user_id: number;
+  email: string;
+  full_name: string | null;
+  role: "OWNER" | "ADMIN" | "MEMBER";
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface CompanyMemberAddPayload {
+  email: string;
+  role: "ADMIN" | "MEMBER";
+}
+
+export interface CompanyMemberRoleUpdatePayload {
+  role: "ADMIN" | "MEMBER";
+}
+
+export interface EmailAccountAccessItem {
+  id: number;
+  email_account_id: number;
+  user_id: number;
+  user_email: string;
+  user_full_name: string | null;
+  created_at: string;
+}

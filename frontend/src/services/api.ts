@@ -1,4 +1,14 @@
-import type { CompanyWithRole, LoginCredentials, RegisterCredentials, Token, User } from "../types/auth";
+import type {
+  CompanyMember,
+  CompanyMemberAddPayload,
+  CompanyMemberRoleUpdatePayload,
+  CompanyWithRole,
+  EmailAccountAccessItem,
+  LoginCredentials,
+  RegisterCredentials,
+  Token,
+  User,
+} from "../types/auth";
 import type {
   AccountHealthResponse,
   DashboardActivityResponse,
@@ -557,6 +567,30 @@ export const companiesApi = {
   getMyCompanies: async (): Promise<CompanyWithRole[]> => {
     return apiClient.get<CompanyWithRole[]>("/api/v1/companies/");
   },
+
+  getMembers: async (companyId: number): Promise<CompanyMember[]> => {
+    return apiClient.get<CompanyMember[]>(`/api/v1/companies/${companyId}/members`);
+  },
+
+  addMember: async (companyId: number, data: CompanyMemberAddPayload): Promise<CompanyMember> => {
+    return apiClient.post<CompanyMember>(`/api/v1/companies/${companyId}/members`, data);
+  },
+
+  updateMemberRole: async (
+    companyId: number,
+    userId: number,
+    data: CompanyMemberRoleUpdatePayload
+  ): Promise<CompanyMember> => {
+    return apiClient.put<CompanyMember>(`/api/v1/companies/${companyId}/members/${userId}/role`, data);
+  },
+
+  removeMember: async (companyId: number, userId: number): Promise<void> => {
+    return apiClient.delete<void>(`/api/v1/companies/${companyId}/members/${userId}`);
+  },
+
+  getCompanyEmailAccountsAccess: async (companyId: number): Promise<EmailAccountAccessItem[]> => {
+    return apiClient.get<EmailAccountAccessItem[]>(`/api/v1/companies/${companyId}/email-accounts-access`);
+  },
 };
 
 export const emailAccountsApi = {
@@ -588,7 +622,33 @@ export const emailAccountsApi = {
       `/api/v1/email-accounts/${accountId}/sync?background=${background}`
     );
   },
+
+  listAccountAccess: async (companyId: number, accountId: number): Promise<EmailAccountAccessItem[]> => {
+    return apiClient.get<EmailAccountAccessItem[]>(`/api/v1/companies/${companyId}/email-accounts/${accountId}/access`);
+  },
+
+  grantAccess: async (
+    companyId: number,
+    accountId: number,
+    userId: number
+  ): Promise<EmailAccountAccessItem> => {
+    return apiClient.post<EmailAccountAccessItem>(
+      `/api/v1/companies/${companyId}/email-accounts/${accountId}/access`,
+      { user_id: userId }
+    );
+  },
+
+  revokeAccess: async (
+    companyId: number,
+    accountId: number,
+    userId: number
+  ): Promise<void> => {
+    return apiClient.delete<void>(
+      `/api/v1/companies/${companyId}/email-accounts/${accountId}/access/${userId}`
+    );
+  },
 };
+
 
 // Preserved existing health check functions
 export async function fetchHealth(): Promise<HealthResponse> {

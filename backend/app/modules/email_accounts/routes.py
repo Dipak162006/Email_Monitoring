@@ -144,6 +144,21 @@ async def delete_email_account(
 # -----------------------------------------------------------------------------
 
 @router.get(
+    "/companies/{company_id}/email-accounts-access",
+    response_model=List[EmailAccountAccessRead],
+    status_code=status.HTTP_200_OK,
+    summary="List all email account access permissions for a company",
+)
+async def list_company_email_accounts_access(
+    company_id: int,
+    membership: CompanyUser = Depends(get_company_membership),
+    db: AsyncSession = Depends(get_db),
+) -> List[EmailAccountAccessRead]:
+    """List all explicit user access permissions across all email accounts in this company."""
+    return await EmailAccountService.get_company_access_list(db, company_id)
+
+
+@router.get(
     "/companies/{company_id}/email-accounts/{account_id}/access",
     response_model=List[EmailAccountAccessRead],
     status_code=status.HTTP_200_OK,
