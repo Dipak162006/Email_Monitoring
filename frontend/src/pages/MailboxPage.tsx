@@ -12,11 +12,13 @@ import { RestoreConfirmModal } from "../components/mailbox/RestoreConfirmModal";
 import { PermanentDeleteConfirmModal } from "../components/mailbox/PermanentDeleteConfirmModal";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Button } from "../components/ui/Button";
+import { useWorkspace } from "../hooks/useWorkspace";
 
 export function MailboxPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { currentCompanyId } = useWorkspace();
 
   // Active folder from URL search params (default to "inbox")
   const rawFolder = searchParams.get("folder")?.toLowerCase();
@@ -80,10 +82,20 @@ export function MailboxPage() {
     setDebouncedSearchQuery("");
   }, [activeFolder]);
 
+  // Reset company-scoped filter and selection state when active company changes
+  useEffect(() => {
+    setSelectedAccountId(undefined);
+    setSelectedIds(new Set());
+    setCurrentPage(1);
+    setSelectedEmail(null);
+    setSearchQuery("");
+    setDebouncedSearchQuery("");
+  }, [currentCompanyId]);
+
   // Fetch Mailbox dynamic counts scoped to the selected email account
   const { data: mailboxCounts, refetch: refetchCounts } = useQuery({
-    queryKey: ["mailbox-counts", selectedAccountId],
-    queryFn: () => emailsApi.getMailboxCounts(undefined, selectedAccountId),
+    queryKey: ["mailbox-counts", currentCompanyId, selectedAccountId],
+    queryFn: () => emailsApi.getMailboxCounts(currentCompanyId ?? undefined, selectedAccountId),
     staleTime: 30000,
   });
 
@@ -93,6 +105,12 @@ export function MailboxPage() {
     queryFn: () => emailAccountsApi.getAuthorizedAccounts(),
     staleTime: 60000,
   });
+
+  // Filter authorized accounts strictly to the active company workspace
+  const companyAuthorizedAccounts = useMemo(() => {
+    if (!currentCompanyId) return authorizedAccounts;
+    return authorizedAccounts.filter((acc) => acc.company_id === currentCompanyId);
+  }, [authorizedAccounts, currentCompanyId]);
 
   // Query params for emails list
   const listParams: EmailListParams = useMemo(() => {
@@ -104,8 +122,9 @@ export function MailboxPage() {
       limit: pageSize,
       offset: (currentPage - 1) * pageSize,
       sort: sortBy,
+      companyId: currentCompanyId ?? undefined,
     };
-  }, [activeFolder, debouncedSearchQuery, selectedAccountId, unreadOnly, currentPage, pageSize, sortBy]);
+  }, [activeFolder, debouncedSearchQuery, selectedAccountId, unreadOnly, currentPage, pageSize, sortBy, currentCompanyId]);
 
   // Fetch email list with keepPreviousData to prevent unmounting/reset during pagination
   const {
@@ -591,7 +610,7 @@ export function MailboxPage() {
           isRestoring={isRestoring}
           onBulkPermanentDelete={() => handlePermanentDeletePrompt()}
           isPermanentDeleting={isPermanentDeleting}
-          accounts={authorizedAccounts}
+          accounts={companyAuthorizedAccounts}
           selectedAccountId={selectedAccountId}
           onAccountChange={handleAccountChange}
           sortBy={sortBy}

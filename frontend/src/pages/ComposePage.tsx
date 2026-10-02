@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useWorkspace } from "../hooks/useWorkspace";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
@@ -100,12 +101,20 @@ export function ComposePage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const { currentCompanyId } = useWorkspace();
+
   // Fetch Authorized Accounts
-  const { data: accounts = [], isLoading: isLoadingAccounts } = useQuery({
+  const { data: rawAccounts = [], isLoading: isLoadingAccounts } = useQuery({
     queryKey: ["authorized-accounts"],
     queryFn: () => emailAccountsApi.getAuthorizedAccounts(),
     staleTime: 60000,
   });
+
+  // Filter accounts strictly to active workspace
+  const accounts = useMemo(() => {
+    if (!currentCompanyId) return rawAccounts;
+    return rawAccounts.filter((acc) => acc.company_id === currentCompanyId);
+  }, [rawAccounts, currentCompanyId]);
 
   // Fetch default signature for selected account
   const { data: defaultSignature } = useQuery({
@@ -123,10 +132,15 @@ export function ComposePage() {
     draftIdRef.current = draftId;
   }, [draftId]);
 
-  // Set default account when accounts load (if none selected yet)
+  // Set default account when accounts load or change, resetting if account belongs to different company
   useEffect(() => {
-    if (accounts.length > 0 && selectedAccountId === null) {
-      setSelectedAccountId(accounts[0].id);
+    if (accounts.length > 0) {
+      const isValid = accounts.some((a) => a.id === selectedAccountId);
+      if (!isValid) {
+        setSelectedAccountId(accounts[0].id);
+      }
+    } else {
+      setSelectedAccountId(null);
     }
   }, [accounts, selectedAccountId]);
 

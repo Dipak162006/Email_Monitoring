@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronUp, MessageSquare, CornerDownLeft } from "lucide-react";
 import type { EmailItem } from "../../types/emails";
 import { emailsApi } from "../../services/api";
+import { useWorkspace } from "../../hooks/useWorkspace";
 import DOMPurify from "dompurify";
 
 interface EmailConversationProps {
@@ -12,10 +13,11 @@ interface EmailConversationProps {
 
 export const EmailConversation: React.FC<EmailConversationProps> = ({ threadId, currentEmailId }) => {
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const { currentCompanyId } = useWorkspace();
 
   const { data: threadDetail, isLoading } = useQuery({
-    queryKey: ["thread-detail", threadId],
-    queryFn: () => emailsApi.getThread(threadId),
+    queryKey: ["thread-detail", currentCompanyId, threadId],
+    queryFn: () => emailsApi.getThread(threadId, currentCompanyId ?? undefined),
     staleTime: 60000,
   });
 

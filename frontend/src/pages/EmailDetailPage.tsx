@@ -28,12 +28,14 @@ import { AttachmentList } from "../components/mailbox/AttachmentList";
 import { EmailConversation } from "../components/mailbox/EmailConversation";
 import { RestoreConfirmModal } from "../components/mailbox/RestoreConfirmModal";
 import { PermanentDeleteConfirmModal } from "../components/mailbox/PermanentDeleteConfirmModal";
+import { useWorkspace } from "../hooks/useWorkspace";
 import DOMPurify from "dompurify";
 
 export function EmailDetailPage() {
   const { emailId } = useParams<{ emailId: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { currentCompanyId } = useWorkspace();
   const [viewMode, setViewMode] = useState<"html" | "text">("html");
 
   // Modals and feedback state
@@ -44,15 +46,15 @@ export function EmailDetailPage() {
   const id = Number(emailId);
   const hasMarkedReadRef = useRef<number | null>(null);
 
-  // Fetch email details
+  // Fetch email details scoped to active company
   const {
     data: email,
     isLoading,
     isError,
     error,
   } = useQuery({
-    queryKey: ["email-detail", id],
-    queryFn: () => emailsApi.getEmailById(id),
+    queryKey: ["email-detail", currentCompanyId, id],
+    queryFn: () => emailsApi.getEmailById(id, currentCompanyId ?? undefined),
     enabled: !isNaN(id),
     staleTime: 30000,
   });
@@ -67,8 +69,8 @@ export function EmailDetailPage() {
 
   // Fetch attachments
   const { data: attachmentsData } = useQuery({
-    queryKey: ["email-attachments", id],
-    queryFn: () => emailsApi.getAttachments(id),
+    queryKey: ["email-attachments", currentCompanyId, id],
+    queryFn: () => emailsApi.getAttachments(id, currentCompanyId ?? undefined),
     enabled: !isNaN(id),
     staleTime: 60000,
   });

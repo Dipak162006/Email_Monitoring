@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, FileText, CheckCircle2 } from "lucide-react";
@@ -8,6 +8,7 @@ import { TemplateFilters, type StatusFilter } from "../components/templates/Temp
 import { DeleteTemplateModal } from "../components/templates/DeleteTemplateModal";
 import { LoadingState } from "../components/ui/LoadingState";
 import { ErrorState } from "../components/ui/ErrorState";
+import { useWorkspace } from "../hooks/useWorkspace";
 import type { EmailTemplateItem } from "../types/emails";
 
 function getTemplateErrorMessage(error: unknown): string {
@@ -38,11 +39,17 @@ function getTemplateErrorMessage(error: unknown): string {
 export function TemplatesPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { currentCompanyId } = useWorkspace();
 
   // Filters
   const [searchQuery, setSearchQuery] = useState("");
   const [accountFilter, setAccountFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+
+  // Reset account filter when active company switches
+  useEffect(() => {
+    setAccountFilter("all");
+  }, [currentCompanyId]);
 
   // Delete modal state
   const [templateToDelete, setTemplateToDelete] = useState<EmailTemplateItem | null>(null);
@@ -59,11 +66,16 @@ export function TemplatesPage() {
   };
 
   // Fetch authorized accounts for filtering & badge display
-  const { data: accounts = [] } = useQuery({
+  const { data: rawAccounts = [] } = useQuery({
     queryKey: ["authorizedEmailAccounts"],
     queryFn: () => emailAccountsApi.getAuthorizedAccounts(),
     staleTime: 60000,
   });
+
+  const accounts = useMemo(() => {
+    if (!currentCompanyId) return rawAccounts;
+    return rawAccounts.filter((acc) => acc.company_id === currentCompanyId);
+  }, [rawAccounts, currentCompanyId]);
 
   const accountMap = useMemo(() => {
     const map = new Map<number, string>();
@@ -73,7 +85,7 @@ export function TemplatesPage() {
     return map;
   }, [accounts]);
 
-  // Fetch all accessible templates
+  // Fetch all accessible templates scoped to active company
   const {
     data: templates = [],
     isLoading,
@@ -81,8 +93,8 @@ export function TemplatesPage() {
     error,
     refetch,
   } = useQuery({
-    queryKey: ["templates"],
-    queryFn: () => templatesApi.listTemplates(),
+    queryKey: ["templates", currentCompanyId],
+    queryFn: () => templatesApi.listTemplates({ companyId: currentCompanyId ?? undefined }),
     staleTime: 30000,
   });
 

@@ -19,6 +19,7 @@ import { TemplatePreviewModal } from "../components/templates/TemplatePreviewMod
 import { DeleteTemplateModal } from "../components/templates/DeleteTemplateModal";
 import { LoadingState } from "../components/ui/LoadingState";
 import { ErrorState } from "../components/ui/ErrorState";
+import { useWorkspace } from "../hooks/useWorkspace";
 
 const DYNAMIC_VARIABLES = [
   "{{customer_name}}",
@@ -35,6 +36,7 @@ export function TemplateEditorPage() {
   const numericTemplateId = templateId ? parseInt(templateId, 10) : undefined;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { currentCompanyId } = useWorkspace();
 
   // Form State
   const [name, setName] = useState("");
@@ -57,11 +59,16 @@ export function TemplateEditorPage() {
   const editorRef = useRef<RichTextEditorRef>(null);
 
   // Fetch Authorized Accounts for scope selection
-  const { data: accounts = [] } = useQuery({
+  const { data: rawAccounts = [] } = useQuery({
     queryKey: ["authorizedEmailAccounts"],
     queryFn: () => emailAccountsApi.getAuthorizedAccounts(),
     staleTime: 60000,
   });
+
+  const accounts = React.useMemo(() => {
+    if (!currentCompanyId) return rawAccounts;
+    return rawAccounts.filter((acc) => acc.company_id === currentCompanyId);
+  }, [rawAccounts, currentCompanyId]);
 
   // Fetch template data if in edit mode
   const {
@@ -71,8 +78,8 @@ export function TemplateEditorPage() {
     error: templateError,
     refetch: refetchTemplate,
   } = useQuery({
-    queryKey: ["template", numericTemplateId],
-    queryFn: () => templatesApi.getTemplate(numericTemplateId!),
+    queryKey: ["template", currentCompanyId, numericTemplateId],
+    queryFn: () => templatesApi.getTemplate(numericTemplateId!, currentCompanyId ?? undefined),
     enabled: isEditMode && !isNaN(numericTemplateId!),
   });
 
@@ -99,7 +106,7 @@ export function TemplateEditorPage() {
       body_text: string;
       email_account_id?: number | null;
       is_active: boolean;
-    }) => templatesApi.createTemplate(data),
+    }) => templatesApi.createTemplate(data, currentCompanyId ?? undefined),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["templates"], refetchType: "all" });
       navigate("/templates");
@@ -119,10 +126,10 @@ export function TemplateEditorPage() {
       body_text: string;
       email_account_id?: number | null;
       is_active: boolean;
-    }) => templatesApi.updateTemplate(numericTemplateId!, data),
+    }) => templatesApi.updateTemplate(numericTemplateId!, data, currentCompanyId ?? undefined),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["templates"], refetchType: "all" });
-      queryClient.invalidateQueries({ queryKey: ["template", numericTemplateId], refetchType: "all" });
+      queryClient.invalidateQueries({ queryKey: ["template", currentCompanyId, numericTemplateId], refetchType: "all" });
       navigate("/templates");
     },
     onError: (err: unknown) => {
@@ -133,7 +140,7 @@ export function TemplateEditorPage() {
 
   // Delete Mutation
   const deleteMutation = useMutation({
-    mutationFn: () => templatesApi.deleteTemplate(numericTemplateId!),
+    mutationFn: () => templatesApi.deleteTemplate(numericTemplateId!, currentCompanyId ?? undefined),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["templates"], refetchType: "all" });
       setIsDeleteOpen(false);

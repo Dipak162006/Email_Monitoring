@@ -30,6 +30,8 @@ import { useAuth } from "../hooks/useAuth";
 import { cn } from "../lib/utils";
 import { Button } from "../components/ui/Button";
 import { emailsApi } from "../services/api";
+import { useWorkspace } from "../hooks/useWorkspace";
+import { WorkspaceSwitcher } from "../components/workspace/WorkspaceSwitcher";
 
 interface NavLinkItem {
   label: string;
@@ -41,13 +43,14 @@ interface NavLinkItem {
 
 export function AppLayout() {
   const { user, logout } = useAuth();
+  const { currentCompany, currentCompanyId, currentRole } = useWorkspace();
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Dynamic mailbox folder counts query
+  // Dynamic mailbox folder counts query scoped to active company
   const { data: mailboxCounts } = useQuery({
-    queryKey: ["mailbox-counts"],
-    queryFn: () => emailsApi.getMailboxCounts(),
+    queryKey: ["mailbox-counts", currentCompanyId],
+    queryFn: () => emailsApi.getMailboxCounts(currentCompanyId ?? undefined),
     staleTime: 30000,
     refetchInterval: 60000,
   });
@@ -373,7 +376,7 @@ export function AppLayout() {
                     PulseMail B2B
                   </span>
                   <span className="text-[10px] font-semibold text-slate-400 tracking-wider block truncate">
-                    Email Monitoring
+                    {currentCompany?.name || "Email Monitoring"}
                   </span>
                 </div>
               </Link>
@@ -475,7 +478,7 @@ export function AppLayout() {
       <div className="flex-1 flex flex-col min-w-0 h-screen overflow-y-auto">
         {/* Top Header Bar */}
         <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between sticky top-0 z-20 shrink-0 shadow-2xs">
-          {/* Left: Mobile Menu Trigger + Breadcrumb Navigation */}
+          {/* Left: Mobile Menu Trigger + Breadcrumb Navigation + Workspace Switcher */}
           <div className="flex items-center space-x-3 min-w-0">
             <button
               type="button"
@@ -487,11 +490,15 @@ export function AppLayout() {
             </button>
 
             {/* Breadcrumb Navigation */}
-            <div className="flex items-center space-x-1.5 text-xs truncate">
+            <div className="hidden sm:flex items-center space-x-1.5 text-xs truncate">
               <span className="font-semibold text-slate-700">PulseMail</span>
               <span className="text-slate-300 font-normal">/</span>
-              <span className="font-semibold text-indigo-600 truncate">{getBreadcrumbTitle()}</span>
+              <span className="font-semibold text-slate-600 truncate">{getBreadcrumbTitle()}</span>
+              <span className="text-slate-300 font-normal">/</span>
             </div>
+
+            {/* Top Task Bar Workspace Switcher */}
+            <WorkspaceSwitcher />
           </div>
 
           {/* Center: Search Bar */}
@@ -537,7 +544,9 @@ export function AppLayout() {
                 <p className="text-xs font-semibold text-slate-900 leading-tight truncate max-w-[130px]">
                   {user?.full_name || "Alex Vance"}
                 </p>
-                <p className="text-[10px] text-slate-500 leading-tight">Admin</p>
+                <p className="text-[10px] text-slate-500 leading-tight">
+                  {currentRole ? currentRole.charAt(0) + currentRole.slice(1).toLowerCase() : "Member"}
+                </p>
               </div>
             </div>
 
