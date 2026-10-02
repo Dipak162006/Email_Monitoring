@@ -17,6 +17,7 @@ from app.modules.companies.schemas import (
     CompanyMemberAdd,
     CompanyMemberRead,
     CompanyMemberRoleUpdate,
+    CompanyUpdate,
     CompanyWithRoleRead,
     UserInvitationRead,
 )
@@ -92,6 +93,34 @@ async def get_company_detail(
         name=company.name,
         is_active=company.is_active,
         created_at=company.created_at,
+        role=CompanyRole(membership.role),
+    )
+
+
+@router.patch(
+    "/{company_id}",
+    response_model=CompanyWithRoleRead,
+    status_code=status.HTTP_200_OK,
+    summary="Update company settings (Owner/Admin only)",
+)
+async def update_company(
+    company_id: int,
+    company_update: CompanyUpdate,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CompanyWithRoleRead:
+    """Update company settings (name). Accessible only by workspace OWNER or ADMIN."""
+    company = membership.company
+    updated_company = await CompanyService.update_company(
+        db=db,
+        company=company,
+        name=company_update.name,
+    )
+    return CompanyWithRoleRead(
+        id=updated_company.id,
+        name=updated_company.name,
+        is_active=updated_company.is_active,
+        created_at=updated_company.created_at,
         role=CompanyRole(membership.role),
     )
 

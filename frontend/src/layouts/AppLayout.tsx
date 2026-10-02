@@ -15,6 +15,7 @@ import {
   PenTool,
   Users,
   Activity,
+  Building2,
   LogOut,
   Menu,
   X,
@@ -45,7 +46,7 @@ interface NavLinkItem {
 export function AppLayout() {
   const { user, logout } = useAuth();
   const { currentCompany, currentCompanyId, currentRole } = useWorkspace();
-  const { canAccessEmailAccounts, canAccessTeam, canAccessDiagnostics } = usePermissions();
+  const { canAccessEmailAccounts, canAccessTeam, canAccessDiagnostics, canAccessSettings } = usePermissions();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -137,6 +138,7 @@ export function AppLayout() {
     if (path.startsWith("/signatures")) return "Signatures";
     if (path.startsWith("/team")) return "Team & Permissions";
     if (path.startsWith("/diagnostics")) return "System Diagnostics";
+    if (path.startsWith("/settings")) return "Company Settings";
     return "Overview";
   };
 
@@ -213,14 +215,22 @@ export function AppLayout() {
     }
     items.push({ label: "Templates", href: "/templates", icon: LayoutGrid });
     items.push({ label: "Signatures", href: "/signatures", icon: PenTool });
-    if (canAccessTeam) {
-      items.push({ label: "Team & Permissions", href: "/team", icon: Users });
-    }
     if (canAccessDiagnostics) {
       items.push({ label: "System Diagnostics", href: "/diagnostics", icon: Activity });
     }
     return items;
-  }, [canAccessEmailAccounts, canAccessTeam, canAccessDiagnostics]);
+  }, [canAccessEmailAccounts, canAccessDiagnostics]);
+
+  const settingsItems: NavLinkItem[] = React.useMemo(() => {
+    const items: NavLinkItem[] = [];
+    if (canAccessSettings) {
+      items.push({ label: "Company Settings", href: "/settings", icon: Building2 });
+    }
+    if (canAccessTeam) {
+      items.push({ label: "Team & Permissions", href: "/team", icon: Users });
+    }
+    return items;
+  }, [canAccessSettings, canAccessTeam]);
 
   const renderNavGroup = (title: string, items: NavLinkItem[], showHeaderChevron = false) => (
     <div className="space-y-0.5">
@@ -443,6 +453,7 @@ export function AppLayout() {
           {renderNavGroup("Overview", overviewItems)}
           {renderNavGroup("Mailboxes", mailboxItems, true)}
           {renderNavGroup("Configuration", configItems)}
+          {settingsItems.length > 0 && renderNavGroup("Settings", settingsItems)}
         </nav>
 
         {/* Sidebar Footer: Authenticated User Profile (Monthly Quota Completely Removed) */}

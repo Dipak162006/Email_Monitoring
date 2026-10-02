@@ -95,3 +95,7 @@ export interface CompanyInvitationItem {
   accepted_at?: string | null;
   declined_at?: string | null;
 }
+
+export interface CompanyUpdatePayload {
+  name: string;
+}

@@ -18,6 +18,7 @@ import { TemplateEditorPage } from "../pages/TemplateEditorPage";
 import { SignaturesPage } from "../pages/SignaturesPage";
 import { TeamPage } from "../pages/TeamPage";
 import { DiagnosticsPage } from "../pages/DiagnosticsPage";
+import { SettingsPage } from "../pages/SettingsPage";
 import { NotFoundPage } from "../pages/NotFoundPage";
 
 export function AppRoutes() {
@@ -49,6 +50,7 @@ export function AppRoutes() {
               <Route path="/email-accounts" element={<EmailAccountsPage />} />
               <Route path="/team" element={<TeamPage />} />
               <Route path="/diagnostics" element={<DiagnosticsPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
             </Route>
 
             {/* Routes Accessible to All Active Workspace Members */}

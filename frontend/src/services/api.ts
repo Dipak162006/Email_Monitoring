@@ -2,6 +2,7 @@ import type {
   CompanyMember,
   CompanyMemberAddPayload,
   CompanyMemberRoleUpdatePayload,
+  CompanyUpdatePayload,
   CompanyWithRole,
   CompanyInvitationItem,
   EmailAccountAccessItem,
@@ -572,6 +573,10 @@ export const companiesApi = {
 
   createCompany: async (name: string): Promise<CompanyWithRole> => {
     return apiClient.post<CompanyWithRole>("/api/v1/companies/", { name });
+  },
+
+  updateCompany: async (companyId: number, data: CompanyUpdatePayload): Promise<CompanyWithRole> => {
+    return apiClient.patch<CompanyWithRole>(`/api/v1/companies/${companyId}`, data);
   },
 
   getMembers: async (companyId: number): Promise<CompanyMember[]> => {

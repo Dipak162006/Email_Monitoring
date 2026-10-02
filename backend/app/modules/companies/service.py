@@ -45,6 +45,18 @@ class CompanyService:
         return result.scalars().first()
 
     @staticmethod
+    async def update_company(
+        db: AsyncSession,
+        company: Company,
+        name: str,
+    ) -> Company:
+        """Update company name and persist using standard transaction conventions."""
+        company.name = name.strip()
+        await db.commit()
+        await db.refresh(company)
+        return company
+
+    @staticmethod
     async def get_user_membership(
         db: AsyncSession,
         company_id: int,

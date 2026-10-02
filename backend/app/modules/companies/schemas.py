@@ -1,12 +1,29 @@
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from app.modules.companies.models import CompanyRole, InvitationStatus
 
 
 class CompanyCreate(BaseModel):
     """Request schema for creating a new company organization."""
     name: str = Field(min_length=1, max_length=255, description="Company organization name")
+
+
+class CompanyUpdate(BaseModel):
+    """Request schema for updating company settings."""
+    name: str = Field(min_length=1, max_length=255, description="Updated company organization name")
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        trimmed = v.strip()
+        if not trimmed:
+            raise ValueError("Company name cannot be empty or whitespace only")
+        if len(trimmed) > 255:
+            raise ValueError("Company name must not exceed 255 characters")
+        return trimmed
 
 
 class CompanyRead(BaseModel):

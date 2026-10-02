@@ -818,3 +818,204 @@ async def test_self_management_protection_and_admin_rules(async_client: AsyncCli
     )
     assert member_try_remove.status_code == 403
 
+
+# =============================================================================
+# M14: Company Settings & Name Update Tests
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_update_company_name_as_owner(async_client: AsyncClient):
+    """Test that a company OWNER can successfully update the company name."""
+    token_owner = await register_and_login(async_client, "owner_update_co@test.com", "Owner User")
+    comp_resp = await async_client.post(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "Original Name Corp"},
+    )
+    assert comp_resp.status_code == 201
+    comp_id = comp_resp.json()["id"]
+
+    # Update company name with whitespace padding to verify trimming
+    patch_resp = await async_client.patch(
+        f"/api/v1/companies/{comp_id}",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "  Renamed Tech Ltd  "},
+    )
+    assert patch_resp.status_code == 200
+    data = patch_resp.json()
+    assert data["id"] == comp_id
+    assert data["name"] == "Renamed Tech Ltd"
+    assert data["role"] == "OWNER"
+    assert data["is_active"] is True
+
+    # Verify retrieval reflects the updated name
+    get_resp = await async_client.get(
+        f"/api/v1/companies/{comp_id}",
+        headers={"Authorization": f"Bearer {token_owner}"},
+    )
+    assert get_resp.status_code == 200
+    assert get_resp.json()["name"] == "Renamed Tech Ltd"
+
+
+@pytest.mark.asyncio
+async def test_update_company_name_as_admin(async_client: AsyncClient):
+    """Test that a company ADMIN can update the company name."""
+    token_owner = await register_and_login(async_client, "owner_co_admin@test.com", "Owner User")
+    comp_resp = await async_client.post(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "Admin Test Workspace"},
+    )
+    comp_id = comp_resp.json()["id"]
+
+    # Register admin user and add to company as ADMIN
+    token_admin = await register_and_login(async_client, "admin_co_user@test.com", "Admin User")
+    await async_client.post(
+        f"/api/v1/companies/{comp_id}/members",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "admin_co_user@test.com", "role": "ADMIN"},
+    )
+
+    # Admin updates company name
+    patch_resp = await async_client.patch(
+        f"/api/v1/companies/{comp_id}",
+        headers={"Authorization": f"Bearer {token_admin}"},
+        json={"name": "Updated by Admin Inc"},
+    )
+    assert patch_resp.status_code == 200
+    data = patch_resp.json()
+    assert data["id"] == comp_id
+    assert data["name"] == "Updated by Admin Inc"
+    assert data["role"] == "ADMIN"
+
+
+@pytest.mark.asyncio
+async def test_update_company_name_as_member_forbidden(async_client: AsyncClient):
+    """Test that a MEMBER receives 403 Forbidden when attempting to update company name."""
+    token_owner = await register_and_login(async_client, "owner_co_mem@test.com", "Owner User")
+    comp_resp = await async_client.post(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "Member Protected Workspace"},
+    )
+    comp_id = comp_resp.json()["id"]
+
+    # Register member and add to company as MEMBER
+    token_member = await register_and_login(async_client, "regular_mem_co@test.com", "Member User")
+    await async_client.post(
+        f"/api/v1/companies/{comp_id}/members",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "regular_mem_co@test.com", "role": "MEMBER"},
+    )
+
+    # Member attempts to update name
+    patch_resp = await async_client.patch(
+        f"/api/v1/companies/{comp_id}",
+        headers={"Authorization": f"Bearer {token_member}"},
+        json={"name": "Hacked Name"},
+    )
+    assert patch_resp.status_code == 403
+    assert "Administrator privileges required" in patch_resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_update_company_name_unauthorized_not_found(async_client: AsyncClient):
+    """Test that non-members and nonexistent companies return 404 (anti-enumeration)."""
+    token_owner = await register_and_login(async_client, "owner_isolation_a@test.com", "Owner A")
+    comp_resp = await async_client.post(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "Isolation Company A"},
+    )
+    comp_id = comp_resp.json()["id"]
+
+    token_outsider = await register_and_login(async_client, "outsider_user@test.com", "Outsider")
+
+    # 1. Nonexistent company ID
+    nonexistent_resp = await async_client.patch(
+        "/api/v1/companies/999999",
+        headers={"Authorization": f"Bearer {token_outsider}"},
+        json={"name": "Should Fail"},
+    )
+    assert nonexistent_resp.status_code == 404
+    assert nonexistent_resp.json() == {"detail": "Company not found"}
+
+    # 2. Existing company belonging to another user
+    cross_company_resp = await async_client.patch(
+        f"/api/v1/companies/{comp_id}",
+        headers={"Authorization": f"Bearer {token_outsider}"},
+        json={"name": "Should Fail"},
+    )
+    assert cross_company_resp.status_code == 404
+    assert cross_company_resp.json() == {"detail": "Company not found"}
+
+    # Must be completely indistinguishable
+    assert nonexistent_resp.json() == cross_company_resp.json()
+
+
+@pytest.mark.asyncio
+async def test_update_company_validation_empty_and_whitespace(async_client: AsyncClient):
+    """Test that empty string and whitespace-only company names are rejected with 422."""
+    token_owner = await register_and_login(async_client, "owner_validation_empty@test.com", "Owner Val")
+    comp_resp = await async_client.post(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "Valid Initial Name"},
+    )
+    comp_id = comp_resp.json()["id"]
+
+    # Empty string
+    empty_resp = await async_client.patch(
+        f"/api/v1/companies/{comp_id}",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": ""},
+    )
+    assert empty_resp.status_code == 422
+
+    # Whitespace only
+    whitespace_resp = await async_client.patch(
+        f"/api/v1/companies/{comp_id}",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "     "},
+    )
+    assert whitespace_resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_update_company_validation_oversized_name(async_client: AsyncClient):
+    """Test that company names exceeding 255 characters are rejected with 422."""
+    token_owner = await register_and_login(async_client, "owner_validation_oversize@test.com", "Owner Val")
+    comp_resp = await async_client.post(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "Oversize Test Company"},
+    )
+    comp_id = comp_resp.json()["id"]
+
+    oversized_resp = await async_client.patch(
+        f"/api/v1/companies/{comp_id}",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "X" * 256},
+    )
+    assert oversized_resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_update_company_rejects_extra_fields(async_client: AsyncClient):
+    """Test that attempting to mutate immutable fields (id, role, is_active) is rejected with 422."""
+    token_owner = await register_and_login(async_client, "owner_extra_fields@test.com", "Owner Val")
+    comp_resp = await async_client.post(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "Extra Fields Company"},
+    )
+    comp_id = comp_resp.json()["id"]
+
+    extra_resp = await async_client.patch(
+        f"/api/v1/companies/{comp_id}",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "Valid Name", "is_active": False, "role": "MEMBER", "id": 123},
+    )
+    assert extra_resp.status_code == 422
+
+

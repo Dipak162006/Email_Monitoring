@@ -25,6 +25,7 @@ export interface PermissionsResult {
   canAccessSignatures: boolean;
   canAccessTeam: boolean;
   canAccessDiagnostics: boolean;
+  canAccessSettings: boolean;
 
   // Route path check
   canAccessRoute: (pathname: string) => boolean;
@@ -66,6 +67,7 @@ export function usePermissions(): PermissionsResult {
     const canAccessTeam = hasWorkspace && isAdminOrOwner;
     const canAccessEmailAccounts = hasWorkspace && isAdminOrOwner;
     const canAccessDiagnostics = hasWorkspace && isAdminOrOwner;
+    const canAccessSettings = hasWorkspace && isAdminOrOwner;
 
     const canAccessRoute = (pathname: string): boolean => {
       if (!hasWorkspace) return false;
@@ -74,6 +76,7 @@ export function usePermissions(): PermissionsResult {
       if (cleanPath === "/team") return canAccessTeam;
       if (cleanPath === "/email-accounts") return canAccessEmailAccounts;
       if (cleanPath === "/diagnostics") return canAccessDiagnostics;
+      if (cleanPath === "/settings") return canAccessSettings;
 
       // All other application routes are accessible to all valid workspace roles
       return true;
@@ -133,6 +136,7 @@ export function usePermissions(): PermissionsResult {
       canAccessSignatures,
       canAccessTeam,
       canAccessDiagnostics,
+      canAccessSettings,
 
       canAccessRoute,
 
