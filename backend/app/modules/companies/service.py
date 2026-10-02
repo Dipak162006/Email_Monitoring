@@ -1,10 +1,16 @@
 from typing import List, Optional, Tuple
 from fastapi import HTTPException, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from app.modules.companies.models import Company, CompanyRole, CompanyUser
-
+from app.modules.auth.service import AuthService
+from app.modules.companies.models import (
+    Company,
+    CompanyInvitation,
+    CompanyRole,
+    CompanyUser,
+    InvitationStatus,
+)
 
 class CompanyService:
     """Service handling company tenant operations and membership data access."""
@@ -202,4 +208,204 @@ class CompanyService:
         await db.delete(target_membership)
         await db.commit()
         return True
+
+    @staticmethod
+    async def create_invitation(
+        db: AsyncSession,
+        company_id: int,
+        inviter_user_id: int,
+        email: str,
+        role: CompanyRole = CompanyRole.MEMBER,
+    ) -> CompanyInvitation:
+        """Create a company invitation for a user with proposed role."""
+        normalized_email = email.lower().strip()
+        if role not in [CompanyRole.ADMIN, CompanyRole.MEMBER]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only Admin or Member roles can be assigned in invitations.",
+            )
+
+        # Check if user with this email is already a member
+        user = await AuthService.get_user_by_email(db, normalized_email)
+        if user:
+            existing_membership = await CompanyService.get_user_membership(db, company_id, user.id)
+            if existing_membership:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="User is already a member of this company",
+                )
+
+        # Check if there is an active pending invitation
+        existing_inv = (
+            await db.execute(
+                select(CompanyInvitation).where(
+                    CompanyInvitation.company_id == company_id,
+                    func.lower(CompanyInvitation.invited_email) == normalized_email,
+                    CompanyInvitation.status == InvitationStatus.PENDING.value,
+                )
+            )
+        ).scalars().first()
+        if existing_inv:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A pending invitation already exists for this email address",
+            )
+
+        invitation = CompanyInvitation(
+            company_id=company_id,
+            invited_email=normalized_email,
+            invited_user_id=user.id if user else None,
+            inviter_user_id=inviter_user_id,
+            role=role.value,
+            status=InvitationStatus.PENDING.value,
+        )
+        db.add(invitation)
+        await db.commit()
+        return await CompanyService.get_invitation_by_id(db, invitation.id)
+
+    @staticmethod
+    async def get_invitation_by_id(
+        db: AsyncSession,
+        invitation_id: int,
+    ) -> Optional[CompanyInvitation]:
+        """Fetch an invitation by ID with relationships preloaded."""
+        query = (
+            select(CompanyInvitation)
+            .options(
+                selectinload(CompanyInvitation.inviter),
+                selectinload(CompanyInvitation.invited_user),
+                selectinload(CompanyInvitation.company),
+            )
+            .where(CompanyInvitation.id == invitation_id)
+        )
+        result = await db.execute(query)
+        return result.scalars().first()
+
+    @staticmethod
+    async def get_company_invitations(
+        db: AsyncSession,
+        company_id: int,
+        status_filter: Optional[InvitationStatus] = None,
+    ) -> List[CompanyInvitation]:
+        """Fetch all invitations created for a company."""
+        query = (
+            select(CompanyInvitation)
+            .options(
+                selectinload(CompanyInvitation.inviter),
+                selectinload(CompanyInvitation.invited_user),
+                selectinload(CompanyInvitation.company),
+            )
+            .where(CompanyInvitation.company_id == company_id)
+            .order_by(CompanyInvitation.created_at.desc())
+        )
+        if status_filter:
+            query = query.where(CompanyInvitation.status == status_filter.value)
+        result = await db.execute(query)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def get_user_pending_invitations(
+        db: AsyncSession,
+        user_email: str,
+    ) -> List[CompanyInvitation]:
+        """Fetch all pending invitations for a specific user email."""
+        normalized_email = user_email.lower().strip()
+        query = (
+            select(CompanyInvitation)
+            .options(
+                selectinload(CompanyInvitation.inviter),
+                selectinload(CompanyInvitation.company),
+            )
+            .where(
+                func.lower(CompanyInvitation.invited_email) == normalized_email,
+                CompanyInvitation.status == InvitationStatus.PENDING.value,
+            )
+            .order_by(CompanyInvitation.created_at.desc())
+        )
+        result = await db.execute(query)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def accept_invitation(
+        db: AsyncSession,
+        invitation_id: int,
+        user_id: int,
+        user_email: str,
+    ) -> Tuple[Company, CompanyUser]:
+        """Accept an invitation to join a company workspace."""
+        invitation = await CompanyService.get_invitation_by_id(db, invitation_id)
+        if not invitation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invitation not found",
+            )
+
+        if invitation.invited_email.lower().strip() != user_email.lower().strip():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not authorized to accept this invitation",
+            )
+
+        if invitation.status != InvitationStatus.PENDING.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invitation cannot be accepted because it has already been {invitation.status.lower()}",
+            )
+
+        # Check if already a member
+        membership = await CompanyService.get_user_membership(db, invitation.company_id, user_id)
+        if not membership:
+            membership = CompanyUser(
+                company_id=invitation.company_id,
+                user_id=user_id,
+                role=invitation.role,
+            )
+            db.add(membership)
+        else:
+            membership.role = invitation.role
+
+        invitation.status = InvitationStatus.ACCEPTED.value
+        invitation.accepted_at = func.now()
+        invitation.invited_user_id = user_id
+
+        await db.commit()
+        await db.refresh(membership)
+        company = await CompanyService.get_company(db, invitation.company_id)
+        return company, membership
+
+    @staticmethod
+    async def decline_invitation(
+        db: AsyncSession,
+        invitation_id: int,
+        user_id: int,
+        user_email: str,
+    ) -> CompanyInvitation:
+        """Decline a company invitation."""
+        invitation = await CompanyService.get_invitation_by_id(db, invitation_id)
+        if not invitation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invitation not found",
+            )
+
+        if invitation.invited_email.lower().strip() != user_email.lower().strip():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not authorized to decline this invitation",
+            )
+
+        if invitation.status != InvitationStatus.PENDING.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invitation cannot be declined because it has already been {invitation.status.lower()}",
+            )
+
+        invitation.status = InvitationStatus.DECLINED.value
+        invitation.declined_at = func.now()
+        invitation.invited_user_id = user_id
+
+        await db.commit()
+        await db.refresh(invitation)
+        return invitation
+
 

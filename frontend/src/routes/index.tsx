@@ -5,6 +5,7 @@ import { ProtectedRoute } from "./ProtectedRoute";
 
 import { LoginPage } from "../pages/LoginPage";
 import { RegisterPage } from "../pages/RegisterPage";
+import { OnboardingPage } from "../pages/OnboardingPage";
 import { DashboardPage } from "../pages/DashboardPage";
 import { MailboxPage } from "../pages/MailboxPage";
 import { EmailDetailPage } from "../pages/EmailDetailPage";
@@ -24,6 +25,11 @@ export function AppRoutes() {
       <Route element={<AuthLayout />}>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
+      </Route>
+
+      {/* Authenticated Workspace Onboarding Route */}
+      <Route element={<ProtectedRoute />}>
+        <Route path="/onboarding" element={<OnboardingPage />} />
       </Route>
 
       {/* Authenticated Application Routes */}

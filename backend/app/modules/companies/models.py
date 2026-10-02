@@ -1,6 +1,6 @@
 from datetime import datetime
 import enum
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
@@ -16,6 +16,13 @@ class CompanyRole(str, enum.Enum):
     OWNER = "OWNER"
     ADMIN = "ADMIN"
     MEMBER = "MEMBER"
+
+
+class InvitationStatus(str, enum.Enum):
+    """Lifecycle statuses for company invitations."""
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    DECLINED = "DECLINED"
 
 
 class Company(Base):
@@ -62,6 +69,12 @@ class Company(Base):
         back_populates="company",
         cascade="all, delete-orphan",
     )
+    invitations: Mapped[List["CompanyInvitation"]] = relationship(
+        "CompanyInvitation",
+        back_populates="company",
+        cascade="all, delete-orphan",
+    )
+
 
     def __repr__(self) -> str:
         return f"<Company id={self.id} name='{self.name}' active={self.is_active}>"
@@ -116,3 +129,76 @@ class CompanyUser(Base):
 
     def __repr__(self) -> str:
         return f"<CompanyUser company_id={self.company_id} user_id={self.user_id} role='{self.role}'>"
+
+
+class CompanyInvitation(Base):
+    """Invitation to join a company workspace with an assigned role.
+    
+    Created by an authorized company owner/admin.
+    Accepted or declined by the invited user.
+    """
+    __tablename__ = "company_invitations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    company_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("companies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    invited_email: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+    invited_user_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    inviter_user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(
+        String(50),
+        default=CompanyRole.MEMBER.value,
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(50),
+        default=InvitationStatus.PENDING.value,
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    accepted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    declined_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Relationships
+    company: Mapped["Company"] = relationship("Company", back_populates="invitations")
+    inviter: Mapped["User"] = relationship("User", foreign_keys=[inviter_user_id])
+    invited_user: Mapped[Optional["User"]] = relationship("User", foreign_keys=[invited_user_id])
+
+    def __repr__(self) -> str:
+        return f"<CompanyInvitation id={self.id} company_id={self.company_id} email='{self.invited_email}' role='{self.role}' status='{self.status}'>"
+

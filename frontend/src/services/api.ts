@@ -3,11 +3,13 @@ import type {
   CompanyMemberAddPayload,
   CompanyMemberRoleUpdatePayload,
   CompanyWithRole,
+  CompanyInvitationItem,
   EmailAccountAccessItem,
   LoginCredentials,
   RegisterCredentials,
   Token,
   User,
+  UserInvitationItem,
 } from "../types/auth";
 import type {
   AccountHealthResponse,
@@ -568,6 +570,10 @@ export const companiesApi = {
     return apiClient.get<CompanyWithRole[]>("/api/v1/companies/");
   },
 
+  createCompany: async (name: string): Promise<CompanyWithRole> => {
+    return apiClient.post<CompanyWithRole>("/api/v1/companies/", { name });
+  },
+
   getMembers: async (companyId: number): Promise<CompanyMember[]> => {
     return apiClient.get<CompanyMember[]>(`/api/v1/companies/${companyId}/members`);
   },
@@ -590,6 +596,35 @@ export const companiesApi = {
 
   getCompanyEmailAccountsAccess: async (companyId: number): Promise<EmailAccountAccessItem[]> => {
     return apiClient.get<EmailAccountAccessItem[]>(`/api/v1/companies/${companyId}/email-accounts-access`);
+  },
+};
+
+export const invitationsApi = {
+  getMyPendingInvitations: async (): Promise<UserInvitationItem[]> => {
+    return apiClient.get<UserInvitationItem[]>("/api/v1/invitations/my-pending");
+  },
+
+  acceptInvitation: async (invitationId: number): Promise<CompanyWithRole> => {
+    return apiClient.post<CompanyWithRole>(`/api/v1/invitations/${invitationId}/accept`);
+  },
+
+  declineInvitation: async (invitationId: number): Promise<UserInvitationItem> => {
+    return apiClient.post<UserInvitationItem>(`/api/v1/invitations/${invitationId}/decline`);
+  },
+
+  createInvitation: async (
+    companyId: number,
+    data: { email: string; role: "ADMIN" | "MEMBER" }
+  ): Promise<CompanyInvitationItem> => {
+    return apiClient.post<CompanyInvitationItem>(`/api/v1/companies/${companyId}/invitations`, data);
+  },
+
+  getCompanyInvitations: async (
+    companyId: number,
+    statusFilter?: "PENDING" | "ACCEPTED" | "DECLINED"
+  ): Promise<CompanyInvitationItem[]> => {
+    const qs = statusFilter ? `?status_filter=${statusFilter}` : "";
+    return apiClient.get<CompanyInvitationItem[]>(`/api/v1/companies/${companyId}/invitations${qs}`);
   },
 };
 

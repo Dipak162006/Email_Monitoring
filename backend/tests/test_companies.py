@@ -224,25 +224,53 @@ async def test_update_member_role_and_owner_protection(async_client: AsyncClient
     assert update_resp.status_code == 200
     assert update_resp.json()["role"] == "ADMIN"
 
-    # 2. Promoted Admin demotes themselves or another back to MEMBER
-    demote_resp = await async_client.put(
+    # 2. Promoted Admin cannot change their own role (400 Bad Request)
+    demote_self_resp = await async_client.put(
         f"/api/v1/companies/{company_id}/members/{member_user_id}/role",
         headers={"Authorization": f"Bearer {token_member}"},
         json={"role": "MEMBER"},
     )
-    assert demote_resp.status_code == 200
-    assert demote_resp.json()["role"] == "MEMBER"
+    assert demote_self_resp.status_code == 400
+    assert "cannot change your own role" in demote_self_resp.json()["detail"].lower()
 
-    # 3. Regular MEMBER cannot update roles (403 Forbidden)
-    forbidden_resp = await async_client.put(
-        f"/api/v1/companies/{company_id}/members/{member_user_id}/role",
+    # Add a second member for Admin to manage
+    token_second = await register_and_login(async_client, "second_member@company.com", "Second Member")
+    add_second_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/members",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "second_member@company.com", "role": "MEMBER"},
+    )
+    second_user_id = add_second_resp.json()["user_id"]
+
+    # Admin CAN change another permitted member's role
+    admin_change_resp = await async_client.put(
+        f"/api/v1/companies/{company_id}/members/{second_user_id}/role",
         headers={"Authorization": f"Bearer {token_member}"},
         json={"role": "ADMIN"},
     )
-    assert forbidden_resp.status_code == 403
+    assert admin_change_resp.status_code == 200
+    assert admin_change_resp.json()["role"] == "ADMIN"
 
-    # 4. Attempt to modify OWNER's role -> 403 Forbidden
-    # Fetch owner user ID
+    # 3. Regular MEMBER cannot update roles (403 Forbidden)
+    forbidden_resp = await async_client.put(
+        f"/api/v1/companies/{company_id}/members/{second_user_id}/role",
+        headers={"Authorization": f"Bearer {token_second}"}, # token_second was promoted, let's demote back or use third
+        json={"role": "MEMBER"},
+    )
+    # token_second was promoted to admin by admin_change_resp, so demote by owner
+    await async_client.put(
+        f"/api/v1/companies/{company_id}/members/{second_user_id}/role",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"role": "MEMBER"},
+    )
+    forbidden_resp2 = await async_client.put(
+        f"/api/v1/companies/{company_id}/members/{member_user_id}/role",
+        headers={"Authorization": f"Bearer {token_second}"},
+        json={"role": "ADMIN"},
+    )
+    assert forbidden_resp2.status_code == 403
+
+    # 4. Attempt to modify OWNER's role -> 400/403 Forbidden
     members_resp = await async_client.get(
         f"/api/v1/companies/{company_id}/members",
         headers={"Authorization": f"Bearer {token_owner}"},
@@ -255,8 +283,16 @@ async def test_update_member_role_and_owner_protection(async_client: AsyncClient
         headers={"Authorization": f"Bearer {token_owner}"},
         json={"role": "ADMIN"},
     )
-    assert owner_protect_resp.status_code == 403
-    assert "Cannot modify the role of the workspace Owner" in owner_protect_resp.json()["detail"]
+    assert owner_protect_resp.status_code == 400
+    assert "cannot change your own role" in owner_protect_resp.json()["detail"].lower()
+
+    admin_modify_owner_resp = await async_client.put(
+        f"/api/v1/companies/{company_id}/members/{owner_user_id}/role",
+        headers={"Authorization": f"Bearer {token_member}"},
+        json={"role": "MEMBER"},
+    )
+    assert admin_modify_owner_resp.status_code == 403
+    assert "Cannot modify the role of the workspace Owner" in admin_modify_owner_resp.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -366,4 +402,223 @@ async def test_remove_member_and_cleanup_email_access(async_client: AsyncClient,
         headers={"Authorization": f"Bearer {token_owner}"},
     )
     assert rm_owner_resp.status_code in [400, 403]
+
+
+@pytest.mark.asyncio
+async def test_invitation_lifecycle_and_authorization(async_client: AsyncClient, db_session: AsyncSession):
+    """Test full invitation lifecycle, authorization rules, acceptance, and decline."""
+    # 1. Setup Owner and Company
+    token_owner = await register_and_login(async_client, "workspace_owner@test.com", "Workspace Owner")
+    resp_co = await async_client.post(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "Pulse Solutions"},
+    )
+    assert resp_co.status_code == 201
+    company_id = resp_co.json()["id"]
+
+    # 2. Setup prospective invitees
+    token_invitee1 = await register_and_login(async_client, "invitee1@test.com", "Invitee One")
+    token_invitee2 = await register_and_login(async_client, "invitee2@test.com", "Invitee Two")
+    token_outsider = await register_and_login(async_client, "outsider@test.com", "Outsider")
+
+    # 3. Owner creates invitation for invitee1 (MEMBER) and invitee2 (ADMIN)
+    inv1_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/invitations",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "invitee1@test.com", "role": "MEMBER"},
+    )
+    assert inv1_resp.status_code == 201
+    inv1_data = inv1_resp.json()
+    assert inv1_data["invited_email"] == "invitee1@test.com"
+    assert inv1_data["role"] == "MEMBER"
+    assert inv1_data["status"] == "PENDING"
+    inv1_id = inv1_data["id"]
+
+    inv2_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/invitations",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "invitee2@test.com", "role": "ADMIN"},
+    )
+    assert inv2_resp.status_code == 201
+    inv2_id = inv2_resp.json()["id"]
+
+    # 4. Validation: Cannot invite as OWNER
+    bad_role_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/invitations",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "bad_role@test.com", "role": "OWNER"},
+    )
+    assert bad_role_resp.status_code == 400
+
+    # 5. Validation: Cannot invite existing company member
+    dup_member_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/invitations",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "workspace_owner@test.com", "role": "ADMIN"},
+    )
+    assert dup_member_resp.status_code == 409
+
+    # 6. Validation: Cannot create duplicate pending invitation
+    dup_pending_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/invitations",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "invitee1@test.com", "role": "ADMIN"},
+    )
+    assert dup_pending_resp.status_code == 409
+
+    # 7. Authorization: Outsider cannot invite users to this company
+    outsider_invite = await async_client.post(
+        f"/api/v1/companies/{company_id}/invitations",
+        headers={"Authorization": f"Bearer {token_outsider}"},
+        json={"email": "random@test.com", "role": "MEMBER"},
+    )
+    assert outsider_invite.status_code == 403
+
+    # 8. Check my-pending invitations
+    # Invitee 1 sees inv1
+    my_invs_1 = await async_client.get(
+        "/api/v1/invitations/my-pending",
+        headers={"Authorization": f"Bearer {token_invitee1}"},
+    )
+    assert my_invs_1.status_code == 200
+    invs_list_1 = my_invs_1.json()
+    assert len(invs_list_1) == 1
+    assert invs_list_1[0]["id"] == inv1_id
+    assert invs_list_1[0]["company_name"] == "Pulse Solutions"
+    assert invs_list_1[0]["role"] == "MEMBER"
+
+    # Invitee 2 sees inv2, does not see inv1
+    my_invs_2 = await async_client.get(
+        "/api/v1/invitations/my-pending",
+        headers={"Authorization": f"Bearer {token_invitee2}"},
+    )
+    assert my_invs_2.status_code == 200
+    invs_list_2 = my_invs_2.json()
+    assert len(invs_list_2) == 1
+    assert invs_list_2[0]["id"] == inv2_id
+    assert invs_list_2[0]["role"] == "ADMIN"
+
+    # Outsider sees 0 invitations
+    my_invs_out = await async_client.get(
+        "/api/v1/invitations/my-pending",
+        headers={"Authorization": f"Bearer {token_outsider}"},
+    )
+    assert my_invs_out.status_code == 200
+    assert len(my_invs_out.json()) == 0
+
+    # 9. Authorization: Outsider cannot accept or decline Invitee 1's invitation
+    bad_accept = await async_client.post(
+        f"/api/v1/invitations/{inv1_id}/accept",
+        headers={"Authorization": f"Bearer {token_outsider}"},
+    )
+    assert bad_accept.status_code == 403
+
+    bad_decline = await async_client.post(
+        f"/api/v1/invitations/{inv1_id}/decline",
+        headers={"Authorization": f"Bearer {token_outsider}"},
+    )
+    assert bad_decline.status_code == 403
+
+    # 10. Invitee 1 declines their invitation
+    dec_resp = await async_client.post(
+        f"/api/v1/invitations/{inv1_id}/decline",
+        headers={"Authorization": f"Bearer {token_invitee1}"},
+    )
+    assert dec_resp.status_code == 200
+    assert dec_resp.json()["status"] == "DECLINED"
+
+    # Invitee 1 now has 0 pending invitations
+    pending_after_dec = await async_client.get(
+        "/api/v1/invitations/my-pending",
+        headers={"Authorization": f"Bearer {token_invitee1}"},
+    )
+    assert len(pending_after_dec.json()) == 0
+
+    # Cannot decline or accept already processed invitation
+    cannot_dec_again = await async_client.post(
+        f"/api/v1/invitations/{inv1_id}/decline",
+        headers={"Authorization": f"Bearer {token_invitee1}"},
+    )
+    assert cannot_dec_again.status_code == 400
+
+    cannot_accept_dec = await async_client.post(
+        f"/api/v1/invitations/{inv1_id}/accept",
+        headers={"Authorization": f"Bearer {token_invitee1}"},
+    )
+    assert cannot_accept_dec.status_code == 400
+
+    # Invitee 1 still has no company
+    cos_1 = await async_client.get(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_invitee1}"},
+    )
+    assert len(cos_1.json()) == 0
+
+    # 11. Invitee 2 accepts their invitation
+    accept_resp = await async_client.post(
+        f"/api/v1/invitations/{inv2_id}/accept",
+        headers={"Authorization": f"Bearer {token_invitee2}"},
+    )
+    assert accept_resp.status_code == 200
+    accept_data = accept_resp.json()
+    assert accept_data["id"] == company_id
+    assert accept_data["name"] == "Pulse Solutions"
+    assert accept_data["role"] == "ADMIN"
+
+    # Invitee 2 now belongs to company with role ADMIN
+    cos_2 = await async_client.get(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_invitee2}"},
+    )
+    assert len(cos_2.json()) == 1
+    assert cos_2.json()[0]["id"] == company_id
+    assert cos_2.json()[0]["role"] == "ADMIN"
+
+    # Invitee 2 now has 0 pending invitations
+    pending_after_acc = await async_client.get(
+        "/api/v1/invitations/my-pending",
+        headers={"Authorization": f"Bearer {token_invitee2}"},
+    )
+    assert len(pending_after_acc.json()) == 0
+
+    # Cannot accept already accepted invitation
+    cannot_acc_again = await async_client.post(
+        f"/api/v1/invitations/{inv2_id}/accept",
+        headers={"Authorization": f"Bearer {token_invitee2}"},
+    )
+    assert cannot_acc_again.status_code == 400
+
+    # 12. Invitee 2 is now ADMIN and can invite another user
+    token_invitee3 = await register_and_login(async_client, "invitee3@test.com", "Invitee Three")
+    admin_inv_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/invitations",
+        headers={"Authorization": f"Bearer {token_invitee2}"},
+        json={"email": "invitee3@test.com", "role": "MEMBER"},
+    )
+    assert admin_inv_resp.status_code == 201
+    inv3_id = admin_inv_resp.json()["id"]
+
+    # Invitee 3 accepts and becomes MEMBER
+    await async_client.post(
+        f"/api/v1/invitations/{inv3_id}/accept",
+        headers={"Authorization": f"Bearer {token_invitee3}"},
+    )
+
+    # Invitee 3 as MEMBER cannot create invitations
+    member_inv_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/invitations",
+        headers={"Authorization": f"Bearer {token_invitee3}"},
+        json={"email": "someone@test.com", "role": "MEMBER"},
+    )
+    assert member_inv_resp.status_code == 403
+
+    # Company invitations list by Admin
+    co_invs_resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/invitations",
+        headers={"Authorization": f"Bearer {token_owner}"},
+    )
+    assert co_invs_resp.status_code == 200
+    assert len(co_invs_resp.json()) >= 3
+
 

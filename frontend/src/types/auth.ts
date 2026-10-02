@@ -30,11 +30,13 @@ export interface AuthState {
   isLoading: boolean;
 }
 
+export type CompanyRole = "OWNER" | "ADMIN" | "MEMBER";
+
 export interface CompanyWithRole {
   id: number;
   name: string;
   is_active: boolean;
-  role: "OWNER" | "ADMIN" | "MEMBER";
+  role: CompanyRole;
   created_at: string;
 }
 
@@ -65,4 +67,31 @@ export interface EmailAccountAccessItem {
   user_email: string;
   user_full_name: string | null;
   created_at: string;
+}
+
+export interface UserInvitationItem {
+  id: number;
+  company_id: number;
+  company_name: string;
+  role: "ADMIN" | "MEMBER";
+  inviter_email: string;
+  inviter_name: string | null;
+  status: "PENDING" | "ACCEPTED" | "DECLINED";
+  created_at: string;
+}
+
+export interface CompanyInvitationItem {
+  id: number;
+  company_id: number;
+  company_name?: string | null;
+  invited_email: string;
+  invited_user_id?: number | null;
+  inviter_user_id: number;
+  inviter_email?: string | null;
+  inviter_name?: string | null;
+  role: "ADMIN" | "MEMBER";
+  status: "PENDING" | "ACCEPTED" | "DECLINED";
+  created_at: string;
+  accepted_at?: string | null;
+  declined_at?: string | null;
 }

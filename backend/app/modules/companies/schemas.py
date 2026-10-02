@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from app.modules.companies.models import CompanyRole
+from app.modules.companies.models import CompanyRole, InvitationStatus
 
 
 class CompanyCreate(BaseModel):
@@ -47,4 +47,44 @@ class CompanyMemberAdd(BaseModel):
 class CompanyMemberRoleUpdate(BaseModel):
     """Request schema for updating a company member's role."""
     role: CompanyRole
+
+
+class CompanyInvitationCreate(BaseModel):
+    """Request schema for creating a new workspace invitation."""
+    email: EmailStr
+    role: CompanyRole = CompanyRole.MEMBER
+
+
+class CompanyInvitationRead(BaseModel):
+    """Response schema for a company invitation."""
+    id: int
+    company_id: int
+    company_name: Optional[str] = None
+    invited_email: EmailStr
+    invited_user_id: Optional[int] = None
+    inviter_user_id: int
+    inviter_email: Optional[str] = None
+    inviter_name: Optional[str] = None
+    role: CompanyRole
+    status: InvitationStatus
+    created_at: datetime
+    accepted_at: Optional[datetime] = None
+    declined_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserInvitationRead(BaseModel):
+    """Response schema for an invitation viewed by the invited user."""
+    id: int
+    company_id: int
+    company_name: str
+    role: CompanyRole
+    inviter_email: str
+    inviter_name: Optional[str] = None
+    status: InvitationStatus
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
 

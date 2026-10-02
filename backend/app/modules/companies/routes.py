@@ -1,5 +1,5 @@
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.modules.auth.dependencies import get_current_user
@@ -9,17 +9,21 @@ from app.modules.companies.dependencies import (
     get_company_membership,
     require_company_admin_or_owner,
 )
-from app.modules.companies.models import CompanyRole, CompanyUser
+from app.modules.companies.models import CompanyRole, CompanyUser, InvitationStatus
 from app.modules.companies.schemas import (
     CompanyCreate,
+    CompanyInvitationCreate,
+    CompanyInvitationRead,
     CompanyMemberAdd,
     CompanyMemberRead,
     CompanyMemberRoleUpdate,
     CompanyWithRoleRead,
+    UserInvitationRead,
 )
 from app.modules.companies.service import CompanyService
 
 router = APIRouter(prefix="/companies", tags=["Companies"])
+invitations_router = APIRouter(prefix="/invitations", tags=["Invitations"])
 
 
 @router.post(
@@ -216,4 +220,174 @@ async def remove_company_member(
         target_user_id=user_id,
     )
     return None
+
+
+# ---------------------------------------------------------
+# Company-scoped invitation management (Owner/Admin)
+# ---------------------------------------------------------
+
+@router.post(
+    "/{company_id}/invitations",
+    response_model=CompanyInvitationRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create/send an invitation to join the company (Owner/Admin only)",
+)
+async def create_company_invitation(
+    company_id: int,
+    invitation_in: CompanyInvitationCreate,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CompanyInvitationRead:
+    """Create a company invitation for the specified email and role."""
+    invitation = await CompanyService.create_invitation(
+        db=db,
+        company_id=company_id,
+        inviter_user_id=membership.user_id,
+        email=invitation_in.email,
+        role=invitation_in.role,
+    )
+    return CompanyInvitationRead(
+        id=invitation.id,
+        company_id=invitation.company_id,
+        company_name=invitation.company.name if invitation.company else None,
+        invited_email=invitation.invited_email,
+        invited_user_id=invitation.invited_user_id,
+        inviter_user_id=invitation.inviter_user_id,
+        inviter_email=invitation.inviter.email if invitation.inviter else None,
+        inviter_name=invitation.inviter.full_name if invitation.inviter else None,
+        role=CompanyRole(invitation.role),
+        status=InvitationStatus(invitation.status),
+        created_at=invitation.created_at,
+        accepted_at=invitation.accepted_at,
+        declined_at=invitation.declined_at,
+    )
+
+
+@router.get(
+    "/{company_id}/invitations",
+    response_model=List[CompanyInvitationRead],
+    status_code=status.HTTP_200_OK,
+    summary="List all invitations for the company (Owner/Admin only)",
+)
+async def list_company_invitations(
+    company_id: int,
+    status_filter: Optional[InvitationStatus] = Query(None, description="Filter by status (PENDING, ACCEPTED, DECLINED)"),
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> List[CompanyInvitationRead]:
+    """Retrieve all invitations issued for this company."""
+    invitations = await CompanyService.get_company_invitations(
+        db=db,
+        company_id=company_id,
+        status_filter=status_filter,
+    )
+    return [
+        CompanyInvitationRead(
+            id=inv.id,
+            company_id=inv.company_id,
+            company_name=inv.company.name if inv.company else None,
+            invited_email=inv.invited_email,
+            invited_user_id=inv.invited_user_id,
+            inviter_user_id=inv.inviter_user_id,
+            inviter_email=inv.inviter.email if inv.inviter else None,
+            inviter_name=inv.inviter.full_name if inv.inviter else None,
+            role=CompanyRole(inv.role),
+            status=InvitationStatus(inv.status),
+            created_at=inv.created_at,
+            accepted_at=inv.accepted_at,
+            declined_at=inv.declined_at,
+        )
+        for inv in invitations
+    ]
+
+
+# ---------------------------------------------------------
+# User-scoped pending invitation endpoints
+# ---------------------------------------------------------
+
+@invitations_router.get(
+    "/my-pending",
+    response_model=List[UserInvitationRead],
+    status_code=status.HTTP_200_OK,
+    summary="List pending workspace invitations for the current user",
+)
+async def list_my_pending_invitations(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> List[UserInvitationRead]:
+    """Retrieve all pending company invitations addressed to the authenticated user's email."""
+    invitations = await CompanyService.get_user_pending_invitations(
+        db=db,
+        user_email=current_user.email,
+    )
+    return [
+        UserInvitationRead(
+            id=inv.id,
+            company_id=inv.company_id,
+            company_name=inv.company.name if inv.company else "Unknown Company",
+            role=CompanyRole(inv.role),
+            inviter_email=inv.inviter.email if inv.inviter else "Unknown",
+            inviter_name=inv.inviter.full_name if inv.inviter else None,
+            status=InvitationStatus(inv.status),
+            created_at=inv.created_at,
+        )
+        for inv in invitations
+    ]
+
+
+@invitations_router.post(
+    "/{invitation_id}/accept",
+    response_model=CompanyWithRoleRead,
+    status_code=status.HTTP_200_OK,
+    summary="Accept a pending workspace invitation",
+)
+async def accept_invitation(
+    invitation_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CompanyWithRoleRead:
+    """Accept an invitation to join a company workspace."""
+    company, membership = await CompanyService.accept_invitation(
+        db=db,
+        invitation_id=invitation_id,
+        user_id=current_user.id,
+        user_email=current_user.email,
+    )
+    return CompanyWithRoleRead(
+        id=company.id,
+        name=company.name,
+        is_active=company.is_active,
+        created_at=company.created_at,
+        role=CompanyRole(membership.role),
+    )
+
+
+@invitations_router.post(
+    "/{invitation_id}/decline",
+    response_model=UserInvitationRead,
+    status_code=status.HTTP_200_OK,
+    summary="Decline a pending workspace invitation",
+)
+async def decline_invitation(
+    invitation_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserInvitationRead:
+    """Decline an invitation to join a company workspace."""
+    invitation = await CompanyService.decline_invitation(
+        db=db,
+        invitation_id=invitation_id,
+        user_id=current_user.id,
+        user_email=current_user.email,
+    )
+    return UserInvitationRead(
+        id=invitation.id,
+        company_id=invitation.company_id,
+        company_name=invitation.company.name if invitation.company else "Unknown Company",
+        role=CompanyRole(invitation.role),
+        inviter_email=invitation.inviter.email if invitation.inviter else "Unknown",
+        inviter_name=invitation.inviter.full_name if invitation.inviter else None,
+        status=InvitationStatus(invitation.status),
+        created_at=invitation.created_at,
+    )
 
