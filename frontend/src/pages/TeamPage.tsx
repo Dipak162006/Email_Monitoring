@@ -15,6 +15,7 @@ import {
 import { Button } from "../components/ui/Button";
 import { useAuth } from "../hooks/useAuth";
 import { useWorkspace } from "../hooks/useWorkspace";
+import { usePermissions } from "../hooks/usePermissions";
 import { companiesApi, emailAccountsApi } from "../services/api";
 import type { CompanyMember, CompanyMemberAddPayload } from "../types/auth";
 import type { EmailAccountItem } from "../types/emails";
@@ -53,13 +54,17 @@ export function TeamPage() {
   // In-flight mutation flags
   const [isSubmittingModal, setIsSubmittingModal] = useState(false);
 
-  // 1. Consume active workspace from centralized context
+  // 1. Consume active workspace and centralized permissions
   const {
     currentCompany: activeCompany,
     isLoading: isWorkspaceLoading,
-    currentRole,
   } = useWorkspace();
-  const isCompanyAdminOrOwner = currentRole === "ADMIN" || currentRole === "OWNER";
+  const {
+    canAddMember,
+    canChangeMemberRole,
+    canRemoveMember,
+    canGrantEmailAccess,
+  } = usePermissions();
 
   // 2. Fetch all members of the active company
   const {
@@ -177,6 +182,13 @@ export function TeamPage() {
   // Add Member
   const handleAddMember = async (payload: CompanyMemberAddPayload) => {
     if (!activeCompany) return;
+    if (!canAddMember) {
+      setAlertBanner({
+        type: "error",
+        message: "You do not have permission to add members to this workspace.",
+      });
+      return;
+    }
     setIsSubmittingModal(true);
     try {
       await companiesApi.addMember(activeCompany.id, payload);
@@ -194,10 +206,13 @@ export function TeamPage() {
   // Change Role
   const handleChangeRole = async (userId: number, newRole: "ADMIN" | "MEMBER") => {
     if (!activeCompany) return;
-    if (userId === user?.id) {
+    const targetMember = members.find((m) => m.user_id === userId);
+    if (!canChangeMemberRole(targetMember)) {
       setAlertBanner({
         type: "error",
-        message: "You cannot change your own role.",
+        message: userId === user?.id
+          ? "You cannot change your own role."
+          : "You do not have permission to change this member's role.",
       });
       setMemberForRoleChange(null);
       return;
@@ -224,10 +239,13 @@ export function TeamPage() {
   // Remove Member
   const handleRemoveMember = async (userId: number) => {
     if (!activeCompany) return;
-    if (userId === user?.id) {
+    const targetMember = members.find((m) => m.user_id === userId);
+    if (!canRemoveMember(targetMember)) {
       setAlertBanner({
         type: "error",
-        message: "You cannot remove yourself from the company.",
+        message: userId === user?.id
+          ? "You cannot remove yourself from the company."
+          : "You do not have permission to remove this member.",
       });
       setMemberForRemoval(null);
       return;
@@ -258,6 +276,13 @@ export function TeamPage() {
     accountIdsToRevoke: number[]
   ) => {
     if (!activeCompany) return;
+    if (!canGrantEmailAccess) {
+      setAlertBanner({
+        type: "error",
+        message: "You do not have permission to manage email account access.",
+      });
+      return;
+    }
     setIsSubmittingModal(true);
     try {
       const grantPromises = accountIdsToGrant.map((accId) =>
@@ -286,6 +311,13 @@ export function TeamPage() {
     userIdsToRevoke: number[]
   ) => {
     if (!activeCompany) return;
+    if (!canGrantEmailAccess) {
+      setAlertBanner({
+        type: "error",
+        message: "You do not have permission to manage shared inbox permissions.",
+      });
+      return;
+    }
     setIsSubmittingModal(true);
     try {
       const grantPromises = userIdsToGrant.map((uId) =>
@@ -369,7 +401,7 @@ export function TeamPage() {
           <p className="text-sm text-slate-500 mt-0.5">Manage workspace members and shared inbox access</p>
         </div>
         <div className="flex items-center gap-3">
-          {isCompanyAdminOrOwner && (
+          {canAddMember && (
             <Button
               type="button"
               onClick={() => setIsAddModalOpen(true)}
@@ -522,7 +554,6 @@ export function TeamPage() {
                     key={member.id}
                     member={member}
                     assignedAccounts={userAssignedAccountsMap[member.user_id] || []}
-                    isCurrentUserAdminOrOwner={isCompanyAdminOrOwner}
                     isSelf={member.user_id === user?.id}
                     onOpenManageAccess={(m) => setMemberForAccess(m)}
                     onOpenChangeRole={(m) => setMemberForRoleChange(m)}
@@ -550,7 +581,6 @@ export function TeamPage() {
                 key={member.id}
                 member={member}
                 assignedAccounts={userAssignedAccountsMap[member.user_id] || []}
-                isCurrentUserAdminOrOwner={isCompanyAdminOrOwner}
                 isSelf={member.user_id === user?.id}
                 onOpenManageAccess={(m) => setMemberForAccess(m)}
                 onOpenChangeRole={(m) => setMemberForRoleChange(m)}
@@ -605,7 +635,7 @@ export function TeamPage() {
                 key={account.id}
                 account={account}
                 assignedMembers={accountAssignedMembersMap[account.id] || []}
-                isCurrentUserAdminOrOwner={isCompanyAdminOrOwner}
+                isCurrentUserAdminOrOwner={canGrantEmailAccess}
                 onOpenManageAccess={(acc) => setAccountForAccess(acc)}
               />
             ))}

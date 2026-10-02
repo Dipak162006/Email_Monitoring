@@ -2,11 +2,12 @@ import React from "react";
 import { Shield, ShieldCheck, Lock, Star } from "lucide-react";
 import type { CompanyMember } from "../../types/auth";
 import type { EmailAccountItem } from "../../types/emails";
+import { usePermissions } from "../../hooks/usePermissions";
 
 interface MemberRowProps {
   member: CompanyMember;
   assignedAccounts: EmailAccountItem[];
-  isCurrentUserAdminOrOwner: boolean;
+  isCurrentUserAdminOrOwner?: boolean;
   isSelf?: boolean;
   onOpenManageAccess: (member: CompanyMember) => void;
   onOpenChangeRole: (member: CompanyMember) => void;
@@ -40,15 +41,20 @@ export function getInitials(name: string | null, email: string): string {
 export const MemberRow: React.FC<MemberRowProps> = ({
   member,
   assignedAccounts,
-  isCurrentUserAdminOrOwner,
-  isSelf = false,
   onOpenManageAccess,
   onOpenChangeRole,
   onOpenRemove,
 }) => {
+  const { canChangeMemberRole, canRemoveMember, canManageMemberAccess } = usePermissions();
+
   const isOwner = member.role === "OWNER";
   const isAdmin = member.role === "ADMIN";
   const isMember = member.role === "MEMBER";
+
+  const allowChangeRole = canChangeMemberRole(member);
+  const allowRemove = canRemoveMember(member);
+  const allowManageAccess = canManageMemberAccess(member);
+  const hasAnyAction = allowManageAccess || allowChangeRole || allowRemove;
 
   return (
     <tr className="hover:bg-slate-50/60 transition-colors">
@@ -132,9 +138,9 @@ export const MemberRow: React.FC<MemberRowProps> = ({
             <Lock className="h-3.5 w-3.5" />
             Primary Owner
           </span>
-        ) : isSelf ? null : isCurrentUserAdminOrOwner ? (
+        ) : hasAnyAction ? (
           <div className="inline-flex items-center justify-end gap-1.5">
-            {isMember && (
+            {allowManageAccess && (
               <button
                 type="button"
                 onClick={() => onOpenManageAccess(member)}
@@ -144,22 +150,26 @@ export const MemberRow: React.FC<MemberRowProps> = ({
                 Manage Access
               </button>
             )}
-            <button
-              type="button"
-              onClick={() => onOpenChangeRole(member)}
-              className="text-xs font-medium text-slate-600 hover:text-indigo-600 hover:bg-slate-100 px-2 py-1 rounded-md transition-colors cursor-pointer"
-              title="Change Role"
-            >
-              Change Role
-            </button>
-            <button
-              type="button"
-              onClick={() => onOpenRemove(member)}
-              className="text-xs font-medium text-rose-600 hover:text-rose-700 hover:bg-rose-50 px-2 py-1 rounded-md transition-colors cursor-pointer"
-              title="Remove Member"
-            >
-              Remove
-            </button>
+            {allowChangeRole && (
+              <button
+                type="button"
+                onClick={() => onOpenChangeRole(member)}
+                className="text-xs font-medium text-slate-600 hover:text-indigo-600 hover:bg-slate-100 px-2 py-1 rounded-md transition-colors cursor-pointer"
+                title="Change Role"
+              >
+                Change Role
+              </button>
+            )}
+            {allowRemove && (
+              <button
+                type="button"
+                onClick={() => onOpenRemove(member)}
+                className="text-xs font-medium text-rose-600 hover:text-rose-700 hover:bg-rose-50 px-2 py-1 rounded-md transition-colors cursor-pointer"
+                title="Remove Member"
+              >
+                Remove
+              </button>
+            )}
           </div>
         ) : (
           <span className="text-xs text-slate-400">—</span>

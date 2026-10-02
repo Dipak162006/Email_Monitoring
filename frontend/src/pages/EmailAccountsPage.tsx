@@ -19,6 +19,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { EmailAccountDrawer } from "../components/accounts/EmailAccountDrawer";
 import { DeleteAccountConfirmModal } from "../components/accounts/DeleteAccountConfirmModal";
 import { useWorkspace } from "../hooks/useWorkspace";
+import { usePermissions } from "../hooks/usePermissions";
 import { emailAccountsApi } from "../services/api";
 import type { EmailAccountItem } from "../types/emails";
 
@@ -39,16 +40,14 @@ export function EmailAccountsPage() {
     message: string;
   } | null>(null);
 
-  // 1. Consume active workspace from centralized context
+  // 1. Consume active workspace and centralized permissions
   const {
     currentCompany: activeCompany,
     isLoading: isWorkspaceLoading,
     isError: isWorkspaceError,
-    currentRole,
   } = useWorkspace();
 
-  const isCompanyAdmin =
-    currentRole === "ADMIN" || currentRole === "OWNER";
+  const { canManageEmailAccounts } = usePermissions();
 
   // 2. Fetch email accounts for current active company
   const {
@@ -73,6 +72,9 @@ export function EmailAccountsPage() {
       companyId: number;
       accountId: number;
     }) => {
+      if (!canManageEmailAccounts) {
+        throw new Error("You do not have permission to delete email accounts in this workspace.");
+      }
       return emailAccountsApi.deleteAccount(companyId, accountId);
     },
     onSuccess: () => {
@@ -152,11 +154,13 @@ export function EmailAccountsPage() {
   };
 
   const handleOpenCreate = () => {
+    if (!canManageEmailAccounts) return;
     setSelectedAccountForEdit(null);
     setIsDrawerOpen(true);
   };
 
   const handleOpenEdit = (account: EmailAccountItem) => {
+    if (!canManageEmailAccounts) return;
     setSelectedAccountForEdit(account);
     setIsDrawerOpen(true);
   };
@@ -223,7 +227,7 @@ export function EmailAccountsPage() {
           <Button
             size="sm"
             onClick={handleOpenCreate}
-            disabled={!activeCompany || !isCompanyAdmin}
+            disabled={!activeCompany || !canManageEmailAccounts}
             className="gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm shadow-indigo-200 cursor-pointer"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -433,7 +437,7 @@ export function EmailAccountsPage() {
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
-                      disabled={!isCompanyAdmin}
+                      disabled={!canManageEmailAccounts}
                       onClick={() => handleOpenEdit(account)}
                       className="p-1.5 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 transition-colors disabled:opacity-30 cursor-pointer"
                       title="Edit Configuration"
@@ -444,7 +448,7 @@ export function EmailAccountsPage() {
 
                     <button
                       type="button"
-                      disabled={!isCompanyAdmin}
+                      disabled={!canManageEmailAccounts}
                       onClick={() => setAccountToDelete(account)}
                       className="p-1.5 rounded-md text-rose-400 hover:text-rose-600 hover:bg-rose-50 transition-colors disabled:opacity-30 cursor-pointer"
                       title="Remove Account"

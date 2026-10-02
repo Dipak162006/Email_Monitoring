@@ -31,6 +31,7 @@ import { cn } from "../lib/utils";
 import { Button } from "../components/ui/Button";
 import { emailsApi } from "../services/api";
 import { useWorkspace } from "../hooks/useWorkspace";
+import { usePermissions } from "../hooks/usePermissions";
 import { WorkspaceSwitcher } from "../components/workspace/WorkspaceSwitcher";
 
 interface NavLinkItem {
@@ -44,6 +45,7 @@ interface NavLinkItem {
 export function AppLayout() {
   const { user, logout } = useAuth();
   const { currentCompany, currentCompanyId, currentRole } = useWorkspace();
+  const { canAccessEmailAccounts, canAccessTeam, canAccessDiagnostics } = usePermissions();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -204,13 +206,21 @@ export function AppLayout() {
     },
   ];
 
-  const configItems: NavLinkItem[] = [
-    { label: "Connected Accounts", href: "/email-accounts", icon: HardDrive },
-    { label: "Templates", href: "/templates", icon: LayoutGrid },
-    { label: "Signatures", href: "/signatures", icon: PenTool },
-    { label: "Team & Permissions", href: "/team", icon: Users },
-    { label: "System Diagnostics", href: "/diagnostics", icon: Activity },
-  ];
+  const configItems: NavLinkItem[] = React.useMemo(() => {
+    const items: NavLinkItem[] = [];
+    if (canAccessEmailAccounts) {
+      items.push({ label: "Connected Accounts", href: "/email-accounts", icon: HardDrive });
+    }
+    items.push({ label: "Templates", href: "/templates", icon: LayoutGrid });
+    items.push({ label: "Signatures", href: "/signatures", icon: PenTool });
+    if (canAccessTeam) {
+      items.push({ label: "Team & Permissions", href: "/team", icon: Users });
+    }
+    if (canAccessDiagnostics) {
+      items.push({ label: "System Diagnostics", href: "/diagnostics", icon: Activity });
+    }
+    return items;
+  }, [canAccessEmailAccounts, canAccessTeam, canAccessDiagnostics]);
 
   const renderNavGroup = (title: string, items: NavLinkItem[], showHeaderChevron = false) => (
     <div className="space-y-0.5">

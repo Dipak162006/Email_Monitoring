@@ -3,6 +3,7 @@ import { AppLayout } from "../layouts/AppLayout";
 import { AuthLayout } from "../layouts/AuthLayout";
 import { ProtectedRoute } from "./ProtectedRoute";
 import { WorkspaceRequiredRoute } from "./WorkspaceRequiredRoute";
+import { RoleRequiredRoute } from "./RoleRequiredRoute";
 
 import { LoginPage } from "../pages/LoginPage";
 import { RegisterPage } from "../pages/RegisterPage";
@@ -42,13 +43,19 @@ export function AppRoutes() {
             <Route path="/mailbox" element={<MailboxPage />} />
             <Route path="/emails/:emailId" element={<EmailDetailPage />} />
             <Route path="/compose" element={<ComposePage />} />
-            <Route path="/email-accounts" element={<EmailAccountsPage />} />
+
+            {/* Role-Protected Admin / Owner Routes */}
+            <Route element={<RoleRequiredRoute allowedRoles={["OWNER", "ADMIN"]} />}>
+              <Route path="/email-accounts" element={<EmailAccountsPage />} />
+              <Route path="/team" element={<TeamPage />} />
+              <Route path="/diagnostics" element={<DiagnosticsPage />} />
+            </Route>
+
+            {/* Routes Accessible to All Active Workspace Members */}
             <Route path="/templates" element={<TemplatesPage />} />
             <Route path="/templates/new" element={<TemplateEditorPage />} />
             <Route path="/templates/:templateId/edit" element={<TemplateEditorPage />} />
             <Route path="/signatures" element={<SignaturesPage />} />
-            <Route path="/team" element={<TeamPage />} />
-            <Route path="/diagnostics" element={<DiagnosticsPage />} />
           </Route>
         </Route>
       </Route>

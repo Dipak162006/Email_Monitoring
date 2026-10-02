@@ -3,11 +3,12 @@ import { Shield, ShieldCheck, Lock, Star } from "lucide-react";
 import type { CompanyMember } from "../../types/auth";
 import type { EmailAccountItem } from "../../types/emails";
 import { formatMemberDate, getInitials } from "./MemberRow";
+import { usePermissions } from "../../hooks/usePermissions";
 
 interface MobileMemberCardProps {
   member: CompanyMember;
   assignedAccounts: EmailAccountItem[];
-  isCurrentUserAdminOrOwner: boolean;
+  isCurrentUserAdminOrOwner?: boolean;
   isSelf?: boolean;
   onOpenManageAccess: (member: CompanyMember) => void;
   onOpenChangeRole: (member: CompanyMember) => void;
@@ -17,15 +18,20 @@ interface MobileMemberCardProps {
 export const MobileMemberCard: React.FC<MobileMemberCardProps> = ({
   member,
   assignedAccounts,
-  isCurrentUserAdminOrOwner,
-  isSelf = false,
   onOpenManageAccess,
   onOpenChangeRole,
   onOpenRemove,
 }) => {
+  const { canChangeMemberRole, canRemoveMember, canManageMemberAccess } = usePermissions();
+
   const isOwner = member.role === "OWNER";
   const isAdmin = member.role === "ADMIN";
   const isMember = member.role === "MEMBER";
+
+  const allowChangeRole = canChangeMemberRole(member);
+  const allowRemove = canRemoveMember(member);
+  const allowManageAccess = canManageMemberAccess(member);
+  const hasAnyAction = allowManageAccess || allowChangeRole || allowRemove;
 
   return (
     <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-3 shadow-2xs">
@@ -108,7 +114,7 @@ export const MobileMemberCard: React.FC<MobileMemberCardProps> = ({
       </div>
 
       {/* Actions */}
-      {(isOwner || (!isSelf && isCurrentUserAdminOrOwner)) && (
+      {(isOwner || hasAnyAction) && (
         <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-100">
           {isOwner ? (
             <span className="inline-flex items-center gap-1 bg-slate-100 text-slate-500 px-2.5 py-1 rounded-md text-xs font-medium cursor-not-allowed select-none border border-slate-200">
@@ -117,7 +123,7 @@ export const MobileMemberCard: React.FC<MobileMemberCardProps> = ({
             </span>
           ) : (
             <>
-              {isMember && (
+              {allowManageAccess && (
                 <button
                   type="button"
                   onClick={() => onOpenManageAccess(member)}
@@ -126,20 +132,24 @@ export const MobileMemberCard: React.FC<MobileMemberCardProps> = ({
                   Manage Access
                 </button>
               )}
-              <button
-                type="button"
-                onClick={() => onOpenChangeRole(member)}
-                className="text-xs font-medium text-slate-700 hover:text-indigo-600 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
-              >
-                Role
-              </button>
-              <button
-                type="button"
-                onClick={() => onOpenRemove(member)}
-                className="text-xs font-medium text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
-              >
-                Remove
-              </button>
+              {allowChangeRole && (
+                <button
+                  type="button"
+                  onClick={() => onOpenChangeRole(member)}
+                  className="text-xs font-medium text-slate-700 hover:text-indigo-600 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
+                >
+                  Role
+                </button>
+              )}
+              {allowRemove && (
+                <button
+                  type="button"
+                  onClick={() => onOpenRemove(member)}
+                  className="text-xs font-medium text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
+                >
+                  Remove
+                </button>
+              )}
             </>
           )}
         </div>

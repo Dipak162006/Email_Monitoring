@@ -50,7 +50,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // Query authenticated user's company memberships
   const {
     data: companies = [],
-    isLoading: isCompaniesLoading,
+    isSuccess: isCompaniesSuccess,
     isError,
     error,
     refetch,
@@ -119,7 +119,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       } catch {
         // Ignore storage errors
       }
-    } else if (companies.length === 0 && !isCompaniesLoading) {
+    } else if (isAuthenticated && !isAuthLoading && isCompaniesSuccess && companies.length === 0) {
+      // Only clear active workspace selection if the query has definitively resolved zero company memberships
       if (selectedCompanyId !== null) {
         setSelectedCompanyId(null);
       }
@@ -129,7 +130,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         // Ignore storage errors
       }
     }
-  }, [currentCompany, companies.length, isCompaniesLoading, selectedCompanyId]);
+  }, [
+    currentCompany,
+    companies.length,
+    isAuthenticated,
+    isAuthLoading,
+    isCompaniesSuccess,
+    selectedCompanyId,
+  ]);
 
   // Method to safely switch active company (only allows setting authorized companies)
   const setActiveCompanyId = useCallback(
@@ -158,8 +166,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [queryClient, refetch]);
 
   // Unified loading state:
-  // Still loading if auth check is in flight, or if user is authenticated and membership query is loading
-  const isLoading = isAuthLoading || (isAuthenticated && isCompaniesLoading);
+  // Still loading if auth check is in flight, or if user is authenticated and membership query has not yet resolved
+  const isLoading = isAuthLoading || (isAuthenticated && !isCompaniesSuccess && !isError);
 
   const value = useMemo<WorkspaceContextType>(
     () => ({
