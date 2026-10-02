@@ -12,6 +12,7 @@ from app.modules.companies.models import (
     InvitationStatus,
 )
 
+
 class CompanyService:
     """Service handling company tenant operations and membership data access."""
 
@@ -120,8 +121,15 @@ class CompanyService:
         operator_role: str,
         target_user_id: int,
         new_role: CompanyRole,
+        operator_user_id: Optional[int] = None,
     ) -> CompanyUser:
-        """Update a member's role within a company, enforcing ownership protection."""
+        """Update a member's role within a company, enforcing ownership and self-modification protection."""
+        if operator_user_id is not None and operator_user_id == target_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="You cannot change your own role.",
+            )
+
         query = (
             select(CompanyUser)
             .options(selectinload(CompanyUser.user))
@@ -162,12 +170,19 @@ class CompanyService:
         company_id: int,
         operator_role: str,
         target_user_id: int,
+        operator_user_id: Optional[int] = None,
     ) -> bool:
         """Remove a member from a company and revoke company-specific email account access.
         
         The User account itself is NOT deleted, preserving user identity across other companies.
-        The workspace OWNER cannot be removed.
+        The workspace OWNER cannot be removed, and users cannot remove themselves.
         """
+        if operator_user_id is not None and operator_user_id == target_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="You cannot remove yourself from the company.",
+            )
+
         query = (
             select(CompanyUser)
             .where(

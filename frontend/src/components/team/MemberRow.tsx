@@ -7,6 +7,7 @@ interface MemberRowProps {
   member: CompanyMember;
   assignedAccounts: EmailAccountItem[];
   isCurrentUserAdminOrOwner: boolean;
+  isSelf?: boolean;
   onOpenManageAccess: (member: CompanyMember) => void;
   onOpenChangeRole: (member: CompanyMember) => void;
   onOpenRemove: (member: CompanyMember) => void;
@@ -40,6 +41,7 @@ export const MemberRow: React.FC<MemberRowProps> = ({
   member,
   assignedAccounts,
   isCurrentUserAdminOrOwner,
+  isSelf = false,
   onOpenManageAccess,
   onOpenChangeRole,
   onOpenRemove,
@@ -130,7 +132,7 @@ export const MemberRow: React.FC<MemberRowProps> = ({
             <Lock className="h-3.5 w-3.5" />
             Primary Owner
           </span>
-        ) : isCurrentUserAdminOrOwner ? (
+        ) : isSelf ? null : isCurrentUserAdminOrOwner ? (
           <div className="inline-flex items-center justify-end gap-1.5">
             {isMember && (
               <button

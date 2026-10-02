@@ -8,6 +8,7 @@ interface MobileMemberCardProps {
   member: CompanyMember;
   assignedAccounts: EmailAccountItem[];
   isCurrentUserAdminOrOwner: boolean;
+  isSelf?: boolean;
   onOpenManageAccess: (member: CompanyMember) => void;
   onOpenChangeRole: (member: CompanyMember) => void;
   onOpenRemove: (member: CompanyMember) => void;
@@ -17,6 +18,7 @@ export const MobileMemberCard: React.FC<MobileMemberCardProps> = ({
   member,
   assignedAccounts,
   isCurrentUserAdminOrOwner,
+  isSelf = false,
   onOpenManageAccess,
   onOpenChangeRole,
   onOpenRemove,
@@ -106,40 +108,42 @@ export const MobileMemberCard: React.FC<MobileMemberCardProps> = ({
       </div>
 
       {/* Actions */}
-      <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-100">
-        {isOwner ? (
-          <span className="inline-flex items-center gap-1 bg-slate-100 text-slate-500 px-2.5 py-1 rounded-md text-xs font-medium cursor-not-allowed select-none border border-slate-200">
-            <Lock className="h-3.5 w-3.5" />
-            Primary Owner
-          </span>
-        ) : isCurrentUserAdminOrOwner ? (
-          <>
-            {isMember && (
+      {(isOwner || (!isSelf && isCurrentUserAdminOrOwner)) && (
+        <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-100">
+          {isOwner ? (
+            <span className="inline-flex items-center gap-1 bg-slate-100 text-slate-500 px-2.5 py-1 rounded-md text-xs font-medium cursor-not-allowed select-none border border-slate-200">
+              <Lock className="h-3.5 w-3.5" />
+              Primary Owner
+            </span>
+          ) : (
+            <>
+              {isMember && (
+                <button
+                  type="button"
+                  onClick={() => onOpenManageAccess(member)}
+                  className="text-xs font-medium text-slate-700 hover:text-indigo-600 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
+                >
+                  Manage Access
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => onOpenManageAccess(member)}
+                onClick={() => onOpenChangeRole(member)}
                 className="text-xs font-medium text-slate-700 hover:text-indigo-600 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
               >
-                Manage Access
+                Role
               </button>
-            )}
-            <button
-              type="button"
-              onClick={() => onOpenChangeRole(member)}
-              className="text-xs font-medium text-slate-700 hover:text-indigo-600 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
-            >
-              Role
-            </button>
-            <button
-              type="button"
-              onClick={() => onOpenRemove(member)}
-              className="text-xs font-medium text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
-            >
-              Remove
-            </button>
-          </>
-        ) : null}
-      </div>
+              <button
+                type="button"
+                onClick={() => onOpenRemove(member)}
+                className="text-xs font-medium text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
+              >
+                Remove
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 };

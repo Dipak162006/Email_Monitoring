@@ -622,3 +622,154 @@ async def test_invitation_lifecycle_and_authorization(async_client: AsyncClient,
     assert len(co_invs_resp.json()) >= 3
 
 
+@pytest.mark.asyncio
+async def test_self_management_protection_and_admin_rules(async_client: AsyncClient, db_session: AsyncSession):
+    """Test that ADMIN and OWNER cannot change their own role or remove themselves,
+    while permitted management of other members remains intact.
+    """
+    # 1. Setup Owner and Company
+    token_owner = await register_and_login(async_client, "perm_owner@company.com", "Owner User")
+    resp_co = await async_client.post(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "Guardian Technologies"},
+    )
+    assert resp_co.status_code == 201
+    company_id = resp_co.json()["id"]
+
+    # Get Owner's user ID
+    members_resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/members",
+        headers={"Authorization": f"Bearer {token_owner}"},
+    )
+    owner_user_id = next(m["user_id"] for m in members_resp.json() if m["role"] == "OWNER")
+
+    # 2. Add an Admin and a Member
+    token_admin = await register_and_login(async_client, "perm_admin@company.com", "Admin User")
+    token_member = await register_and_login(async_client, "perm_member@company.com", "Member User")
+    token_other = await register_and_login(async_client, "perm_other@company.com", "Other Member")
+
+    add_admin_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/members",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "perm_admin@company.com", "role": "ADMIN"},
+    )
+    assert add_admin_resp.status_code == 201
+    admin_user_id = add_admin_resp.json()["user_id"]
+
+    add_member_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/members",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "perm_member@company.com", "role": "MEMBER"},
+    )
+    assert add_member_resp.status_code == 201
+    member_user_id = add_member_resp.json()["user_id"]
+
+    add_other_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/members",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "perm_other@company.com", "role": "MEMBER"},
+    )
+    assert add_other_resp.status_code == 201
+    other_user_id = add_other_resp.json()["user_id"]
+
+    # ---------------------------------------------------------
+    # 1. ADMIN cannot change own role
+    # ---------------------------------------------------------
+    admin_self_role = await async_client.put(
+        f"/api/v1/companies/{company_id}/members/{admin_user_id}/role",
+        headers={"Authorization": f"Bearer {token_admin}"},
+        json={"role": "MEMBER"},
+    )
+    assert admin_self_role.status_code == 400
+    assert "cannot change your own role" in admin_self_role.json()["detail"].lower()
+
+    # ---------------------------------------------------------
+    # 2. ADMIN cannot remove self
+    # ---------------------------------------------------------
+    admin_self_remove = await async_client.delete(
+        f"/api/v1/companies/{company_id}/members/{admin_user_id}",
+        headers={"Authorization": f"Bearer {token_admin}"},
+    )
+    assert admin_self_remove.status_code == 400
+    assert "cannot remove yourself" in admin_self_remove.json()["detail"].lower()
+
+    # ---------------------------------------------------------
+    # 3. OWNER cannot change own role
+    # ---------------------------------------------------------
+    owner_self_role = await async_client.put(
+        f"/api/v1/companies/{company_id}/members/{owner_user_id}/role",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"role": "ADMIN"},
+    )
+    assert owner_self_role.status_code == 400
+    assert "cannot change your own role" in owner_self_role.json()["detail"].lower()
+
+    # ---------------------------------------------------------
+    # 4. OWNER cannot remove self
+    # ---------------------------------------------------------
+    owner_self_remove = await async_client.delete(
+        f"/api/v1/companies/{company_id}/members/{owner_user_id}",
+        headers={"Authorization": f"Bearer {token_owner}"},
+    )
+    assert owner_self_remove.status_code in [400, 403]
+
+    # ---------------------------------------------------------
+    # 5. ADMIN can still change another permitted member's role
+    # ---------------------------------------------------------
+    admin_change_member = await async_client.put(
+        f"/api/v1/companies/{company_id}/members/{member_user_id}/role",
+        headers={"Authorization": f"Bearer {token_admin}"},
+        json={"role": "ADMIN"},
+    )
+    assert admin_change_member.status_code == 200
+    assert admin_change_member.json()["role"] == "ADMIN"
+
+    # ---------------------------------------------------------
+    # 6. ADMIN can still remove another permitted member
+    # ---------------------------------------------------------
+    admin_remove_other = await async_client.delete(
+        f"/api/v1/companies/{company_id}/members/{other_user_id}",
+        headers={"Authorization": f"Bearer {token_admin}"},
+    )
+    assert admin_remove_other.status_code == 204
+
+    # ---------------------------------------------------------
+    # 7. ADMIN cannot modify or remove OWNER
+    # ---------------------------------------------------------
+    admin_modify_owner = await async_client.put(
+        f"/api/v1/companies/{company_id}/members/{owner_user_id}/role",
+        headers={"Authorization": f"Bearer {token_admin}"},
+        json={"role": "MEMBER"},
+    )
+    assert admin_modify_owner.status_code == 403
+
+    admin_remove_owner = await async_client.delete(
+        f"/api/v1/companies/{company_id}/members/{owner_user_id}",
+        headers={"Authorization": f"Bearer {token_admin}"},
+    )
+    assert admin_remove_owner.status_code == 403
+
+    # ---------------------------------------------------------
+    # 8. MEMBER still cannot manage members
+    # ---------------------------------------------------------
+    # Demote member_user back to MEMBER by Owner
+    await async_client.put(
+        f"/api/v1/companies/{company_id}/members/{member_user_id}/role",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"role": "MEMBER"},
+    )
+
+    member_try_role = await async_client.put(
+        f"/api/v1/companies/{company_id}/members/{admin_user_id}/role",
+        headers={"Authorization": f"Bearer {token_member}"},
+        json={"role": "MEMBER"},
+    )
+    assert member_try_role.status_code == 403
+
+    member_try_remove = await async_client.delete(
+        f"/api/v1/companies/{company_id}/members/{admin_user_id}",
+        headers={"Authorization": f"Bearer {token_member}"},
+    )
+    assert member_try_remove.status_code == 403
+

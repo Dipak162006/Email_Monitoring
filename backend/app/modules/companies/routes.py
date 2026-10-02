@@ -188,6 +188,7 @@ async def update_company_member_role(
         operator_role=membership.role,
         target_user_id=user_id,
         new_role=role_in.role,
+        operator_user_id=membership.user_id,
     )
     return CompanyMemberRead(
         id=updated.id,
@@ -218,6 +219,7 @@ async def remove_company_member(
         company_id=company_id,
         operator_role=membership.role,
         target_user_id=user_id,
+        operator_user_id=membership.user_id,
     )
     return None
 

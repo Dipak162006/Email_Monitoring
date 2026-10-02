@@ -13,6 +13,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { Button } from "../components/ui/Button";
+import { useAuth } from "../hooks/useAuth";
 import { companiesApi, emailAccountsApi } from "../services/api";
 import type { CompanyMember, CompanyMemberAddPayload } from "../types/auth";
 import type { EmailAccountItem } from "../types/emails";
@@ -27,6 +28,7 @@ import { MobileMemberCard } from "../components/team/MobileMemberCard";
 import { SharedInboxCard } from "../components/team/SharedInboxCard";
 
 export function TeamPage() {
+  const { user } = useAuth();
   const queryClient = useQueryClient();
 
   // Search & Filter States
@@ -197,6 +199,14 @@ export function TeamPage() {
   // Change Role
   const handleChangeRole = async (userId: number, newRole: "ADMIN" | "MEMBER") => {
     if (!activeCompany) return;
+    if (userId === user?.id) {
+      setAlertBanner({
+        type: "error",
+        message: "You cannot change your own role.",
+      });
+      setMemberForRoleChange(null);
+      return;
+    }
     setIsSubmittingModal(true);
     try {
       await companiesApi.updateMemberRole(activeCompany.id, userId, { role: newRole });
@@ -206,6 +216,11 @@ export function TeamPage() {
         type: "success",
         message: "Member role updated successfully.",
       });
+    } catch {
+      setAlertBanner({
+        type: "error",
+        message: "Failed to update member role. Please try again.",
+      });
     } finally {
       setIsSubmittingModal(false);
     }
@@ -214,6 +229,14 @@ export function TeamPage() {
   // Remove Member
   const handleRemoveMember = async (userId: number) => {
     if (!activeCompany) return;
+    if (userId === user?.id) {
+      setAlertBanner({
+        type: "error",
+        message: "You cannot remove yourself from the company.",
+      });
+      setMemberForRemoval(null);
+      return;
+    }
     setIsSubmittingModal(true);
     try {
       await companiesApi.removeMember(activeCompany.id, userId);
@@ -222,6 +245,11 @@ export function TeamPage() {
       setAlertBanner({
         type: "success",
         message: "Member removed from the workspace.",
+      });
+    } catch {
+      setAlertBanner({
+        type: "error",
+        message: "Failed to remove member. Please try again.",
       });
     } finally {
       setIsSubmittingModal(false);
@@ -500,6 +528,7 @@ export function TeamPage() {
                     member={member}
                     assignedAccounts={userAssignedAccountsMap[member.user_id] || []}
                     isCurrentUserAdminOrOwner={isCompanyAdminOrOwner}
+                    isSelf={member.user_id === user?.id}
                     onOpenManageAccess={(m) => setMemberForAccess(m)}
                     onOpenChangeRole={(m) => setMemberForRoleChange(m)}
                     onOpenRemove={(m) => setMemberForRemoval(m)}
@@ -527,6 +556,7 @@ export function TeamPage() {
                 member={member}
                 assignedAccounts={userAssignedAccountsMap[member.user_id] || []}
                 isCurrentUserAdminOrOwner={isCompanyAdminOrOwner}
+                isSelf={member.user_id === user?.id}
                 onOpenManageAccess={(m) => setMemberForAccess(m)}
                 onOpenChangeRole={(m) => setMemberForRoleChange(m)}
                 onOpenRemove={(m) => setMemberForRemoval(m)}
