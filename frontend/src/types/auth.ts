@@ -76,7 +76,7 @@ export interface UserInvitationItem {
   role: "ADMIN" | "MEMBER";
   inviter_email: string;
   inviter_name: string | null;
-  status: "PENDING" | "ACCEPTED" | "DECLINED";
+  status: "PENDING" | "ACCEPTED" | "DECLINED" | "REVOKED";
   created_at: string;
 }
 
@@ -90,8 +90,9 @@ export interface CompanyInvitationItem {
   inviter_email?: string | null;
   inviter_name?: string | null;
   role: "ADMIN" | "MEMBER";
-  status: "PENDING" | "ACCEPTED" | "DECLINED";
+  status: "PENDING" | "ACCEPTED" | "DECLINED" | "REVOKED";
   created_at: string;
+  updated_at?: string | null;
   accepted_at?: string | null;
   declined_at?: string | null;
 }

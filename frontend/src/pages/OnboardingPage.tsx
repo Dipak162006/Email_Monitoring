@@ -53,8 +53,8 @@ export function OnboardingPage() {
   const [decliningId, setDecliningId] = useState<number | null>(null);
   const [invitationActionError, setInvitationActionError] = useState<string | null>(null);
 
-  // If already a member of a company workspace, redirect to main application
-  if (isCompaniesLoading) {
+  // If checking workspace memberships or invitations, show loading spinner
+  if (isCompaniesLoading || isInvitationsLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#f9f9ff]">
         <LoadingSpinner message="Loading workspace information..." size="lg" />
@@ -62,7 +62,8 @@ export function OnboardingPage() {
     );
   }
 
-  if (companies && companies.length > 0) {
+  // Only redirect to dashboard if the user already has workspaces AND has no pending invitations to review
+  if (companies && companies.length > 0 && (!invitations || invitations.length === 0)) {
     return <Navigate to="/dashboard" replace />;
   }
 
@@ -121,7 +122,10 @@ export function OnboardingPage() {
 
     try {
       await invitationsApi.declineInvitation(invitation.id);
-      await refetchInvitations();
+      await Promise.all([
+        refetchInvitations(),
+        queryClient.invalidateQueries({ queryKey: ["my-pending-invitations"] }),
+      ]);
     } catch {
       setInvitationActionError("Failed to decline invitation. Please try again.");
     } finally {

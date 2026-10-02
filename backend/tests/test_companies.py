@@ -668,6 +668,150 @@ async def test_invitation_lifecycle_and_authorization(async_client: AsyncClient,
 
 
 @pytest.mark.asyncio
+async def test_invitation_revocation_and_resend_lifecycle(async_client: AsyncClient, db_session: AsyncSession):
+    """Test OWNER/ADMIN revocation, MEMBER forbidden, cross-company isolation (404),
+    rejection of acceptance for revoked invitations, resend semantics, and rejection
+    of resend/revoke on already processed invitations.
+    """
+    # 1. Setup Company A with Owner and Member
+    token_owner_a = await register_and_login(async_client, "owner_a@lifecycle.com", "Owner A")
+    token_member_a = await register_and_login(async_client, "member_a@lifecycle.com", "Member A")
+    token_invitee = await register_and_login(async_client, "invitee_target@lifecycle.com", "Target Invitee")
+
+    co_a_resp = await async_client.post(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_owner_a}"},
+        json={"name": "Company Alpha"},
+    )
+    company_a_id = co_a_resp.json()["id"]
+
+    # Add member_a directly as MEMBER
+    await async_client.post(
+        f"/api/v1/companies/{company_a_id}/members",
+        headers={"Authorization": f"Bearer {token_owner_a}"},
+        json={"email": "member_a@lifecycle.com", "role": "MEMBER"},
+    )
+
+    # 2. Setup Company B with Owner B
+    token_owner_b = await register_and_login(async_client, "owner_b@lifecycle.com", "Owner B")
+    co_b_resp = await async_client.post(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_owner_b}"},
+        json={"name": "Company Beta"},
+    )
+    company_b_id = co_b_resp.json()["id"]
+
+    # 3. Owner A creates invitation for target invitee in Company A
+    inv_create_resp = await async_client.post(
+        f"/api/v1/companies/{company_a_id}/invitations",
+        headers={"Authorization": f"Bearer {token_owner_a}"},
+        json={"email": "invitee_target@lifecycle.com", "role": "MEMBER"},
+    )
+    assert inv_create_resp.status_code == 201
+    invitation = inv_create_resp.json()
+    inv_id = invitation["id"]
+    assert invitation["status"] == "PENDING"
+    assert "updated_at" in invitation
+    original_updated_at = invitation["updated_at"]
+
+    # 4. Cross-company revocation attempt: Owner B tries to revoke Company A's invite -> 404 (anti-enumeration)
+    cross_revoke_resp = await async_client.delete(
+        f"/api/v1/companies/{company_b_id}/invitations/{inv_id}",
+        headers={"Authorization": f"Bearer {token_owner_b}"},
+    )
+    assert cross_revoke_resp.status_code == 404
+
+    # Also trying on company_a with Owner B (not member of company A) -> 404 (anti-enumeration)
+    unauth_revoke_resp = await async_client.delete(
+        f"/api/v1/companies/{company_a_id}/invitations/{inv_id}",
+        headers={"Authorization": f"Bearer {token_owner_b}"},
+    )
+    assert unauth_revoke_resp.status_code == 404
+
+    # 5. Member revocation forbidden: member_a tries to revoke Company A's invite -> 403 Forbidden
+    member_revoke_resp = await async_client.delete(
+        f"/api/v1/companies/{company_a_id}/invitations/{inv_id}",
+        headers={"Authorization": f"Bearer {token_member_a}"},
+    )
+    assert member_revoke_resp.status_code == 403
+
+    # 6. Resend pending invitation:
+    # First test cross-company resend -> 404
+    cross_resend_resp = await async_client.post(
+        f"/api/v1/companies/{company_b_id}/invitations/{inv_id}/resend",
+        headers={"Authorization": f"Bearer {token_owner_b}"},
+    )
+    assert cross_resend_resp.status_code == 404
+
+    # Member resend forbidden -> 403
+    member_resend_resp = await async_client.post(
+        f"/api/v1/companies/{company_a_id}/invitations/{inv_id}/resend",
+        headers={"Authorization": f"Bearer {token_member_a}"},
+    )
+    assert member_resend_resp.status_code == 403
+
+    # Owner A successfully resends pending invitation
+    resend_resp = await async_client.post(
+        f"/api/v1/companies/{company_a_id}/invitations/{inv_id}/resend",
+        headers={"Authorization": f"Bearer {token_owner_a}"},
+    )
+    assert resend_resp.status_code == 200
+    resent_data = resend_resp.json()
+    assert resent_data["id"] == inv_id
+    assert resent_data["status"] == "PENDING"
+    assert resent_data["created_at"] == invitation["created_at"]
+    # updated_at should exist and be set
+    assert resent_data["updated_at"] is not None
+
+    # 7. Owner A revokes the pending invitation -> 204 No Content
+    revoke_resp = await async_client.delete(
+        f"/api/v1/companies/{company_a_id}/invitations/{inv_id}",
+        headers={"Authorization": f"Bearer {token_owner_a}"},
+    )
+    assert revoke_resp.status_code == 204
+
+    # 8. Check that revoked invitation is NOT in target invitee's pending list
+    pending_resp = await async_client.get(
+        "/api/v1/invitations/my-pending",
+        headers={"Authorization": f"Bearer {token_invitee}"},
+    )
+    assert pending_resp.status_code == 200
+    pending_inv_ids = [item["id"] for item in pending_resp.json()]
+    assert inv_id not in pending_inv_ids
+
+    # 9. Acceptance of revoked invitation is rejected -> 400 Bad Request
+    accept_revoked_resp = await async_client.post(
+        f"/api/v1/invitations/{inv_id}/accept",
+        headers={"Authorization": f"Bearer {token_invitee}"},
+    )
+    assert accept_revoked_resp.status_code == 400
+    assert "revoked" in accept_revoked_resp.json()["detail"].lower()
+
+    # 10. Resending a revoked invitation is rejected -> 400 Bad Request
+    resend_revoked_resp = await async_client.post(
+        f"/api/v1/companies/{company_a_id}/invitations/{inv_id}/resend",
+        headers={"Authorization": f"Bearer {token_owner_a}"},
+    )
+    assert resend_revoked_resp.status_code == 400
+    assert "revoked" in resend_revoked_resp.json()["detail"].lower()
+
+    # 11. Revoking an already revoked invitation is rejected -> 400 Bad Request
+    re_revoke_resp = await async_client.delete(
+        f"/api/v1/companies/{company_a_id}/invitations/{inv_id}",
+        headers={"Authorization": f"Bearer {token_owner_a}"},
+    )
+    assert re_revoke_resp.status_code == 400
+    assert "revoked" in re_revoke_resp.json()["detail"].lower()
+
+    # 12. Nonexistent invitation ID -> 404 Not Found
+    not_found_resp = await async_client.delete(
+        f"/api/v1/companies/{company_a_id}/invitations/999999",
+        headers={"Authorization": f"Bearer {token_owner_a}"},
+    )
+    assert not_found_resp.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_self_management_protection_and_admin_rules(async_client: AsyncClient, db_session: AsyncSession):
     """Test that ADMIN and OWNER cannot change their own role or remove themselves,
     while permitted management of other members remains intact.

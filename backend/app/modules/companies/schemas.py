@@ -85,6 +85,7 @@ class CompanyInvitationRead(BaseModel):
     role: CompanyRole
     status: InvitationStatus
     created_at: datetime
+    updated_at: Optional[datetime] = None
     accepted_at: Optional[datetime] = None
     declined_at: Optional[datetime] = None
 

@@ -634,10 +634,18 @@ export const invitationsApi = {
 
   getCompanyInvitations: async (
     companyId: number,
-    statusFilter?: "PENDING" | "ACCEPTED" | "DECLINED"
+    statusFilter?: "PENDING" | "ACCEPTED" | "DECLINED" | "REVOKED"
   ): Promise<CompanyInvitationItem[]> => {
     const qs = statusFilter ? `?status_filter=${statusFilter}` : "";
     return apiClient.get<CompanyInvitationItem[]>(`/api/v1/companies/${companyId}/invitations${qs}`);
+  },
+
+  revokeInvitation: async (companyId: number, invitationId: number): Promise<void> => {
+    return apiClient.delete<void>(`/api/v1/companies/${companyId}/invitations/${invitationId}`);
+  },
+
+  resendInvitation: async (companyId: number, invitationId: number): Promise<CompanyInvitationItem> => {
+    return apiClient.post<CompanyInvitationItem>(`/api/v1/companies/${companyId}/invitations/${invitationId}/resend`);
   },
 };
 

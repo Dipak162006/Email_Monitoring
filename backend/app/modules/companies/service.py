@@ -435,4 +435,57 @@ class CompanyService:
         await db.refresh(invitation)
         return invitation
 
+    @staticmethod
+    async def revoke_invitation(
+        db: AsyncSession,
+        company_id: int,
+        invitation_id: int,
+    ) -> CompanyInvitation:
+        """Revoke a pending company invitation (Owner/Admin only)."""
+        invitation = await CompanyService.get_invitation_by_id(db, invitation_id)
+        if not invitation or invitation.company_id != company_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invitation not found",
+            )
+
+        if invitation.status != InvitationStatus.PENDING.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invitation cannot be revoked because it is already {invitation.status.lower()}",
+            )
+
+        invitation.status = InvitationStatus.REVOKED.value
+        invitation.updated_at = func.now()
+
+        await db.commit()
+        await db.refresh(invitation)
+        return invitation
+
+    @staticmethod
+    async def resend_invitation(
+        db: AsyncSession,
+        company_id: int,
+        invitation_id: int,
+    ) -> CompanyInvitation:
+        """Resend (refresh) a pending company invitation (Owner/Admin only)."""
+        invitation = await CompanyService.get_invitation_by_id(db, invitation_id)
+        if not invitation or invitation.company_id != company_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invitation not found",
+            )
+
+        if invitation.status != InvitationStatus.PENDING.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invitation cannot be resent because it is already {invitation.status.lower()}",
+            )
+
+        invitation.updated_at = func.now()
+
+        await db.commit()
+        await db.refresh(invitation)
+        return invitation
+
 

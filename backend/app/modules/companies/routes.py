@@ -289,6 +289,7 @@ async def create_company_invitation(
         role=CompanyRole(invitation.role),
         status=InvitationStatus(invitation.status),
         created_at=invitation.created_at,
+        updated_at=invitation.updated_at,
         accepted_at=invitation.accepted_at,
         declined_at=invitation.declined_at,
     )
@@ -302,7 +303,7 @@ async def create_company_invitation(
 )
 async def list_company_invitations(
     company_id: int,
-    status_filter: Optional[InvitationStatus] = Query(None, description="Filter by status (PENDING, ACCEPTED, DECLINED)"),
+    status_filter: Optional[InvitationStatus] = Query(None, description="Filter by status (PENDING, ACCEPTED, DECLINED, REVOKED)"),
     membership: CompanyUser = Depends(require_company_admin_or_owner),
     db: AsyncSession = Depends(get_db),
 ) -> List[CompanyInvitationRead]:
@@ -325,11 +326,68 @@ async def list_company_invitations(
             role=CompanyRole(inv.role),
             status=InvitationStatus(inv.status),
             created_at=inv.created_at,
+            updated_at=inv.updated_at,
             accepted_at=inv.accepted_at,
             declined_at=inv.declined_at,
         )
         for inv in invitations
     ]
+
+
+@router.delete(
+    "/{company_id}/invitations/{invitation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Revoke a pending company invitation (Owner/Admin only)",
+)
+async def revoke_company_invitation(
+    company_id: int,
+    invitation_id: int,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+):
+    """Revoke an outstanding invitation. Foreign-company or nonexistent invitations return 404."""
+    await CompanyService.revoke_invitation(
+        db=db,
+        company_id=company_id,
+        invitation_id=invitation_id,
+    )
+    return None
+
+
+@router.post(
+    "/{company_id}/invitations/{invitation_id}/resend",
+    response_model=CompanyInvitationRead,
+    status_code=status.HTTP_200_OK,
+    summary="Resend a pending company invitation (Owner/Admin only)",
+)
+async def resend_company_invitation(
+    company_id: int,
+    invitation_id: int,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CompanyInvitationRead:
+    """Refresh a pending invitation timestamp without modifying created_at."""
+    invitation = await CompanyService.resend_invitation(
+        db=db,
+        company_id=company_id,
+        invitation_id=invitation_id,
+    )
+    return CompanyInvitationRead(
+        id=invitation.id,
+        company_id=invitation.company_id,
+        company_name=invitation.company.name if invitation.company else None,
+        invited_email=invitation.invited_email,
+        invited_user_id=invitation.invited_user_id,
+        inviter_user_id=invitation.inviter_user_id,
+        inviter_email=invitation.inviter.email if invitation.inviter else None,
+        inviter_name=invitation.inviter.full_name if invitation.inviter else None,
+        role=CompanyRole(invitation.role),
+        status=InvitationStatus(invitation.status),
+        created_at=invitation.created_at,
+        updated_at=invitation.updated_at,
+        accepted_at=invitation.accepted_at,
+        declined_at=invitation.declined_at,
+    )
 
 
 # ---------------------------------------------------------

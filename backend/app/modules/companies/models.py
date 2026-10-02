@@ -23,6 +23,7 @@ class InvitationStatus(str, enum.Enum):
     PENDING = "PENDING"
     ACCEPTED = "ACCEPTED"
     DECLINED = "DECLINED"
+    REVOKED = "REVOKED"
 
 
 class Company(Base):

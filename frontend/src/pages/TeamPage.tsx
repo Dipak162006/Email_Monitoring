@@ -11,13 +11,14 @@ import {
   CheckCircle2,
   X,
   Loader2,
+  RefreshCw,
 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { useAuth } from "../hooks/useAuth";
 import { useWorkspace } from "../hooks/useWorkspace";
 import { usePermissions } from "../hooks/usePermissions";
-import { companiesApi, emailAccountsApi } from "../services/api";
-import type { CompanyMember, CompanyMemberAddPayload } from "../types/auth";
+import { companiesApi, emailAccountsApi, invitationsApi } from "../services/api";
+import type { CompanyMember, CompanyMemberAddPayload, CompanyInvitationItem } from "../types/auth";
 import type { EmailAccountItem } from "../types/emails";
 
 import { AddMemberModal } from "../components/team/AddMemberModal";
@@ -25,7 +26,7 @@ import { ChangeRoleModal } from "../components/team/ChangeRoleModal";
 import { RemoveMemberModal } from "../components/team/RemoveMemberModal";
 import { ManageEmailAccessModal } from "../components/team/ManageEmailAccessModal";
 import { ManageAccountAccessModal } from "../components/team/ManageAccountAccessModal";
-import { MemberRow } from "../components/team/MemberRow";
+import { MemberRow, formatMemberDate } from "../components/team/MemberRow";
 import { MobileMemberCard } from "../components/team/MobileMemberCard";
 import { SharedInboxCard } from "../components/team/SharedInboxCard";
 
@@ -53,6 +54,8 @@ export function TeamPage() {
 
   // In-flight mutation flags
   const [isSubmittingModal, setIsSubmittingModal] = useState(false);
+  const [resendingId, setResendingId] = useState<number | null>(null);
+  const [revokingId, setRevokingId] = useState<number | null>(null);
 
   // 1. Consume active workspace and centralized permissions
   const {
@@ -96,6 +99,23 @@ export function TeamPage() {
     enabled: !!activeCompany?.id,
     staleTime: 30000,
   });
+
+  // 5. Fetch company invitations (Owner/Admin only)
+  const {
+    data: invitations = [],
+    isLoading: isInvitationsLoading,
+    isError: isInvitationsError,
+    refetch: refetchInvitations,
+  } = useQuery({
+    queryKey: ["company-invitations", activeCompany?.id],
+    queryFn: () => invitationsApi.getCompanyInvitations(activeCompany!.id),
+    enabled: !!activeCompany?.id && canAddMember,
+    staleTime: 15000,
+  });
+
+  const pendingInvitations = useMemo(() => {
+    return invitations.filter((inv) => inv.status === "PENDING");
+  }, [invitations]);
 
 
   // Mapping lookup: User ID -> Array of EmailAccountItem
@@ -177,17 +197,14 @@ export function TeamPage() {
     queryClient.invalidateQueries({ queryKey: ["company-members", activeCompany.id] });
     queryClient.invalidateQueries({ queryKey: ["company-email-accounts-access", activeCompany.id] });
     queryClient.invalidateQueries({ queryKey: ["company-email-accounts", activeCompany.id] });
+    queryClient.invalidateQueries({ queryKey: ["company-invitations", activeCompany.id] });
   };
 
-  // Add Member
+  // Add Member (Direct)
   const handleAddMember = async (payload: CompanyMemberAddPayload) => {
     if (!activeCompany) return;
     if (!canAddMember) {
-      setAlertBanner({
-        type: "error",
-        message: "You do not have permission to add members to this workspace.",
-      });
-      return;
+      throw new Error("You do not have permission to add members to this workspace.");
     }
     setIsSubmittingModal(true);
     try {
@@ -200,6 +217,70 @@ export function TeamPage() {
       });
     } finally {
       setIsSubmittingModal(false);
+    }
+  };
+
+  // Invite Member (Invitation)
+  const handleCreateInvitation = async (payload: { email: string; role: "ADMIN" | "MEMBER" }) => {
+    if (!activeCompany) return;
+    if (!canAddMember) {
+      throw new Error("You do not have permission to invite members to this workspace.");
+    }
+    setIsSubmittingModal(true);
+    try {
+      await invitationsApi.createInvitation(activeCompany.id, payload);
+      invalidateTeamQueries();
+      setIsAddModalOpen(false);
+      setAlertBanner({
+        type: "success",
+        message: `Invitation created for ${payload.email}.`,
+      });
+    } finally {
+      setIsSubmittingModal(false);
+    }
+  };
+
+  // Resend Pending Invitation
+  const handleResendInvitation = async (invitation: CompanyInvitationItem) => {
+    if (!activeCompany) return;
+    setResendingId(invitation.id);
+    try {
+      await invitationsApi.resendInvitation(activeCompany.id, invitation.id);
+      queryClient.invalidateQueries({ queryKey: ["company-invitations", activeCompany.id] });
+      setAlertBanner({
+        type: "success",
+        message: `Invitation refreshed for ${invitation.invited_email}.`,
+      });
+    } catch (err: unknown) {
+      const errObj = err as { detail?: string; message?: string };
+      setAlertBanner({
+        type: "error",
+        message: errObj.detail || errObj.message || "Failed to resend invitation. Please try again.",
+      });
+    } finally {
+      setResendingId(null);
+    }
+  };
+
+  // Revoke Pending Invitation
+  const handleRevokeInvitation = async (invitation: CompanyInvitationItem) => {
+    if (!activeCompany) return;
+    setRevokingId(invitation.id);
+    try {
+      await invitationsApi.revokeInvitation(activeCompany.id, invitation.id);
+      queryClient.invalidateQueries({ queryKey: ["company-invitations", activeCompany.id] });
+      setAlertBanner({
+        type: "success",
+        message: `Invitation to ${invitation.invited_email} has been revoked.`,
+      });
+    } catch (err: unknown) {
+      const errObj = err as { detail?: string; message?: string };
+      setAlertBanner({
+        type: "error",
+        message: errObj.detail || errObj.message || "Failed to revoke invitation. Please try again.",
+      });
+    } finally {
+      setRevokingId(null);
     }
   };
 
@@ -597,6 +678,126 @@ export function TeamPage() {
         </div>
       </div>
 
+      {/* Section: Pending Invitations (Owner / Admin Only) */}
+      {canAddMember && (
+        <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+          {/* Section Header */}
+          <div className="p-5 sm:px-6 border-b border-slate-100 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <h2 className="text-base font-semibold text-slate-900">Pending Invitations</h2>
+              <span className="bg-amber-50 text-amber-700 border border-amber-200 text-xs font-semibold px-2.5 py-0.5 rounded-full">
+                {pendingInvitations.length} {pendingInvitations.length === 1 ? "pending" : "pending"}
+              </span>
+            </div>
+          </div>
+
+          {/* Loading State */}
+          {isInvitationsLoading ? (
+            <div className="p-8 flex items-center justify-center gap-2 text-xs text-slate-500">
+              <Loader2 className="h-4 w-4 animate-spin text-indigo-600" />
+              <span>Loading pending invitations...</span>
+            </div>
+          ) : isInvitationsError ? (
+            <div className="p-6 text-center text-xs text-rose-600 flex flex-col items-center gap-2">
+              <p>Failed to load invitations.</p>
+              <button
+                type="button"
+                onClick={() => refetchInvitations()}
+                className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs font-medium cursor-pointer"
+              >
+                Retry
+              </button>
+            </div>
+          ) : pendingInvitations.length > 0 ? (
+            <div className="divide-y divide-slate-100">
+              {pendingInvitations.map((inv) => {
+                const isResending = resendingId === inv.id;
+                const isRevoking = revokingId === inv.id;
+                const isActionDisabled = isResending || isRevoking;
+
+                return (
+                  <div
+                    key={inv.id}
+                    className="p-4 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-50/50 transition-colors"
+                  >
+                    <div className="flex items-start sm:items-center gap-3">
+                      <div className="w-8 h-8 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shrink-0 mt-0.5 sm:mt-0">
+                        <Mail className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-semibold text-xs text-slate-900">{inv.invited_email}</span>
+                          <span
+                            className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded border ${
+                              inv.role === "ADMIN"
+                                ? "bg-purple-50 text-purple-700 border-purple-200"
+                                : "bg-slate-100 text-slate-700 border-slate-200"
+                            }`}
+                          >
+                            {inv.role}
+                          </span>
+                          <span className="text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-200 px-1.5 py-0.2 rounded-full">
+                            Pending
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-400 mt-0.5">
+                          {inv.updated_at && inv.updated_at !== inv.created_at
+                            ? `Resent ${formatMemberDate(inv.updated_at)} · Created ${formatMemberDate(inv.created_at)}`
+                            : `Invited ${formatMemberDate(inv.created_at)}`}
+                          {inv.inviter_email ? ` by ${inv.inviter_email}` : ""}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Actions: Resend and Revoke */}
+                    <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                      <button
+                        type="button"
+                        disabled={isActionDisabled}
+                        onClick={() => handleResendInvitation(inv)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                        title="Resend invitation (refresh timestamp)"
+                      >
+                        {isResending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-600" />
+                        ) : (
+                          <RefreshCw className="h-3.5 w-3.5 text-slate-500" />
+                        )}
+                        <span>{isResending ? "Resending..." : "Resend"}</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isActionDisabled}
+                        onClick={() => handleRevokeInvitation(inv)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-rose-600 bg-white border border-rose-200 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                        title="Revoke invitation"
+                      >
+                        {isRevoking ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-rose-600" />
+                        ) : (
+                          <X className="h-3.5 w-3.5 text-rose-500" />
+                        )}
+                        <span>{isRevoking ? "Revoking..." : "Revoke"}</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="py-8 text-center px-4">
+              <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 mx-auto mb-2">
+                <Mail className="h-4 w-4" />
+              </div>
+              <p className="text-xs font-medium text-slate-700">No pending invitations</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Invitations sent to team members who haven't joined yet will appear here.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Section 2: Shared Inbox Access */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-6 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -656,6 +857,7 @@ export function TeamPage() {
         isSubmitting={isSubmittingModal}
         onClose={() => setIsAddModalOpen(false)}
         onSubmit={handleAddMember}
+        onInvite={handleCreateInvitation}
       />
 
       {/* 2. Change Role Modal */}
