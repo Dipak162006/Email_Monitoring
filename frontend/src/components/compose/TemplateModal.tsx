@@ -10,6 +10,7 @@ interface TemplateModalProps {
   onSelectTemplate: (template: EmailTemplateItem) => void;
   hasExistingContent: boolean;
   selectedAccountId?: number | null;
+  companyId?: number | null;
 }
 
 export const TemplateModal: React.FC<TemplateModalProps> = ({
@@ -18,6 +19,7 @@ export const TemplateModal: React.FC<TemplateModalProps> = ({
   onSelectTemplate,
   hasExistingContent,
   selectedAccountId,
+  companyId,
 }) => {
   const [selectedTemplate, setSelectedTemplate] = useState<EmailTemplateItem | null>(null);
   const [showWarning, setShowWarning] = useState(false);
@@ -29,13 +31,14 @@ export const TemplateModal: React.FC<TemplateModalProps> = ({
     error,
     refetch,
   } = useQuery({
-    queryKey: ["templates", selectedAccountId, "active"],
+    queryKey: ["templates", companyId, selectedAccountId, "active"],
     queryFn: () =>
       templatesApi.listTemplates({
+        companyId: companyId || undefined,
         emailAccountId: selectedAccountId || undefined,
         isActive: true,
       }),
-    enabled: isOpen,
+    enabled: isOpen && !!companyId,
     staleTime: 0,
     refetchOnMount: "always",
   });
@@ -47,10 +50,13 @@ export const TemplateModal: React.FC<TemplateModalProps> = ({
     }
   }, [isOpen, refetch]);
 
-  // Client-side defensive filter ensuring inactive templates and other-account templates are excluded
+  // Client-side defensive filter ensuring inactive templates, other-company templates, and other-account templates are excluded
   const visibleTemplates = useMemo(() => {
     return templates.filter((tpl) => {
       if (!tpl.is_active) return false;
+      if (companyId && tpl.company_id && tpl.company_id !== companyId) {
+        return false;
+      }
       if (
         selectedAccountId &&
         tpl.email_account_id !== null &&
@@ -61,7 +67,7 @@ export const TemplateModal: React.FC<TemplateModalProps> = ({
       }
       return true;
     });
-  }, [templates, selectedAccountId]);
+  }, [templates, companyId, selectedAccountId]);
 
   if (!isOpen) return null;
 

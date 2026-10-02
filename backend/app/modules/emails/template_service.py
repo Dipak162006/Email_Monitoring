@@ -6,6 +6,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.sanitizer import sanitize_html
 from app.modules.auth.models import User
+from app.modules.companies.models import CompanyRole
 from app.modules.companies.service import CompanyService
 from app.modules.email_accounts.service import EmailAccountService
 from app.modules.emails.models import Email, EmailStatus, EmailTemplate
@@ -88,6 +89,13 @@ class EmailTemplateService:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="You do not have permission to create templates for this email account.",
+                )
+        else:
+            # Company-wide templates require OWNER or ADMIN role
+            if membership.role not in [CompanyRole.OWNER.value, CompanyRole.ADMIN.value]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Owner or Administrator privileges required to manage company-wide templates.",
                 )
 
         # Sanitize HTML if provided
@@ -296,6 +304,25 @@ class EmailTemplateService:
         """Update an existing template's name, content, account scope, or active state."""
         template = await cls.get_template(db, current_user, template_id, company_id)
 
+        membership = await CompanyService.get_user_membership(
+            db=db,
+            company_id=template.company_id,
+            user_id=current_user.id,
+        )
+        if not membership:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have access to this email template.",
+            )
+
+        # Company-wide templates require OWNER or ADMIN role
+        if template.email_account_id is None:
+            if membership.role not in [CompanyRole.OWNER.value, CompanyRole.ADMIN.value]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Owner or Administrator privileges required to manage company-wide templates.",
+                )
+
         if template_update.email_account_id is not None:
             acc = await EmailAccountService.get_email_account(db, template_update.email_account_id)
             if not acc:
@@ -355,6 +382,24 @@ class EmailTemplateService:
     ) -> None:
         """Delete an email template from the database."""
         template = await cls.get_template(db, current_user, template_id, company_id)
+        membership = await CompanyService.get_user_membership(
+            db=db,
+            company_id=template.company_id,
+            user_id=current_user.id,
+        )
+        if not membership:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have access to this email template.",
+            )
+
+        if template.email_account_id is None:
+            if membership.role not in [CompanyRole.OWNER.value, CompanyRole.ADMIN.value]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Owner or Administrator privileges required to manage company-wide templates.",
+                )
+
         await db.delete(template)
         await db.commit()
         logger.info("Deleted template id=%d by user id=%d", template_id, current_user.id)
@@ -370,6 +415,24 @@ class EmailTemplateService:
     ) -> EmailTemplate:
         """Toggle or set the active status of an email template."""
         template = await cls.get_template(db, current_user, template_id, company_id)
+        membership = await CompanyService.get_user_membership(
+            db=db,
+            company_id=template.company_id,
+            user_id=current_user.id,
+        )
+        if not membership:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have access to this email template.",
+            )
+
+        if template.email_account_id is None:
+            if membership.role not in [CompanyRole.OWNER.value, CompanyRole.ADMIN.value]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Owner or Administrator privileges required to manage company-wide templates.",
+                )
+
         if is_active is not None:
             template.is_active = is_active
         else:

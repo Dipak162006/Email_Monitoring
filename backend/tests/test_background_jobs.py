@@ -528,3 +528,49 @@ def test_15_no_credentials_in_task_arguments_or_results():
     assert "secret" not in param_names
     assert "token" not in param_names
     assert param_names == ["account_id", "folder", "max_messages"]
+
+
+@pytest.mark.asyncio
+async def test_16_account_sync_distributed_lock_acquisition_and_release():
+    """16. Verify AccountSyncLock acquires, blocks concurrent execution, and releases safely."""
+    from app.workers.tasks import AccountSyncLock
+    lock1 = AccountSyncLock(account_id=9901, ttl=60)
+    lock2 = AccountSyncLock(account_id=9901, ttl=60)
+
+    acq1 = await lock1.acquire()
+    assert acq1 is True
+
+    # Overlapping attempt on same account must fail to acquire
+    acq2 = await lock2.acquire()
+    assert acq2 is False
+
+    # Independent account acquires without issue
+    lock_other = AccountSyncLock(account_id=9902, ttl=60)
+    acq_other = await lock_other.acquire()
+    assert acq_other is True
+    await lock_other.release()
+
+    # Release lock1
+    await lock1.release()
+
+    # Now lock2 can acquire
+    acq2_retry = await lock2.acquire()
+    assert acq2_retry is True
+    await lock2.release()
+
+
+@pytest.mark.asyncio
+async def test_17_overlapping_sync_task_returns_locked_status():
+    """17. Verify _async_sync_email_account gracefully skips execution when lock is held."""
+    from app.workers.tasks import AccountSyncLock, _async_sync_email_account
+    test_acc_id = 9903
+    held_lock = AccountSyncLock(account_id=test_acc_id, ttl=60)
+    assert await held_lock.acquire() is True
+
+    try:
+        result = await _async_sync_email_account(account_id=test_acc_id)
+        assert result["status"] == "LOCKED"
+        assert result["account_id"] == test_acc_id
+        assert "already held" in result["message"]
+    finally:
+        await held_lock.release()

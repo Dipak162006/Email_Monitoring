@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   PenTool,
@@ -9,6 +9,7 @@ import {
   X,
 } from "lucide-react";
 import { signaturesApi, emailAccountsApi } from "../services/api";
+import { useWorkspace } from "../hooks/useWorkspace";
 import type {
   AuthorizedEmailAccount,
   EmailSignatureCreatePayload,
@@ -23,11 +24,18 @@ import { ErrorState } from "../components/ui/ErrorState";
 
 export function SignaturesPage() {
   const queryClient = useQueryClient();
+  const { currentCompanyId } = useWorkspace();
 
   // Filters State
   const [searchQuery, setSearchQuery] = useState("");
   const [accountFilter, setAccountFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+
+  // Reset account filter when workspace changes
+  useEffect(() => {
+    setAccountFilter("all");
+    setSearchQuery("");
+  }, [currentCompanyId]);
 
   // Drawer & Modal State
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -43,12 +51,17 @@ export function SignaturesPage() {
     }, 4000);
   };
 
-  // 1. Fetch Authorized Email Accounts
-  const { data: accounts = [] } = useQuery({
+  // 1. Fetch Authorized Email Accounts (scoped to active company)
+  const { data: rawAccounts = [] } = useQuery({
     queryKey: ["authorizedEmailAccounts"],
     queryFn: () => emailAccountsApi.getAuthorizedAccounts(),
     staleTime: 60000,
   });
+
+  const accounts = useMemo(() => {
+    if (!currentCompanyId) return [];
+    return rawAccounts.filter((acc) => acc.company_id === currentCompanyId);
+  }, [rawAccounts, currentCompanyId]);
 
   const accountMap = useMemo(() => {
     const map = new Map<number, string>();
@@ -58,7 +71,7 @@ export function SignaturesPage() {
     return map;
   }, [accounts]);
 
-  // 2. Fetch Signatures
+  // 2. Fetch Signatures (strictly scoped to active workspace)
   const {
     data: signatures = [],
     isLoading,
@@ -66,8 +79,9 @@ export function SignaturesPage() {
     error,
     refetch,
   } = useQuery({
-    queryKey: ["signatures"],
-    queryFn: () => signaturesApi.listSignatures(),
+    queryKey: ["signatures", currentCompanyId],
+    queryFn: () => signaturesApi.listSignatures(undefined, currentCompanyId ?? undefined),
+    enabled: !!currentCompanyId,
   });
 
   // Mutations

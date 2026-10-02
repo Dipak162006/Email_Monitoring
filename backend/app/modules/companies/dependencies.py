@@ -16,11 +16,18 @@ async def get_company_membership(
     
     Returns the CompanyUser membership object.
     Raises:
-        HTTPException 404: If the company does not exist.
-        HTTPException 403: If the user is not a member or the company is inactive.
+        HTTPException 404: If the company does not exist or the user is not a member.
+        HTTPException 403: If the company is inactive for an existing member.
     """
     company = await CompanyService.get_company(db, company_id)
     if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Company not found",
+        )
+
+    membership = await CompanyService.get_user_membership(db, company_id, current_user.id)
+    if not membership:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Company not found",
@@ -30,13 +37,6 @@ async def get_company_membership(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Company is inactive",
-        )
-
-    membership = await CompanyService.get_user_membership(db, company_id, current_user.id)
-    if not membership:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have access to this company",
         )
 
     return membership

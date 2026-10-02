@@ -101,9 +101,10 @@ export function TemplatesPage() {
   // Toggle active status mutation
   const toggleActiveMutation = useMutation({
     mutationFn: (tpl: EmailTemplateItem) =>
-      templatesApi.toggleTemplateActive(tpl.id, !tpl.is_active),
+      templatesApi.toggleTemplateActive(tpl.id, !tpl.is_active, currentCompanyId ?? undefined),
     onSuccess: (updated) => {
-      queryClient.invalidateQueries({ queryKey: ["templates"], refetchType: "all" });
+      queryClient.invalidateQueries({ queryKey: ["templates", currentCompanyId] });
+      queryClient.invalidateQueries({ queryKey: ["templates"] });
       showToast(updated.is_active ? "Template activated" : "Template deactivated");
     },
     onError: (err: any) => {
@@ -115,9 +116,10 @@ export function TemplatesPage() {
 
   // Delete template mutation
   const deleteMutation = useMutation({
-    mutationFn: (id: number) => templatesApi.deleteTemplate(id),
+    mutationFn: (id: number) => templatesApi.deleteTemplate(id, currentCompanyId ?? undefined),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["templates"], refetchType: "all" });
+      queryClient.invalidateQueries({ queryKey: ["templates", currentCompanyId] });
+      queryClient.invalidateQueries({ queryKey: ["templates"] });
       setIsDeleteModalOpen(false);
       const name = templateToDelete?.name || "Template";
       setTemplateToDelete(null);

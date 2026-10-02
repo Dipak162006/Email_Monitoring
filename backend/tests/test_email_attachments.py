@@ -1259,3 +1259,233 @@ async def test_25_direct_send_with_threading_and_attachment(async_client: AsyncC
         assert len(attachments) == 1
         assert attachments[0].get_filename() == "followup.pdf"
 
+
+# =============================================================================
+# 7. Resource ID Enumeration Mitigation Regression Tests (FINDING-04)
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_attachment_resource_id_enumeration_mitigation(async_client: AsyncClient):
+    """Regression test for FINDING-04:
+    Compares:
+    1. A nonexistent attachment ID -> 404 Not Found ('Attachment not found.')
+    2. An existing attachment ID belonging to another company -> 404 Not Found ('Attachment not found.')
+       (indistinguishable from nonexistent)
+    3. An existing attachment in same company for an account user cannot access -> 403 Forbidden
+    4. Normal access by an authorized user -> 200 OK
+    """
+    # Setup Company A and Account A1 (restricted)
+    token_a = await register_and_login(async_client, "owner_enum_att_a@test.com")
+    comp_a_id = await create_company_helper(async_client, token_a, "Co Enum Att A")
+    acc_a1_id = await create_account_helper(async_client, token_a, comp_a_id, email="support_a1@test.com")
+
+    # Account A2 (accessible to employee User C)
+    acc_a2_id = await create_account_helper(async_client, token_a, comp_a_id, email="sales_a2@test.com")
+
+    # User C is added to Company A as MEMBER, granted access ONLY to Account A2
+    token_c = await register_and_login(async_client, "member_enum_att_c@test.com")
+    user_c_id = await add_company_member_helper(async_client, token_a, comp_a_id, "member_enum_att_c@test.com", role="MEMBER")
+    await grant_account_access_helper(async_client, token_a, comp_a_id, acc_a2_id, user_c_id)
+
+    # Owner A creates draft on Account A1 and uploads attachment
+    draft_a = (await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"email_account_id": acc_a1_id, "subject": "Classified Draft"},
+    )).json()["id"]
+
+    file_bytes = b"Sensitive company data for enumeration test"
+    upload_resp = await async_client.post(
+        f"/api/v1/emails/drafts/{draft_a}/attachments",
+        headers={"Authorization": f"Bearer {token_a}"},
+        files={"file": ("secret.pdf", io.BytesIO(file_bytes), "application/pdf")},
+    )
+    assert upload_resp.status_code == 201
+    att_a_id = upload_resp.json()["id"]
+
+    # Setup Company B and User B (outsider / foreign company)
+    token_b = await register_and_login(async_client, "owner_enum_att_b@test.com")
+    comp_b_id = await create_company_helper(async_client, token_b, "Co Enum Att B")
+    await create_account_helper(async_client, token_b, comp_b_id, email="info_b@test.com")
+
+    # -------------------------------------------------------------------------
+    # 1. Nonexistent attachment ID (tested via global download endpoint)
+    # -------------------------------------------------------------------------
+    nonexistent_download_resp = await async_client.get(
+        "/api/v1/attachments/999999/download",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert nonexistent_download_resp.status_code == 404
+    assert nonexistent_download_resp.json() == {"detail": "Attachment not found."}
+
+    nonexistent_meta_resp = await async_client.get(
+        f"/api/v1/emails/{draft_a}/attachments/999999",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert nonexistent_meta_resp.status_code == 404
+    assert nonexistent_meta_resp.json() == {"detail": "Attachment not found."}
+
+    # -------------------------------------------------------------------------
+    # 2. Existing resource ID belonging to another company (User B probing Att A)
+    # -------------------------------------------------------------------------
+    cross_company_download_resp = await async_client.get(
+        f"/api/v1/attachments/{att_a_id}/download",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert cross_company_download_resp.status_code == 404
+    assert cross_company_download_resp.json() == {"detail": "Attachment not found."}
+
+    cross_company_meta_resp = await async_client.get(
+        f"/api/v1/emails/{draft_a}/attachments/{att_a_id}",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert cross_company_meta_resp.status_code == 404
+    assert cross_company_meta_resp.json() == {"detail": "Attachment not found."}
+
+    # CRITICAL VERIFICATION: Nonexistent and cross-company responses are INDISTINGUISHABLE
+    assert nonexistent_download_resp.status_code == cross_company_download_resp.status_code == 404
+    assert nonexistent_download_resp.json() == cross_company_download_resp.json()
+    assert nonexistent_meta_resp.status_code == cross_company_meta_resp.status_code == 404
+    assert nonexistent_meta_resp.json() == cross_company_meta_resp.json()
+
+    # -------------------------------------------------------------------------
+    # 3. Existing attachment for an account the current user cannot access (User C)
+    # -------------------------------------------------------------------------
+    # User C is in Company A, but lacks access to Account A1 -> MUST return 403 Forbidden
+    unauthorized_account_resp = await async_client.get(
+        f"/api/v1/emails/{draft_a}/attachments/{att_a_id}/download",
+        headers={"Authorization": f"Bearer {token_c}"},
+    )
+    assert unauthorized_account_resp.status_code == 403
+    assert "permission to access" in unauthorized_account_resp.json()["detail"].lower()
+
+    # -------------------------------------------------------------------------
+    # 4. Normal access by an authorized user (User A)
+    # -------------------------------------------------------------------------
+    auth_download_resp = await async_client.get(
+        f"/api/v1/emails/{draft_a}/attachments/{att_a_id}/download",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert auth_download_resp.status_code == 200
+    assert auth_download_resp.content == file_bytes
+
+    auth_meta_resp = await async_client.get(
+        f"/api/v1/emails/{draft_a}/attachments/{att_a_id}",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert auth_meta_resp.status_code == 200
+    assert auth_meta_resp.json()["id"] == att_a_id
+    assert auth_meta_resp.json()["file_name"] == "secret.pdf"
+
+    # Cleanup disk storage
+    attachment_storage_service.delete_file_sync(upload_resp.json().get("storage_path", f"{comp_a_id}/{acc_a1_id}/{att_a_id}_secret.pdf"))
+
+
+# =============================================================================
+# 8. Attachment Storage Cleanup Regression Tests (FINDING-08)
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_attachment_cleanup_on_account_deletion(async_client: AsyncClient, db_session: AsyncSession):
+    """Verify that deleting an email account cleans up physical attachment files on disk."""
+    token = await register_and_login(async_client, "owner_cleanup_acc@test.com")
+    comp_id = await create_company_helper(async_client, token, "Co Cleanup Acc")
+    acc_id = await create_account_helper(async_client, token, comp_id, email="cleanup_acc@test.com")
+
+    # Create draft and upload attachment
+    draft_id = (await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email_account_id": acc_id},
+    )).json()["id"]
+
+    file_content = b"Content to be deleted on account deletion"
+    up_resp = await async_client.post(
+        f"/api/v1/emails/drafts/{draft_id}/attachments",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("to_clean.pdf", io.BytesIO(file_content), "application/pdf")},
+    )
+    assert up_resp.status_code == 201
+    att_id = up_resp.json()["id"]
+
+    att_record = (await db_session.execute(select(EmailAttachment).where(EmailAttachment.id == att_id))).scalars().first()
+    storage_path = att_record.storage_path
+    disk_path = attachment_storage_service.resolve_storage_path(storage_path)
+    assert disk_path.exists()
+
+    # Delete email account
+    del_acc_resp = await async_client.delete(
+        f"/api/v1/companies/{comp_id}/email-accounts/{acc_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert del_acc_resp.status_code == 204
+
+    # Verify physical file was removed from disk
+    assert not disk_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_attachment_cleanup_preserves_retained_referenced_files(async_client: AsyncClient, db_session: AsyncSession):
+    """Verify that deleting an attachment does not delete the physical file if another record references it."""
+    token = await register_and_login(async_client, "owner_cleanup_retain@test.com")
+    comp_id = await create_company_helper(async_client, token, "Co Cleanup Retain")
+    acc_id = await create_account_helper(async_client, token, comp_id, email="retain_acc@test.com")
+
+    draft1_id = (await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email_account_id": acc_id},
+    )).json()["id"]
+
+    draft2_id = (await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email_account_id": acc_id},
+    )).json()["id"]
+
+    up_resp = await async_client.post(
+        f"/api/v1/emails/drafts/{draft1_id}/attachments",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("shared.pdf", io.BytesIO(b"Shared payload"), "application/pdf")},
+    )
+    att1_id = up_resp.json()["id"]
+
+    att1_record = (await db_session.execute(select(EmailAttachment).where(EmailAttachment.id == att1_id))).scalars().first()
+    storage_path = att1_record.storage_path
+    disk_path = attachment_storage_service.resolve_storage_path(storage_path)
+    assert disk_path.exists()
+
+    # Create second DB record pointing to identical storage_path on draft2
+    att2 = EmailAttachment(
+        company_id=comp_id,
+        email_account_id=acc_id,
+        email_id=draft2_id,
+        file_name="shared_clone.pdf",
+        content_type="application/pdf",
+        file_size=len(b"Shared payload"),
+        storage_path=storage_path,
+    )
+    db_session.add(att2)
+    await db_session.commit()
+    await db_session.refresh(att2)
+
+    # Delete first attachment
+    del_att1 = await async_client.delete(
+        f"/api/v1/emails/drafts/{draft1_id}/attachments/{att1_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert del_att1.status_code == 204
+
+    # File MUST still exist because att2 still references it
+    assert disk_path.exists()
+
+    # Delete second attachment
+    del_att2 = await async_client.delete(
+        f"/api/v1/emails/drafts/{draft2_id}/attachments/{att2.id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert del_att2.status_code == 204
+
+    # Now with all references gone, file MUST be deleted from disk
+    assert not disk_path.exists()
+

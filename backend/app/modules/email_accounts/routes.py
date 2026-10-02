@@ -134,8 +134,15 @@ async def delete_email_account(
             detail="Email account not found in this company",
         )
 
+    from app.modules.emails.attachment_service import AttachmentService
+    # Collect candidate storage paths prior to account deletion
+    candidate_paths = await AttachmentService.get_account_attachment_paths(db, account_id)
+
     await db.delete(account)
     await db.commit()
+
+    # Clean up physical files on disk only after database deletion succeeds
+    await AttachmentService.cleanup_unreferenced_storage_paths(db, candidate_paths)
     return None
 
 
@@ -147,11 +154,11 @@ async def delete_email_account(
     "/companies/{company_id}/email-accounts-access",
     response_model=List[EmailAccountAccessRead],
     status_code=status.HTTP_200_OK,
-    summary="List all email account access permissions for a company",
+    summary="List all email account access permissions for a company (Admin/Owner only)",
 )
 async def list_company_email_accounts_access(
     company_id: int,
-    membership: CompanyUser = Depends(get_company_membership),
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
     db: AsyncSession = Depends(get_db),
 ) -> List[EmailAccountAccessRead]:
     """List all explicit user access permissions across all email accounts in this company."""

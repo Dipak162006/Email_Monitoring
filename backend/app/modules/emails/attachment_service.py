@@ -41,7 +41,19 @@ class AttachmentService:
         if company_id is not None and draft.company_id != company_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Draft does not belong to the specified company.",
+                detail="Draft not found.",
+            )
+
+        # 1. Authorization: verify company membership first so foreign users cannot enumerate drafts or status
+        membership = await CompanyService.get_user_membership(
+            db=db,
+            company_id=draft.company_id,
+            user_id=current_user.id,
+        )
+        if not membership:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Draft not found.",
             )
 
         if draft.is_deleted:
@@ -54,18 +66,6 @@ class AttachmentService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Cannot add attachments to an email with status '{draft.status}'. Only DRAFT emails support adding attachments.",
-            )
-
-        # 1. Authorization: Company membership & EmailAccount access
-        membership = await CompanyService.get_user_membership(
-            db=db,
-            company_id=draft.company_id,
-            user_id=current_user.id,
-        )
-        if not membership:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not belong to the company that owns this draft.",
             )
 
         account = await EmailAccountService.get_email_account(db, draft.email_account_id)
@@ -224,25 +224,20 @@ class AttachmentService:
     ) -> Tuple[List[EmailAttachment], int]:
         """List all attachments for an authorized email message (draft, sent, or received)."""
         email = await db.get(Email, email_id)
+        not_found_detail = "Draft not found." if require_draft else "Email not found."
         if not email:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Email not found.",
+                detail=not_found_detail,
             )
 
         if company_id is not None and email.company_id != company_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Email does not belong to the specified company.",
+                detail=not_found_detail,
             )
 
-        if require_draft and email.status != EmailStatus.DRAFT.value:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Specified email is not a draft.",
-            )
-
-        # Verify access
+        # Verify access before revealing email status
         membership = await CompanyService.get_user_membership(
             db=db,
             company_id=email.company_id,
@@ -250,8 +245,14 @@ class AttachmentService:
         )
         if not membership:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not belong to the company that owns this email.",
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=not_found_detail,
+            )
+
+        if require_draft and email.status != EmailStatus.DRAFT.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Specified email is not a draft.",
             )
 
         account = await EmailAccountService.get_email_account(db, email.email_account_id)
@@ -298,16 +299,16 @@ class AttachmentService:
         if email_id is not None and attachment.email_id != email_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Attachment does not belong to the specified email.",
+                detail="Attachment not found.",
             )
 
         if company_id is not None and attachment.company_id != company_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Attachment does not belong to the specified company.",
+                detail="Attachment not found.",
             )
 
-        # Verify authorization
+        # Verify authorization: return uniform 404 for cross-company requests to prevent ID enumeration
         membership = await CompanyService.get_user_membership(
             db=db,
             company_id=attachment.company_id,
@@ -315,8 +316,8 @@ class AttachmentService:
         )
         if not membership:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not belong to the company that owns this attachment.",
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Attachment not found.",
             )
 
         account = await EmailAccountService.get_email_account(db, attachment.email_account_id)
@@ -390,7 +391,19 @@ class AttachmentService:
         if company_id is not None and draft.company_id != company_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Draft does not belong to the specified company.",
+                detail="Draft not found.",
+            )
+
+        # Check membership before draft status check to prevent draft enumeration
+        membership = await CompanyService.get_user_membership(
+            db=db,
+            company_id=draft.company_id,
+            user_id=current_user.id,
+        )
+        if not membership:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Draft not found.",
             )
 
         if draft.is_deleted:
@@ -417,8 +430,15 @@ class AttachmentService:
         await db.delete(attachment)
         await db.commit()
 
-        # Delete physical file from disk
-        await AttachmentStorageService.delete_file(storage_path)
+        # Delete physical file from disk if no other record references it
+        ref_stmt = select(func.count(EmailAttachment.id)).where(EmailAttachment.storage_path == storage_path)
+        ref_count = (await db.execute(ref_stmt)).scalar() or 0
+        if ref_count == 0:
+            if not await AttachmentStorageService.delete_file(storage_path):
+                logger.warning("Physical file deletion failed or file missing for path: %s", storage_path)
+        else:
+            logger.info("Retaining physical file %s: referenced by %d other record(s)", storage_path, ref_count)
+
         logger.info(
             "Deleted attachment id=%d from draft id=%d by user id=%d",
             attachment_id,
@@ -427,19 +447,105 @@ class AttachmentService:
         )
 
     @classmethod
+    async def get_email_attachment_paths(
+        cls,
+        db: AsyncSession,
+        email_id: int,
+    ) -> List[str]:
+        """Collect unique storage paths of all attachments belonging to an email."""
+        stmt = select(EmailAttachment.storage_path).where(EmailAttachment.email_id == email_id)
+        res = await db.execute(stmt)
+        return list(set(res.scalars().all()))
+
+    @classmethod
+    async def get_account_attachment_paths(
+        cls,
+        db: AsyncSession,
+        account_id: int,
+    ) -> List[str]:
+        """Collect unique storage paths of all attachments belonging to an email account."""
+        stmt = select(EmailAttachment.storage_path).where(EmailAttachment.email_account_id == account_id)
+        res = await db.execute(stmt)
+        return list(set(res.scalars().all()))
+
+    @classmethod
+    async def cleanup_unreferenced_storage_paths(
+        cls,
+        db: AsyncSession,
+        storage_paths: Sequence[str],
+    ) -> int:
+        """Clean up physical storage files for paths that are no longer referenced by any
+        EmailAttachment record in the database.
+        
+        This MUST be invoked post-commit to ensure physical files are never deleted
+        before database changes are safely committed.
+        """
+        cleaned_count = 0
+        for sp in set(storage_paths):
+            ref_stmt = select(func.count(EmailAttachment.id)).where(EmailAttachment.storage_path == sp)
+            refs = (await db.execute(ref_stmt)).scalar() or 0
+            if refs == 0:
+                if await AttachmentStorageService.delete_file(sp):
+                    cleaned_count += 1
+                else:
+                    logger.warning("Could not delete physical file for unreferenced path: %s", sp)
+            else:
+                logger.info("Retaining physical file %s: referenced by %d other record(s)", sp, refs)
+        return cleaned_count
+
+    @classmethod
     async def cleanup_attachments_for_email(
         cls,
         db: AsyncSession,
         email_id: int,
     ) -> int:
-        """Clean up physical storage files when an email or draft is permanently deleted."""
+        """Clean up physical storage files when an email or draft is permanently deleted,
+        ensuring retained files referenced elsewhere are preserved.
+        """
         stmt = select(EmailAttachment).where(EmailAttachment.email_id == email_id)
         res = await db.execute(stmt)
         attachments = res.scalars().all()
         cleaned_count = 0
         for att in attachments:
-            if await AttachmentStorageService.delete_file(att.storage_path):
-                cleaned_count += 1
+            ref_stmt = select(func.count(EmailAttachment.id)).where(
+                EmailAttachment.storage_path == att.storage_path,
+                EmailAttachment.email_id != email_id,
+            )
+            other_refs = (await db.execute(ref_stmt)).scalar() or 0
+            if other_refs == 0:
+                if await AttachmentStorageService.delete_file(att.storage_path):
+                    cleaned_count += 1
+                else:
+                    logger.warning("Could not delete physical file for storage_path: %s", att.storage_path)
+            else:
+                logger.info("Retaining physical file %s: referenced by %d other record(s)", att.storage_path, other_refs)
+        return cleaned_count
+
+    @classmethod
+    async def cleanup_attachments_for_account(
+        cls,
+        db: AsyncSession,
+        account_id: int,
+    ) -> int:
+        """Clean up physical storage files when an email account is deleted."""
+        stmt = select(EmailAttachment.storage_path).where(EmailAttachment.email_account_id == account_id)
+        res = await db.execute(stmt)
+        storage_paths = set(res.scalars().all())
+
+        cleaned_count = 0
+        for sp in storage_paths:
+            ref_stmt = select(func.count(EmailAttachment.id)).where(
+                EmailAttachment.storage_path == sp,
+                EmailAttachment.email_account_id != account_id,
+            )
+            other_refs = (await db.execute(ref_stmt)).scalar() or 0
+            if other_refs == 0:
+                if await AttachmentStorageService.delete_file(sp):
+                    cleaned_count += 1
+                else:
+                    logger.warning("Could not delete physical file for storage_path: %s", sp)
+            else:
+                logger.info("Retaining physical file %s: referenced by %d other record(s)", sp, other_refs)
         return cleaned_count
 
     @classmethod
@@ -497,12 +603,15 @@ class AttachmentService:
         # Deduplicate while preserving order
         unique_ids = list(dict.fromkeys(attachment_ids))
 
-        # Query all matching records
-        stmt = select(EmailAttachment).where(EmailAttachment.id.in_(unique_ids))
+        # Query all matching records belonging to this company
+        stmt = select(EmailAttachment).where(
+            EmailAttachment.id.in_(unique_ids),
+            EmailAttachment.company_id == company_id,
+        )
         res = await db.execute(stmt)
         found = {att.id: att for att in res.scalars().all()}
 
-        # 1. Ensure all requested attachments exist
+        # 1. Ensure all requested attachments exist and belong to this company
         missing_ids = [aid for aid in unique_ids if aid not in found]
         if missing_ids:
             raise HTTPException(
@@ -512,13 +621,8 @@ class AttachmentService:
 
         attachments = [found[aid] for aid in unique_ids]
 
-        # 2. Company and Account ownership check
+        # 2. Account ownership check
         for att in attachments:
-            if att.company_id != company_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Attachment id={att.id} does not belong to company id={company_id}.",
-                )
             if att.email_account_id != account_id:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,

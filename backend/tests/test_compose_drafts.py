@@ -1082,3 +1082,126 @@ async def test_52_to_55_draft_authorization_enforcement(async_client: AsyncClien
     )
     assert grant_edit.status_code == 200
     assert grant_edit.json()["subject"] == "Authorized Colleague Edit"
+
+
+@pytest.mark.asyncio
+async def test_shared_draft_ownership_and_enumeration_mitigation(async_client: AsyncClient):
+    """Regression test for M13 Phase 3 (Shared Draft Ownership & FINDING-04 Enumeration):
+    Verifies:
+    1. Foreign company user querying a draft receives uniform 404 Not Found ('Draft not found.')
+       indistinguishable from a nonexistent draft ID.
+    2. Intra-company member without account access receives 403 Forbidden on read, update, discard, send.
+    3. Authorized account member can collaborate on, edit, and discard the draft.
+    """
+    # 1. Setup Company A and Accounts
+    owner_token = await register_and_login(async_client, "owner_shared_draft@test.com")
+    comp_a_id = await create_company_helper(async_client, owner_token, "Co Shared Draft A")
+    acc_a1_id = await create_account_helper(async_client, owner_token, comp_a_id, email="support_sd@test.com")
+    acc_a2_id = await create_account_helper(async_client, owner_token, comp_a_id, email="billing_sd@test.com")
+
+    # Member without access to Account A1 (granted only Account A2)
+    unauth_member_token = await register_and_login(async_client, "unauth_sd@test.com")
+    unauth_user_id = (await async_client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {unauth_member_token}"})).json()["id"]
+    await async_client.post(
+        f"/api/v1/companies/{comp_a_id}/members",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"email": "unauth_sd@test.com", "role": "MEMBER"},
+    )
+    await async_client.post(
+        f"/api/v1/companies/{comp_a_id}/email-accounts/{acc_a2_id}/access",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"user_id": unauth_user_id},
+    )
+
+    # Colleague WITH access to Account A1
+    colleague_token = await register_and_login(async_client, "colleague_sd@test.com")
+    colleague_user_id = (await async_client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {colleague_token}"})).json()["id"]
+    await async_client.post(
+        f"/api/v1/companies/{comp_a_id}/members",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"email": "colleague_sd@test.com", "role": "MEMBER"},
+    )
+    await async_client.post(
+        f"/api/v1/companies/{comp_a_id}/email-accounts/{acc_a1_id}/access",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"user_id": colleague_user_id},
+    )
+
+    # Foreign user (Company B)
+    foreign_token = await register_and_login(async_client, "foreign_sd@test.com")
+    comp_b_id = await create_company_helper(async_client, foreign_token, "Co Shared Draft B")
+
+    # Owner creates draft on Account A1
+    draft_id = (await async_client.post(
+        "/api/v1/emails/drafts",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"email_account_id": acc_a1_id, "subject": "Initial Support Response", "body_text": "Hi customer,"},
+    )).json()["id"]
+
+    # -------------------------------------------------------------------------
+    # Test 1: Enumeration Mitigation (Nonexistent vs Foreign Draft)
+    # -------------------------------------------------------------------------
+    nonexistent_resp = await async_client.get(
+        "/api/v1/emails/drafts/999999",
+        headers={"Authorization": f"Bearer {foreign_token}"},
+    )
+    assert nonexistent_resp.status_code == 404
+    assert nonexistent_resp.json() == {"detail": "Draft not found."}
+
+    foreign_resp = await async_client.get(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {foreign_token}"},
+    )
+    assert foreign_resp.status_code == 404
+    assert foreign_resp.json() == {"detail": "Draft not found."}
+
+    # Responses must be completely indistinguishable
+    assert nonexistent_resp.status_code == foreign_resp.status_code == 404
+    assert nonexistent_resp.json() == foreign_resp.json()
+
+    # -------------------------------------------------------------------------
+    # Test 2: Intra-company Member WITHOUT Account Access -> 403 Forbidden
+    # -------------------------------------------------------------------------
+    unauth_get = await async_client.get(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {unauth_member_token}"},
+    )
+    assert unauth_get.status_code == 403
+
+    unauth_update = await async_client.put(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {unauth_member_token}"},
+        json={"subject": "Malicious update"},
+    )
+    assert unauth_update.status_code == 403
+
+    unauth_discard = await async_client.delete(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {unauth_member_token}"},
+    )
+    assert unauth_discard.status_code == 403
+
+    # -------------------------------------------------------------------------
+    # Test 3: Authorized Account Colleague (Shared Mailbox) -> Access & Mutate
+    # -------------------------------------------------------------------------
+    colleague_get = await async_client.get(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {colleague_token}"},
+    )
+    assert colleague_get.status_code == 200
+    assert colleague_get.json()["subject"] == "Initial Support Response"
+
+    colleague_update = await async_client.put(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {colleague_token}"},
+        json={"body_text": "Hi customer,\nUpdated by colleague on support team."},
+    )
+    assert colleague_update.status_code == 200
+    assert "Updated by colleague" in colleague_update.json()["body_text"]
+
+    colleague_discard = await async_client.delete(
+        f"/api/v1/emails/drafts/{draft_id}",
+        headers={"Authorization": f"Bearer {colleague_token}"},
+    )
+    assert colleague_discard.status_code == 200
+    assert colleague_discard.json()["is_deleted"] is True

@@ -1555,4 +1555,169 @@ async def test_36_security_sanitization_blocks_malicious_inlined_and_stylesheet_
     assert "src=\"javascript:" not in sanitized.lower()
 
 
+@pytest.mark.asyncio
+async def test_37_company_wide_template_mutations_restricted_to_admin_and_owner(async_client: AsyncClient):
+    """37. Regression test: Creating, updating, toggling, and deleting company-wide templates requires OWNER or ADMIN."""
+    owner_token = await register_and_login(async_client, "tmpl_user_37_owner@test.com")
+    comp_id = await create_company_helper(async_client, owner_token, "Company 37")
+
+    member_token = await register_and_login(async_client, "tmpl_user_37_member@test.com")
+    admin_token = await register_and_login(async_client, "tmpl_user_37_admin@test.com")
+
+    await add_company_member_helper(async_client, owner_token, comp_id, "tmpl_user_37_member@test.com", role="MEMBER")
+    await add_company_member_helper(async_client, owner_token, comp_id, "tmpl_user_37_admin@test.com", role="ADMIN")
+
+    # 1. MEMBER tries to create company-wide template (email_account_id=None) -> 403 Forbidden
+    resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/templates",
+        headers={"Authorization": f"Bearer {member_token}"},
+        json={
+            "name": "Member Company Template",
+            "subject": "Forbidden Subject",
+            "body_text": "Forbidden body",
+            "email_account_id": None,
+        },
+    )
+    assert resp.status_code == 403
+    assert "Owner or Administrator privileges required" in resp.json()["detail"]
+
+    # 2. OWNER can create company-wide template -> 201 Created
+    owner_create_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/templates",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={
+            "name": "Owner Company Template",
+            "subject": "Owner Subject",
+            "body_text": "Owner body",
+            "email_account_id": None,
+        },
+    )
+    assert owner_create_resp.status_code == 201
+    template_id = owner_create_resp.json()["id"]
+
+    # 3. ADMIN can create company-wide template -> 201 Created
+    admin_create_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/templates",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "name": "Admin Company Template",
+            "subject": "Admin Subject",
+            "body_text": "Admin body",
+            "email_account_id": None,
+        },
+    )
+    assert admin_create_resp.status_code == 201
+
+    # 4. MEMBER tries to update company-wide template -> 403 Forbidden
+    member_update_resp = await async_client.put(
+        f"/api/v1/companies/{comp_id}/templates/{template_id}",
+        headers={"Authorization": f"Bearer {member_token}"},
+        json={"name": "Hacked Template Name"},
+    )
+    assert member_update_resp.status_code == 403
+    assert "Owner or Administrator privileges required" in member_update_resp.json()["detail"]
+
+    # 5. ADMIN can update company-wide template -> 200 OK
+    admin_update_resp = await async_client.put(
+        f"/api/v1/companies/{comp_id}/templates/{template_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"name": "Updated by Admin"},
+    )
+    assert admin_update_resp.status_code == 200
+    assert admin_update_resp.json()["name"] == "Updated by Admin"
+
+    # 6. MEMBER tries to toggle active state on company-wide template -> 403 Forbidden
+    member_toggle_resp = await async_client.patch(
+        f"/api/v1/companies/{comp_id}/templates/{template_id}/active",
+        headers={"Authorization": f"Bearer {member_token}"},
+        json={"is_active": False},
+    )
+    assert member_toggle_resp.status_code == 403
+    assert "Owner or Administrator privileges required" in member_toggle_resp.json()["detail"]
+
+    # 7. OWNER can toggle active state -> 200 OK
+    owner_toggle_resp = await async_client.patch(
+        f"/api/v1/companies/{comp_id}/templates/{template_id}/active",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"is_active": False},
+    )
+    assert owner_toggle_resp.status_code == 200
+    assert owner_toggle_resp.json()["is_active"] is False
+
+    # 8. MEMBER tries to delete company-wide template -> 403 Forbidden
+    member_delete_resp = await async_client.delete(
+        f"/api/v1/companies/{comp_id}/templates/{template_id}",
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+    assert member_delete_resp.status_code == 403
+    assert "Owner or Administrator privileges required" in member_delete_resp.json()["detail"]
+
+    # 9. ADMIN can delete company-wide template -> 204 No Content
+    admin_delete_resp = await async_client.delete(
+        f"/api/v1/companies/{comp_id}/templates/{template_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert admin_delete_resp.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_38_member_with_account_access_can_mutate_account_scoped_template(async_client: AsyncClient):
+    """38. Regression test: MEMBER with granted account access can manage account-scoped templates, but not other accounts."""
+    owner_token = await register_and_login(async_client, "tmpl_user_38_owner@test.com")
+    comp_id = await create_company_helper(async_client, owner_token, "Company 38")
+    acc_id_granted = await create_account_helper(async_client, owner_token, comp_id, email="granted38@comp.com")
+    acc_id_denied = await create_account_helper(async_client, owner_token, comp_id, email="denied38@comp.com")
+
+    member_token = await register_and_login(async_client, "tmpl_user_38_member@test.com")
+    member_user_id = await add_company_member_helper(async_client, owner_token, comp_id, "tmpl_user_38_member@test.com", role="MEMBER")
+    await grant_account_access_helper(async_client, owner_token, comp_id, acc_id_granted, member_user_id)
+
+    # Member creates template for granted account -> 201 Created
+    create_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/templates",
+        headers={"Authorization": f"Bearer {member_token}"},
+        json={
+            "name": "Granted Account Template",
+            "subject": "Granted Subject",
+            "body_text": "Granted body",
+            "email_account_id": acc_id_granted,
+        },
+    )
+    assert create_resp.status_code == 201
+    tmpl_id = create_resp.json()["id"]
+
+    # Member updates template -> 200 OK
+    update_resp = await async_client.put(
+        f"/api/v1/companies/{comp_id}/templates/{tmpl_id}",
+        headers={"Authorization": f"Bearer {member_token}"},
+        json={"name": "Updated Granted Template"},
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["name"] == "Updated Granted Template"
+
+    # Member tries to reassign template to denied account -> 403 Forbidden
+    reassign_resp = await async_client.put(
+        f"/api/v1/companies/{comp_id}/templates/{tmpl_id}",
+        headers={"Authorization": f"Bearer {member_token}"},
+        json={"email_account_id": acc_id_denied},
+    )
+    assert reassign_resp.status_code == 403
+
+    # Member toggles active state -> 200 OK
+    toggle_resp = await async_client.patch(
+        f"/api/v1/companies/{comp_id}/templates/{tmpl_id}/active",
+        headers={"Authorization": f"Bearer {member_token}"},
+        json={"is_active": False},
+    )
+    assert toggle_resp.status_code == 200
+
+    # Member deletes template -> 204 No Content
+    del_resp = await async_client.delete(
+        f"/api/v1/companies/{comp_id}/templates/{tmpl_id}",
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+    assert del_resp.status_code == 204
+
+
+
 

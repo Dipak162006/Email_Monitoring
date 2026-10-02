@@ -228,7 +228,7 @@ class EmailDraftService:
         if company_id is not None and draft.company_id != company_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Draft does not belong to the specified company.",
+                detail="Draft not found.",
             )
 
         membership = await CompanyService.get_user_membership(
@@ -238,8 +238,8 @@ class EmailDraftService:
         )
         if not membership:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have access to this draft.",
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Draft not found.",
             )
 
         account = await EmailAccountService.get_email_account(db, draft.email_account_id)
@@ -283,7 +283,19 @@ class EmailDraftService:
         if company_id is not None and draft.company_id != company_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Draft does not belong to the specified company.",
+                detail="Draft not found.",
+            )
+
+        # Check membership first to avoid status leaks across companies
+        membership = await CompanyService.get_user_membership(
+            db=db,
+            company_id=draft.company_id,
+            user_id=current_user.id,
+        )
+        if not membership:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Draft not found.",
             )
 
         if draft.status != EmailStatus.DRAFT.value:
@@ -296,18 +308,6 @@ class EmailDraftService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot edit a deleted draft. Restore it first.",
-            )
-
-        # Check permission on current account
-        membership = await CompanyService.get_user_membership(
-            db=db,
-            company_id=draft.company_id,
-            user_id=current_user.id,
-        )
-        if not membership:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have access to this draft.",
             )
 
         current_account = await EmailAccountService.get_email_account(db, draft.email_account_id)
@@ -474,7 +474,19 @@ class EmailDraftService:
         if company_id is not None and draft.company_id != company_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Draft does not belong to the specified company.",
+                detail="Draft not found.",
+            )
+
+        # Verify company membership before revealing status or deleted state
+        membership = await CompanyService.get_user_membership(
+            db=db,
+            company_id=draft.company_id,
+            user_id=current_user.id,
+        )
+        if not membership:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Draft not found.",
             )
 
         if draft.status != EmailStatus.DRAFT.value:
@@ -487,17 +499,6 @@ class EmailDraftService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Draft is already discarded.",
-            )
-
-        membership = await CompanyService.get_user_membership(
-            db=db,
-            company_id=draft.company_id,
-            user_id=current_user.id,
-        )
-        if not membership:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have access to this draft.",
             )
 
         account = await EmailAccountService.get_email_account(db, draft.email_account_id)
@@ -550,7 +551,19 @@ class EmailDraftService:
         if company_id is not None and draft.company_id != company_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Draft does not belong to the specified company.",
+                detail="Draft not found.",
+            )
+
+        # Verify company access first before status or deleted checks
+        membership = await CompanyService.get_user_membership(
+            db=db,
+            company_id=draft.company_id,
+            user_id=current_user.id,
+        )
+        if not membership:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Draft not found.",
             )
 
         if draft.status == EmailStatus.SENDING.value:
@@ -569,18 +582,6 @@ class EmailDraftService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot send a deleted draft. Restore it first.",
-            )
-
-        # Verify company & account access
-        membership = await CompanyService.get_user_membership(
-            db=db,
-            company_id=draft.company_id,
-            user_id=current_user.id,
-        )
-        if not membership:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not belong to the company that owns this email account.",
             )
 
         account = await EmailAccountService.get_email_account(db, draft.email_account_id)

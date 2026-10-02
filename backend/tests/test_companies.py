@@ -83,7 +83,7 @@ async def test_member_can_retrieve_their_company(async_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_user_cannot_retrieve_unauthorized_company(async_client: AsyncClient):
-    """Test that a user cannot access a company they are not a member of (403 Forbidden)."""
+    """Test that a user cannot access a company they are not a member of (404 Not Found to prevent enumeration)."""
     # User A creates Company 1
     token_a = await register_and_login(async_client, "usera@company.com", "User A")
     resp_a = await async_client.post(
@@ -101,13 +101,58 @@ async def test_user_cannot_retrieve_unauthorized_company(async_client: AsyncClie
         json={"name": "Company Beta"},
     )
 
-    # User B tries to access Company 1
+    # User B tries to access Company 1 -> returns 404 to prevent resource enumeration
     unauthorized_resp = await async_client.get(
         f"/api/v1/companies/{company_1_id}",
         headers={"Authorization": f"Bearer {token_b}"},
     )
-    assert unauthorized_resp.status_code == 403
-    assert unauthorized_resp.json()["detail"] == "You do not have access to this company"
+    assert unauthorized_resp.status_code == 404
+    assert unauthorized_resp.json()["detail"] == "Company not found"
+
+
+@pytest.mark.asyncio
+async def test_company_resource_id_enumeration_mitigation(async_client: AsyncClient):
+    """Regression test for FINDING-04: Nonexistent company ID and cross-company unauthorized ID
+    produce identical HTTP 404 responses to prevent company resource ID enumeration.
+    """
+    token_a = await register_and_login(async_client, "owner_enum_a@test.com")
+    comp_a_resp = await async_client.post(
+        "/api/v1/companies/",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"name": "Company Enum A"},
+    )
+    comp_a_id = comp_a_resp.json()["id"]
+
+    token_b = await register_and_login(async_client, "owner_enum_b@test.com")
+
+    # 1. Nonexistent company ID
+    nonexistent_resp = await async_client.get(
+        "/api/v1/companies/999999",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert nonexistent_resp.status_code == 404
+    assert nonexistent_resp.json() == {"detail": "Company not found"}
+
+    # 2. Existing company belonging to another user (User A)
+    cross_company_resp = await async_client.get(
+        f"/api/v1/companies/{comp_a_id}",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert cross_company_resp.status_code == 404
+    assert cross_company_resp.json() == {"detail": "Company not found"}
+
+    # Responses are completely indistinguishable
+    assert nonexistent_resp.status_code == cross_company_resp.status_code
+    assert nonexistent_resp.json() == cross_company_resp.json()
+
+    # 3. Authorized user accessing their own company
+    authorized_resp = await async_client.get(
+        f"/api/v1/companies/{comp_a_id}",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert authorized_resp.status_code == 200
+    assert authorized_resp.json()["id"] == comp_a_id
+    assert authorized_resp.json()["name"] == "Company Enum A"
 
 
 @pytest.mark.asyncio
@@ -473,7 +518,7 @@ async def test_invitation_lifecycle_and_authorization(async_client: AsyncClient,
         headers={"Authorization": f"Bearer {token_outsider}"},
         json={"email": "random@test.com", "role": "MEMBER"},
     )
-    assert outsider_invite.status_code == 403
+    assert outsider_invite.status_code in (403, 404)
 
     # 8. Check my-pending invitations
     # Invitee 1 sees inv1

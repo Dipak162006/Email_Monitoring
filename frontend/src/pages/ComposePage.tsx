@@ -1063,6 +1063,7 @@ export function ComposePage() {
         onSelectTemplate={handleSelectTemplate}
         hasExistingContent={Boolean(subject.trim() || bodyText.trim())}
         selectedAccountId={selectedAccountId}
+        companyId={currentCompanyId}
       />
 
       <SignatureModal

@@ -96,58 +96,122 @@ def is_retryable_exception(exc: Exception) -> bool:
     return False
 
 
+import uuid
+from app.core.redis import get_redis_client
+
+
+class AccountSyncLock:
+    """Distributed lock ensuring that only one synchronization task runs
+    per email account at a time across all Celery workers.
+    """
+    LOCK_PREFIX = "lock:email_sync:"
+    RELEASE_SCRIPT = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        else
+            return 0
+        end
+    """
+
+    def __init__(self, account_id: int, ttl: int = 300):
+        self.account_id = account_id
+        self.ttl = ttl
+        self.lock_key = f"{self.LOCK_PREFIX}{account_id}"
+        self.token = str(uuid.uuid4())
+        self._acquired = False
+
+    async def acquire(self) -> bool:
+        """Attempt to acquire the lock with NX and EX."""
+        try:
+            client = get_redis_client()
+            acquired = await client.set(self.lock_key, self.token, nx=True, ex=self.ttl)
+            self._acquired = bool(acquired)
+            return self._acquired
+        except Exception as exc:
+            logger.warning("Redis error acquiring sync lock for account %d: %s", self.account_id, exc)
+            return True
+
+    async def release(self) -> None:
+        """Atomically release the lock only if the token matches."""
+        if not self._acquired:
+            return
+        try:
+            client = get_redis_client()
+            await client.eval(self.RELEASE_SCRIPT, 1, self.lock_key, self.token)
+        except Exception as exc:
+            logger.warning("Redis error releasing sync lock for account %d: %s", self.account_id, exc)
+        finally:
+            self._acquired = False
+
+
 async def _async_sync_email_account(
     account_id: int,
     folder: str = "INBOX",
     max_messages: int = 50,
 ) -> Dict[str, Any]:
     """Asynchronous core of the single-account synchronization task."""
-    async with get_worker_db() as db:
-        # 1. Load EmailAccount from DB
-        stmt = select(EmailAccount).where(EmailAccount.id == account_id)
-        result = await db.execute(stmt)
-        account = result.scalars().first()
-
-        if not account:
-            logger.warning("Email account %d not found in database. Skipping background sync.", account_id)
-            return {
-                "status": "NOT_FOUND",
-                "account_id": account_id,
-                "error": "Email account not found.",
-            }
-
-        if not account.is_active:
-            logger.info("Email account %d is inactive. Skipping background sync.", account_id)
-            return {
-                "status": "INACTIVE",
-                "account_id": account_id,
-                "message": "Email account is inactive.",
-            }
-
-        if not account.imap_host:
-            logger.warning("Email account %d has no IMAP host configured.", account_id)
-            raise IMAPConfigurationError("Email account does not have an IMAP host configured.")
-
-        # 2. Delegate to existing EmailSyncService
-        sync_service = EmailSyncService()
-        sync_result = await sync_service.sync_mailbox(
-            db=db,
-            account=account,
-            folder=folder,
-            max_messages=max_messages,
+    lock = AccountSyncLock(account_id=account_id)
+    acquired = await lock.acquire()
+    if not acquired:
+        logger.warning(
+            "Sync lock for account %d is already held by another worker. Skipping overlapping execution.",
+            account_id,
         )
-
         return {
-            "status": sync_result.status,
-            "account_id": account.id,
-            "folder": sync_result.folder,
-            "total_discovered": sync_result.total_discovered,
-            "new_messages": sync_result.new_messages,
-            "duplicates_skipped": sync_result.duplicates_skipped,
-            "malformed_skipped": sync_result.malformed_skipped,
-            "synced_at": sync_result.synced_at.isoformat() if sync_result.synced_at else None,
-            "error_message": sync_result.error_message,
+            "status": "LOCKED",
+            "account_id": account_id,
+            "message": f"Sync lock for account {account_id} is already held. Skipping overlapping execution.",
         }
+
+    try:
+        async with get_worker_db() as db:
+            # 1. Load EmailAccount from DB
+            stmt = select(EmailAccount).where(EmailAccount.id == account_id)
+            result = await db.execute(stmt)
+            account = result.scalars().first()
+
+            if not account:
+                logger.warning("Email account %d not found in database. Skipping background sync.", account_id)
+                return {
+                    "status": "NOT_FOUND",
+                    "account_id": account_id,
+                    "error": "Email account not found.",
+                }
+
+            if not account.is_active:
+                logger.info("Email account %d is inactive. Skipping background sync.", account_id)
+                return {
+                    "status": "INACTIVE",
+                    "account_id": account_id,
+                    "message": "Email account is inactive.",
+                }
+
+            if not account.imap_host:
+                logger.warning("Email account %d has no IMAP host configured.", account_id)
+                raise IMAPConfigurationError("Email account does not have an IMAP host configured.")
+
+            # 2. Delegate to existing EmailSyncService
+            sync_service = EmailSyncService()
+            sync_result = await sync_service.sync_mailbox(
+                db=db,
+                account=account,
+                folder=folder,
+                max_messages=max_messages,
+            )
+
+            return {
+                "status": sync_result.status,
+                "account_id": account.id,
+                "folder": sync_result.folder,
+                "total_discovered": sync_result.total_discovered,
+                "new_messages": sync_result.new_messages,
+                "duplicates_skipped": sync_result.duplicates_skipped,
+                "malformed_skipped": sync_result.malformed_skipped,
+                "synced_at": sync_result.synced_at.isoformat() if sync_result.synced_at else None,
+                "error_message": sync_result.error_message,
+            }
+    finally:
+        await lock.release()
 
 
 @celery_app.task(

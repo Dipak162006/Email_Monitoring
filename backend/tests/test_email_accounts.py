@@ -102,14 +102,14 @@ async def test_unauthorized_user_cannot_access_company_email_accounts(async_clie
         },
     )
 
-    # User B (from Company B) tries to access Company A's email accounts
+    # User B (from Company B) tries to access Company A's email accounts -> 404 Not Found to prevent enumeration
     token_b = await register_and_login(async_client, "owner_b@company.com")
     resp = await async_client.get(
         f"/api/v1/companies/{company_a_id}/email-accounts",
         headers={"Authorization": f"Bearer {token_b}"},
     )
-    assert resp.status_code == 403
-    assert resp.json()["detail"] == "You do not have access to this company"
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Company not found"
 
 
 @pytest.mark.asyncio
@@ -280,3 +280,69 @@ async def test_list_all_authorized_email_accounts(async_client: AsyncClient):
     names = [a["name"] for a in accounts]
     assert "C1 Email" in names
     assert "C2 Email" in names
+
+
+@pytest.mark.asyncio
+async def test_company_email_accounts_access_role_enforcement(async_client: AsyncClient):
+    """Test that GET /companies/{company_id}/email-accounts-access allows OWNER and ADMIN but rejects MEMBER."""
+    token_owner = await register_and_login(async_client, "owner_access_test@comp.com", "Owner User")
+    company_id = await create_company_helper(async_client, token_owner, "Access Test Corp")
+
+    # Create an email account
+    acc_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/email-accounts",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "Support", "email_address": "support@accesstest.com", "provider": "CUSTOM"},
+    )
+    assert acc_resp.status_code == 201
+    account_id = acc_resp.json()["id"]
+
+    # Register member and admin
+    token_member = await register_and_login(async_client, "member_access_test@comp.com", "Member User")
+    token_admin = await register_and_login(async_client, "admin_access_test@comp.com", "Admin User")
+
+    # Add member and admin to company
+    await async_client.post(
+        f"/api/v1/companies/{company_id}/members",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "member_access_test@comp.com", "role": "MEMBER"},
+    )
+    await async_client.post(
+        f"/api/v1/companies/{company_id}/members",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "admin_access_test@comp.com", "role": "ADMIN"},
+    )
+
+    # Get member's user id and grant access to the account
+    member_me = (await async_client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token_member}"})).json()
+    await async_client.post(
+        f"/api/v1/companies/{company_id}/email-accounts/{account_id}/access",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"user_id": member_me["id"]},
+    )
+
+    # 1. MEMBER receives 403 Forbidden
+    member_resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/email-accounts-access",
+        headers={"Authorization": f"Bearer {token_member}"},
+    )
+    assert member_resp.status_code == 403
+    assert "Owner or Administrator privileges required" in member_resp.json()["detail"]
+
+    # 2. OWNER receives 200 OK
+    owner_resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/email-accounts-access",
+        headers={"Authorization": f"Bearer {token_owner}"},
+    )
+    assert owner_resp.status_code == 200
+    records = owner_resp.json()
+    assert len(records) >= 1
+    assert any(r["user_id"] == member_me["id"] and r["email_account_id"] == account_id for r in records)
+
+    # 3. ADMIN receives 200 OK
+    admin_resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/email-accounts-access",
+        headers={"Authorization": f"Bearer {token_admin}"},
+    )
+    assert admin_resp.status_code == 200
+    assert len(admin_resp.json()) == len(records)

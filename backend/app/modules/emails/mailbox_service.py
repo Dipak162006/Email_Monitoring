@@ -284,7 +284,7 @@ class EmailMailboxService:
 
         email_id = email.id
         from app.modules.emails.attachment_service import AttachmentService
-        await AttachmentService.cleanup_attachments_for_email(db, email_id)
+        candidate_paths = await AttachmentService.get_email_attachment_paths(db, email_id)
 
         thread_id = email.thread_id
         await db.delete(email)
@@ -304,6 +304,9 @@ class EmailMailboxService:
                     await cls.recalculate_thread_read_state(db, thread_id)
 
         await db.commit()
+
+        # Clean up physical files on disk only after database deletion succeeds
+        await AttachmentService.cleanup_unreferenced_storage_paths(db, candidate_paths)
 
     @classmethod
     async def get_mailbox_counts(
