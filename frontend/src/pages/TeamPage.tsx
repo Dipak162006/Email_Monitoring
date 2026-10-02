@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { useAuth } from "../hooks/useAuth";
+import { useWorkspace } from "../hooks/useWorkspace";
 import { companiesApi, emailAccountsApi } from "../services/api";
 import type { CompanyMember, CompanyMemberAddPayload } from "../types/auth";
 import type { EmailAccountItem } from "../types/emails";
@@ -52,19 +53,13 @@ export function TeamPage() {
   // In-flight mutation flags
   const [isSubmittingModal, setIsSubmittingModal] = useState(false);
 
-  // 1. Fetch current user's accessible company
+  // 1. Consume active workspace from centralized context
   const {
-    data: companies,
-    isLoading: isCompaniesLoading,
-  } = useQuery({
-    queryKey: ["my-companies"],
-    queryFn: () => companiesApi.getMyCompanies(),
-    staleTime: 60000,
-  });
-
-  const activeCompany = companies && companies.length > 0 ? companies[0] : null;
-  const isCompanyAdminOrOwner =
-    activeCompany?.role === "ADMIN" || activeCompany?.role === "OWNER";
+    currentCompany: activeCompany,
+    isLoading: isWorkspaceLoading,
+    currentRole,
+  } = useWorkspace();
+  const isCompanyAdminOrOwner = currentRole === "ADMIN" || currentRole === "OWNER";
 
   // 2. Fetch all members of the active company
   const {
@@ -313,7 +308,7 @@ export function TeamPage() {
   };
 
   // Initial loading state
-  if (isCompaniesLoading || (activeCompany && isMembersLoading && members.length === 0)) {
+  if (isWorkspaceLoading || (activeCompany && isMembersLoading && members.length === 0)) {
     return (
       <div className="flex flex-col items-center justify-center py-24 space-y-3">
         <Loader2 className="h-8 w-8 text-indigo-600 animate-spin" />
@@ -323,7 +318,7 @@ export function TeamPage() {
   }
 
   // Error state if user has no companies or company failed
-  if (!activeCompany && !isCompaniesLoading) {
+  if (!activeCompany && !isWorkspaceLoading) {
     return (
       <div className="p-8 max-w-lg mx-auto text-center bg-white rounded-2xl border border-slate-200 space-y-4">
         <div className="w-12 h-12 rounded-xl bg-amber-50 border border-amber-200 text-amber-600 flex items-center justify-center mx-auto">

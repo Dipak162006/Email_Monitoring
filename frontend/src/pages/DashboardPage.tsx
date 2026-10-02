@@ -26,6 +26,7 @@ import { ErrorState } from "../components/ui/ErrorState";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ActivityTrendChart } from "../components/dashboard/ActivityTrendChart";
 import { dashboardApi, emailsApi, emailAccountsApi, RequestError } from "../services/api";
+import { useWorkspace } from "../hooks/useWorkspace";
 
 import { DATE_RANGE_PRESETS } from "../types/dashboard";
 import type { DateRangePreset } from "../types/dashboard";
@@ -67,6 +68,7 @@ function getProviderDisplayName(provider?: string): string {
 export function DashboardPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { currentCompanyId } = useWorkspace();
   const [datePreset, setDatePreset] = useState<DateRangePreset>("7d");
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
@@ -85,26 +87,38 @@ export function DashboardPage() {
     error: statsError,
     refetch: refetchStats,
   } = useQuery({
-    queryKey: ["dashboard-stats", datePreset, dateFrom, dateTo, allTime],
-    queryFn: () => dashboardApi.getStats({ dateFrom, dateTo, allTime }),
+    queryKey: ["dashboard-stats", currentCompanyId, datePreset, dateFrom, dateTo, allTime],
+    queryFn: () =>
+      dashboardApi.getStats({
+        companyId: currentCompanyId ?? undefined,
+        dateFrom,
+        dateTo,
+        allTime,
+      }),
   });
 
   // 2. Activity Trends Query
   const { data: activityData, isLoading: isActivityLoading } = useQuery({
-    queryKey: ["dashboard-activity", datePreset, dateFrom, dateTo, allTime],
-    queryFn: () => dashboardApi.getActivity({ dateFrom, dateTo, allTime }),
+    queryKey: ["dashboard-activity", currentCompanyId, datePreset, dateFrom, dateTo, allTime],
+    queryFn: () =>
+      dashboardApi.getActivity({
+        companyId: currentCompanyId ?? undefined,
+        dateFrom,
+        dateTo,
+        allTime,
+      }),
   });
 
   // 3. Account Health Query
   const { data: accountHealth, isLoading: isHealthLoading } = useQuery({
-    queryKey: ["dashboard-account-health"],
-    queryFn: () => dashboardApi.getAccountHealth(),
+    queryKey: ["dashboard-account-health", currentCompanyId],
+    queryFn: () => dashboardApi.getAccountHealth(currentCompanyId ?? undefined),
   });
 
   // 4. Recent Emails Query
   const { data: recentEmailsData, isLoading: isRecentLoading } = useQuery({
-    queryKey: ["dashboard-recent-emails"],
-    queryFn: () => emailsApi.getRecentEmails(7),
+    queryKey: ["dashboard-recent-emails", currentCompanyId],
+    queryFn: () => emailsApi.getRecentEmails(7, currentCompanyId ?? undefined),
   });
 
   // Map email accounts for quick provider lookup

@@ -18,7 +18,8 @@ import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { EmailAccountDrawer } from "../components/accounts/EmailAccountDrawer";
 import { DeleteAccountConfirmModal } from "../components/accounts/DeleteAccountConfirmModal";
-import { companiesApi, emailAccountsApi } from "../services/api";
+import { useWorkspace } from "../hooks/useWorkspace";
+import { emailAccountsApi } from "../services/api";
 import type { EmailAccountItem } from "../types/emails";
 
 export function EmailAccountsPage() {
@@ -38,20 +39,16 @@ export function EmailAccountsPage() {
     message: string;
   } | null>(null);
 
-  // 1. Fetch current user's accessible company
+  // 1. Consume active workspace from centralized context
   const {
-    data: companies,
-    isLoading: isCompaniesLoading,
-    error: companiesError,
-  } = useQuery({
-    queryKey: ["my-companies"],
-    queryFn: () => companiesApi.getMyCompanies(),
-    staleTime: 60000,
-  });
+    currentCompany: activeCompany,
+    isLoading: isWorkspaceLoading,
+    isError: isWorkspaceError,
+    currentRole,
+  } = useWorkspace();
 
-  const activeCompany = companies && companies.length > 0 ? companies[0] : null;
   const isCompanyAdmin =
-    activeCompany?.role === "ADMIN" || activeCompany?.role === "OWNER";
+    currentRole === "ADMIN" || currentRole === "OWNER";
 
   // 2. Fetch email accounts for current active company
   const {
@@ -193,7 +190,7 @@ export function EmailAccountsPage() {
     }
   };
 
-  const isLoading = isCompaniesLoading || (!!activeCompany && isAccountsLoading);
+  const isLoading = isWorkspaceLoading || (!!activeCompany && isAccountsLoading);
 
   return (
     <div className="space-y-6">
@@ -314,7 +311,7 @@ export function EmailAccountsPage() {
             </div>
           ))}
         </div>
-      ) : isAccountsError || companiesError ? (
+      ) : isAccountsError || isWorkspaceError ? (
         <div className="bg-white rounded-xl border border-slate-200 p-8 text-center space-y-3">
           <AlertCircle className="w-8 h-8 text-rose-500 mx-auto" />
           <h3 className="text-sm font-semibold text-slate-900">Failed to load email accounts</h3>
