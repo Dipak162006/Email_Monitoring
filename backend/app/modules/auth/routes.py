@@ -5,7 +5,15 @@ from app.core.database import get_db
 from app.core.security import create_access_token
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.models import User
-from app.modules.auth.schemas import Token, UserLogin, UserRead, UserRegister
+from app.modules.auth.schemas import (
+    MessageResponse,
+    Token,
+    UserLogin,
+    UserPasswordChange,
+    UserProfileUpdate,
+    UserRead,
+    UserRegister,
+)
 from app.modules.auth.service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -77,3 +85,49 @@ async def get_me(
 ) -> UserRead:
     """Return the profile information of the currently authenticated user."""
     return current_user
+
+
+@router.patch(
+    "/me",
+    response_model=UserRead,
+    status_code=status.HTTP_200_OK,
+    summary="Update authenticated user profile",
+)
+async def update_profile(
+    profile_in: UserProfileUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserRead:
+    """Update display name for the currently authenticated user."""
+    updated_user = await AuthService.update_profile(
+        db=db,
+        user=current_user,
+        full_name=profile_in.full_name,
+    )
+    return updated_user
+
+
+@router.post(
+    "/me/password",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Change authenticated user password",
+)
+async def change_password(
+    password_data: UserPasswordChange,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MessageResponse:
+    """Change password for the currently authenticated user after verifying the current password."""
+    success = await AuthService.change_password(
+        db=db,
+        user=current_user,
+        current_password=password_data.current_password,
+        new_password=password_data.new_password,
+    )
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Incorrect current password",
+        )
+    return MessageResponse(message="Password changed successfully")

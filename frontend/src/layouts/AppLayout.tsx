@@ -16,6 +16,7 @@ import {
   Users,
   Activity,
   Building2,
+  User as UserIcon,
   LogOut,
   Menu,
   X,
@@ -139,6 +140,7 @@ export function AppLayout() {
     if (path.startsWith("/team")) return "Team & Permissions";
     if (path.startsWith("/diagnostics")) return "System Diagnostics";
     if (path.startsWith("/settings")) return "Company Settings";
+    if (path.startsWith("/profile")) return "Profile & Account";
     return "Overview";
   };
 
@@ -223,6 +225,7 @@ export function AppLayout() {
 
   const settingsItems: NavLinkItem[] = React.useMemo(() => {
     const items: NavLinkItem[] = [];
+    items.push({ label: "Profile & Account", href: "/profile", icon: UserIcon });
     if (canAccessSettings) {
       items.push({ label: "Company Settings", href: "/settings", icon: Building2 });
     }
@@ -460,34 +463,41 @@ export function AppLayout() {
         <div className="p-3 border-t border-slate-200 mt-auto shrink-0">
           {isExpanded ? (
             <div className="flex items-center space-x-3 p-1.5 rounded-lg hover:bg-slate-50 transition-colors">
-              <div className="h-8 w-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs shrink-0 ring-1 ring-slate-200 shadow-2xs">
-                {user?.full_name ? user.full_name[0].toUpperCase() : user?.email ? user.email[0].toUpperCase() : "U"}
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-xs font-semibold text-slate-900 leading-tight truncate">
-                  {user?.full_name || "Alex Vance"}
-                </p>
-                <p className="text-[10px] text-slate-500 leading-tight truncate">
-                  {user?.email || "admin@pulsemail.com"}
-                </p>
-              </div>
+              <Link
+                to="/profile"
+                className="flex items-center space-x-3 min-w-0 flex-1 cursor-pointer"
+                title="Profile & Account Settings"
+              >
+                <div className="h-8 w-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs shrink-0 ring-1 ring-slate-200 shadow-2xs">
+                  {user?.full_name ? user.full_name[0].toUpperCase() : user?.email ? user.email[0].toUpperCase() : "U"}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-semibold text-slate-900 leading-tight truncate">
+                    {user?.full_name || "Alex Vance"}
+                  </p>
+                  <p className="text-[10px] text-slate-500 leading-tight truncate">
+                    {user?.email || "admin@pulsemail.com"}
+                  </p>
+                </div>
+              </Link>
               <button
                 type="button"
                 onClick={handleLogout}
                 title="Log out"
-                className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
               >
                 <LogOut className="h-4 w-4" />
               </button>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center">
-              <div
-                title={user?.full_name || "Alex Vance"}
+              <Link
+                to="/profile"
+                title={user?.full_name || "Profile & Account Settings"}
                 className="h-8 w-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs ring-1 ring-slate-200 shadow-2xs cursor-pointer"
               >
                 {user?.full_name ? user.full_name[0].toUpperCase() : user?.email ? user.email[0].toUpperCase() : "U"}
-              </div>
+              </Link>
             </div>
           )}
         </div>
@@ -557,7 +567,11 @@ export function AppLayout() {
             <div className="h-5 w-px bg-slate-200 hidden sm:block"></div>
 
             {/* User Profile Info */}
-            <div className="flex items-center space-x-2.5">
+            <Link
+              to="/profile"
+              className="flex items-center space-x-2.5 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+              title="Profile & Account Settings"
+            >
               <div className="h-8 w-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs shrink-0 ring-1 ring-slate-200 shadow-2xs">
                 {user?.full_name ? user.full_name[0].toUpperCase() : user?.email ? user.email[0].toUpperCase() : "U"}
               </div>
@@ -569,7 +583,7 @@ export function AppLayout() {
                   {currentRole ? currentRole.charAt(0) + currentRole.slice(1).toLowerCase() : "Member"}
                 </p>
               </div>
-            </div>
+            </Link>
 
             {/* Logout Button */}
             <button

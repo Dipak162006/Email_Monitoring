@@ -99,3 +99,12 @@ export interface CompanyInvitationItem {
 export interface CompanyUpdatePayload {
   name: string;
 }
+
+export interface UserProfileUpdatePayload {
+  full_name: string;
+}
+
+export interface UserPasswordChangePayload {
+  current_password: string;
+  new_password: string;
+}

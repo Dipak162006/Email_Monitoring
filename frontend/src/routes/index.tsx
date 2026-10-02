@@ -19,6 +19,7 @@ import { SignaturesPage } from "../pages/SignaturesPage";
 import { TeamPage } from "../pages/TeamPage";
 import { DiagnosticsPage } from "../pages/DiagnosticsPage";
 import { SettingsPage } from "../pages/SettingsPage";
+import { ProfilePage } from "../pages/ProfilePage";
 import { NotFoundPage } from "../pages/NotFoundPage";
 
 export function AppRoutes() {
@@ -54,6 +55,7 @@ export function AppRoutes() {
             </Route>
 
             {/* Routes Accessible to All Active Workspace Members */}
+            <Route path="/profile" element={<ProfilePage />} />
             <Route path="/templates" element={<TemplatesPage />} />
             <Route path="/templates/new" element={<TemplateEditorPage />} />
             <Route path="/templates/:templateId/edit" element={<TemplateEditorPage />} />

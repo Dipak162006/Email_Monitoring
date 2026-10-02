@@ -55,3 +55,33 @@ class AuthService:
         if not user.is_active:
             return None
         return user
+
+    @staticmethod
+    async def update_profile(
+        db: AsyncSession,
+        user: User,
+        full_name: str,
+    ) -> User:
+        """Update authenticated user's display name."""
+        user.full_name = full_name.strip()
+        await db.commit()
+        await db.refresh(user)
+        return user
+
+    @staticmethod
+    async def change_password(
+        db: AsyncSession,
+        user: User,
+        current_password: str,
+        new_password: str,
+    ) -> bool:
+        """Verify current password and update with newly hashed password.
+
+        Returns False if current password verification fails.
+        """
+        if not verify_password(current_password, user.hashed_password):
+            return False
+        user.hashed_password = get_password_hash(new_password)
+        await db.commit()
+        await db.refresh(user)
+        return True

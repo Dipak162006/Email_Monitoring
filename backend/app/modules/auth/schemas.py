@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 class UserRegister(BaseModel):
@@ -29,6 +29,36 @@ class TokenPayload(BaseModel):
     iat: int
     exp: int
     type: str
+
+
+class UserProfileUpdate(BaseModel):
+    """Schema for updating personal profile information."""
+    full_name: str = Field(min_length=1, max_length=255, description="Full display name")
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, v: str) -> str:
+        trimmed = v.strip()
+        if not trimmed:
+            raise ValueError("Full name cannot be empty or whitespace only")
+        if len(trimmed) > 255:
+            raise ValueError("Full name must not exceed 255 characters")
+        return trimmed
+
+
+class UserPasswordChange(BaseModel):
+    """Schema for authenticated user password change request."""
+    current_password: str = Field(min_length=1, description="Current plaintext password")
+    new_password: str = Field(min_length=8, max_length=128, description="New plaintext password (8-128 characters)")
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class MessageResponse(BaseModel):
+    """Generic message response schema."""
+    message: str
 
 
 class UserRead(BaseModel):
