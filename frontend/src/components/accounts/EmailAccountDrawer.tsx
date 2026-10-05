@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
+import { useQuery } from "@tanstack/react-query";
 import {
   X,
   ChevronDown,
@@ -11,6 +12,7 @@ import {
   Check,
   Loader2,
   AlertCircle,
+  Globe,
 } from "lucide-react";
 import type {
   EmailAccountItem,
@@ -19,7 +21,8 @@ import type {
   EmailProvider,
   SecurityMode,
 } from "../../types/emails";
-import { emailAccountsApi } from "../../services/api";
+import type { Domain } from "../../types/domains";
+import { domainsApi, emailAccountsApi } from "../../services/api";
 
 interface EmailAccountDrawerProps {
   isOpen: boolean;
@@ -87,6 +90,15 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
   const [provider, setProvider] = useState<EmailProvider>("CUSTOM");
   const [name, setName] = useState("");
   const [emailAddress, setEmailAddress] = useState("");
+  const [domainId, setDomainId] = useState<number | null>(null);
+
+  // Load domains belonging to the active company
+  const { data: domains = [], isLoading: isLoadingDomains } = useQuery<Domain[]>({
+    queryKey: ["company-domains", companyId],
+    queryFn: () => domainsApi.listDomains(companyId),
+    enabled: isOpen && !!companyId,
+    staleTime: 30000,
+  });
 
   // IMAP settings
   const [imapHost, setImapHost] = useState("");
@@ -122,6 +134,7 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
       setProvider(initialAccount.provider || "CUSTOM");
       setName(initialAccount.name || "");
       setEmailAddress(initialAccount.email_address || "");
+      setDomainId(initialAccount.domain_id ?? null);
       setImapHost(initialAccount.imap_host || "");
       setImapPort(initialAccount.imap_port || 993);
       setImapSecurity(initialAccount.imap_security || "SSL");
@@ -141,6 +154,7 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
       setProvider("CUSTOM");
       setName("");
       setEmailAddress("");
+      setDomainId(null);
       setImapHost("");
       setImapPort(993);
       setImapSecurity("SSL");
@@ -252,6 +266,20 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
       return;
     }
 
+    // Validate domain compatibility if domainId is selected
+    if (domainId) {
+      const selectedDom = domains.find((d) => d.id === domainId);
+      if (selectedDom && emailAddress.includes("@")) {
+        const emailDom = emailAddress.split("@")[1]?.trim().toLowerCase();
+        if (emailDom && emailDom !== selectedDom.domain_name.toLowerCase()) {
+          setError(
+            `Email address domain (@${emailDom}) does not match assigned domain '${selectedDom.domain_name}'.`
+          );
+          return;
+        }
+      }
+    }
+
     setIsSubmitting(true);
 
     try {
@@ -260,6 +288,7 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
           name: name.trim(),
           email_address: emailAddress.trim().toLowerCase(),
           provider,
+          domain_id: domainId,
           imap_host: imapHost.trim(),
           imap_port: Number(imapPort),
           imap_security: imapSecurity,
@@ -283,6 +312,7 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
           name: name.trim(),
           email_address: emailAddress.trim().toLowerCase(),
           provider,
+          domain_id: domainId,
           imap_host: imapHost.trim(),
           imap_port: Number(imapPort),
           imap_security: imapSecurity,
@@ -309,6 +339,14 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
       setIsSubmitting(false);
     }
   };
+
+  const selectedDomain = domains.find((d) => d.id === domainId);
+  const emailDomain = emailAddress.includes("@")
+    ? emailAddress.split("@")[1]?.trim().toLowerCase()
+    : "";
+  const isDomainMismatched = Boolean(
+    selectedDomain && emailDomain && emailDomain !== selectedDomain.domain_name.toLowerCase()
+  );
 
   return createPortal(
     <div
@@ -426,6 +464,79 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
                   placeholder="inquiries@acme.com"
                   className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 outline-none shadow-xs focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
                 />
+              </div>
+
+              {/* Associated Company Domain (Optional) */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-medium text-gray-700 flex items-center gap-1.5">
+                    <Globe className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>Associated Domain</span>
+                    <span className="text-gray-400 font-normal">(Optional)</span>
+                  </label>
+                  {domainId !== null && (
+                    <button
+                      type="button"
+                      onClick={() => setDomainId(null)}
+                      className="text-[11px] text-indigo-600 hover:text-indigo-800 transition-colors cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                {isLoadingDomains ? (
+                  <div className="flex items-center gap-2 px-3 py-2 border border-gray-200 rounded-lg text-xs text-gray-400 bg-gray-50">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Loading company domains...</span>
+                  </div>
+                ) : domains.length === 0 ? (
+                  <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-lg text-xs text-amber-800 space-y-1">
+                    <p className="font-medium">No domains configured</p>
+                    <p className="text-[11px] text-amber-700">
+                      Configure a domain first in Domain Management to associate it with this email account.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <select
+                      value={domainId ?? ""}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setDomainId(val ? Number(val) : null);
+                      }}
+                      className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 outline-none shadow-xs focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 appearance-none pr-8 cursor-pointer transition-all"
+                    >
+                      <option value="">None / Unassigned</option>
+                      {domains.map((dom) => {
+                        const statusFormatted =
+                          dom.verification_status === "VERIFIED"
+                            ? "Verified"
+                            : dom.verification_status === "WARNING"
+                            ? "Warning"
+                            : dom.verification_status === "FAILED"
+                            ? "Failed"
+                            : "Pending";
+                        return (
+                          <option key={dom.id} value={dom.id}>
+                            {dom.domain_name} — {statusFormatted}
+                          </option>
+                        );
+                      })}
+                    </select>
+                    <ChevronDown className="w-4 h-4 text-gray-400 absolute right-2.5 top-2.5 pointer-events-none" />
+                  </div>
+                )}
+
+                {isDomainMismatched && (
+                  <p className="text-[11px] text-amber-600 mt-1 flex items-center gap-1 font-medium">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0 text-amber-500" />
+                    Notice: Email domain (@{emailDomain}) does not match selected domain ({selectedDomain?.domain_name}).
+                  </p>
+                )}
+                <p className="text-[11px] text-gray-400 mt-1">
+                  Associate this email account with an active company domain.
+                </p>
               </div>
             </div>
 

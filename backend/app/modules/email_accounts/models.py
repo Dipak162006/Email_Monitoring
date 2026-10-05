@@ -8,6 +8,7 @@ from app.core.database import Base
 if TYPE_CHECKING:
     from app.modules.auth.models import User
     from app.modules.companies.models import Company
+    from app.modules.domains.models import Domain
     from app.modules.emails.models import Email, EmailThread
 
 
@@ -72,6 +73,12 @@ class EmailAccount(Base):
     imap_password_encrypted: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    domain_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("domains.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -87,6 +94,7 @@ class EmailAccount(Base):
 
     # Relationships
     company: Mapped["Company"] = relationship("Company", back_populates="email_accounts")
+    domain: Mapped[Optional["Domain"]] = relationship("Domain", back_populates="email_accounts")
     user_access: Mapped[List["EmailAccountAccess"]] = relationship(
         "EmailAccountAccess",
         back_populates="email_account",

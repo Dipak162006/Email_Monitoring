@@ -22,6 +22,8 @@ class EmailAccountBase(BaseModel):
     imap_security: Optional[SecurityMode] = Field(default=SecurityMode.SSL)
     imap_username: Optional[str] = Field(default=None, max_length=255)
 
+    domain_id: Optional[int] = Field(default=None, description="Optional Domain ID belonging to the same company")
+
 
 class EmailAccountCreate(EmailAccountBase):
     """Payload for creating a new company email account."""
@@ -34,6 +36,7 @@ class EmailAccountUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     email_address: Optional[EmailStr] = None
     provider: Optional[EmailProvider] = None
+    domain_id: Optional[int] = Field(default=None, description="Optional Domain ID belonging to the same company")
 
     smtp_host: Optional[str] = None
     smtp_port: Optional[int] = None
@@ -57,6 +60,7 @@ class EmailAccountRead(BaseModel):
     name: str
     email_address: str
     provider: EmailProvider
+    domain_id: Optional[int] = None
 
     # SMTP Metadata
     smtp_host: Optional[str] = None

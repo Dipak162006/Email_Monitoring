@@ -5,6 +5,8 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueCon
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
+from app.modules.domains.models import Domain
+
 if TYPE_CHECKING:
     from app.modules.auth.models import User
     from app.modules.email_accounts.models import EmailAccount
@@ -72,6 +74,11 @@ class Company(Base):
     )
     invitations: Mapped[List["CompanyInvitation"]] = relationship(
         "CompanyInvitation",
+        back_populates="company",
+        cascade="all, delete-orphan",
+    )
+    domains: Mapped[List["Domain"]] = relationship(
+        "Domain",
         back_populates="company",
         cascade="all, delete-orphan",
     )

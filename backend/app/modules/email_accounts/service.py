@@ -1,9 +1,12 @@
 from typing import List, Optional
+from fastapi import HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.core.security import encrypt_credential
 from app.modules.companies.models import CompanyRole
+from app.modules.domains.models import Domain
+from app.modules.domains.schemas import normalize_domain_name
 from app.modules.email_accounts.models import EmailAccount, EmailAccountAccess, EmailProvider, SecurityMode
 from app.modules.email_accounts.schemas import (
     EmailAccountAccessRead,
@@ -25,6 +28,7 @@ class EmailAccountService:
             name=account.name,
             email_address=account.email_address,
             provider=EmailProvider(account.provider),
+            domain_id=account.domain_id,
             smtp_host=account.smtp_host,
             smtp_port=account.smtp_port,
             smtp_security=SecurityMode(account.smtp_security) if account.smtp_security else None,
@@ -42,12 +46,66 @@ class EmailAccountService:
         )
 
     @staticmethod
+    async def validate_email_account_domain_assignment(
+        db: AsyncSession,
+        company_id: int,
+        email_address: str,
+        domain_id: Optional[int],
+    ) -> Optional[Domain]:
+        """Validate that domain exists, belongs to same company, and matches the email address domain.
+        
+        Returns the Domain instance if valid, or None if domain_id is None.
+        Raises:
+            HTTPException(404): If domain does not exist or belongs to another company (company isolation).
+            HTTPException(422): If email address domain part does not match assigned domain name.
+        """
+        if domain_id is None:
+            return None
+
+        result = await db.execute(
+            select(Domain).where(
+                Domain.id == domain_id,
+                Domain.company_id == company_id,
+            )
+        )
+        domain = result.scalar_one_or_none()
+        if not domain:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Domain not found in this company",
+            )
+
+        email_str = str(email_address).lower().strip()
+        if "@" in email_str:
+            email_domain_raw = email_str.split("@", 1)[1]
+            try:
+                email_domain_normalized = normalize_domain_name(email_domain_raw)
+            except Exception:
+                email_domain_normalized = email_domain_raw
+
+            if email_domain_normalized != domain.domain_name:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"Email address domain '{email_domain_normalized}' does not match assigned domain '{domain.domain_name}'",
+                )
+
+        return domain
+
+    @staticmethod
     async def create_email_account(
         db: AsyncSession,
         company_id: int,
         account_in: EmailAccountCreate,
     ) -> EmailAccount:
         """Create a new company email account with encrypted credentials at rest."""
+        if account_in.domain_id is not None:
+            await EmailAccountService.validate_email_account_domain_assignment(
+                db=db,
+                company_id=company_id,
+                email_address=account_in.email_address,
+                domain_id=account_in.domain_id,
+            )
+
         smtp_pw_encrypted = encrypt_credential(account_in.smtp_password)
         imap_pw_encrypted = encrypt_credential(account_in.imap_password)
 
@@ -56,6 +114,7 @@ class EmailAccountService:
             name=account_in.name.strip(),
             email_address=str(account_in.email_address).lower().strip(),
             provider=account_in.provider.value,
+            domain_id=account_in.domain_id,
             smtp_host=account_in.smtp_host,
             smtp_port=account_in.smtp_port,
             smtp_security=account_in.smtp_security.value if account_in.smtp_security else None,
@@ -80,10 +139,34 @@ class EmailAccountService:
         account_in: EmailAccountUpdate,
     ) -> EmailAccount:
         """Update email account fields and optionally rotate encrypted credentials."""
+        target_email = (
+            str(account_in.email_address).lower().strip()
+            if account_in.email_address is not None
+            else account.email_address
+        )
+
+        if "domain_id" in account_in.model_fields_set:
+            if account_in.domain_id is not None:
+                await EmailAccountService.validate_email_account_domain_assignment(
+                    db=db,
+                    company_id=account.company_id,
+                    email_address=target_email,
+                    domain_id=account_in.domain_id,
+                )
+            account.domain_id = account_in.domain_id
+        elif account_in.email_address is not None and account.domain_id is not None:
+            # Email address changed while assigned to an existing domain: validate compatibility
+            await EmailAccountService.validate_email_account_domain_assignment(
+                db=db,
+                company_id=account.company_id,
+                email_address=target_email,
+                domain_id=account.domain_id,
+            )
+
         if account_in.name is not None:
             account.name = account_in.name.strip()
         if account_in.email_address is not None:
-            account.email_address = str(account_in.email_address).lower().strip()
+            account.email_address = target_email
         if account_in.provider is not None:
             account.provider = account_in.provider.value
         if account_in.smtp_host is not None:

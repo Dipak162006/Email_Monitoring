@@ -1,6 +1,7 @@
 import { BrowserRouter } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import { WorkspaceProvider } from "./context/WorkspaceContext";
+import { NotificationProvider } from "./context/NotificationContext";
 import { AppRoutes } from "./routes";
 
 export default function App() {
@@ -8,7 +9,9 @@ export default function App() {
     <BrowserRouter>
       <AuthProvider>
         <WorkspaceProvider>
-          <AppRoutes />
+          <NotificationProvider>
+            <AppRoutes />
+          </NotificationProvider>
         </WorkspaceProvider>
       </AuthProvider>
     </BrowserRouter>

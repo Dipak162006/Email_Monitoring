@@ -44,6 +44,11 @@ import type {
   EmailTemplateUpdatePayload,
   EmailThreadDetail,
 } from "../types/emails";
+import type {
+  Domain,
+  DomainCreatePayload,
+  DomainUpdatePayload,
+} from "../types/domains";
 export type { ApiError } from "../types/api";
 
 export interface ServiceStatus {
@@ -702,6 +707,36 @@ export const emailAccountsApi = {
     return apiClient.delete<void>(
       `/api/v1/companies/${companyId}/email-accounts/${accountId}/access/${userId}`
     );
+  },
+};
+
+export const domainsApi = {
+  listDomains: async (companyId: number): Promise<Domain[]> => {
+    return apiClient.get<Domain[]>(`/api/v1/companies/${companyId}/domains`);
+  },
+
+  getDomain: async (companyId: number, domainId: number): Promise<Domain> => {
+    return apiClient.get<Domain>(`/api/v1/companies/${companyId}/domains/${domainId}`);
+  },
+
+  createDomain: async (companyId: number, payload: DomainCreatePayload): Promise<Domain> => {
+    return apiClient.post<Domain>(`/api/v1/companies/${companyId}/domains`, payload);
+  },
+
+  updateDomain: async (
+    companyId: number,
+    domainId: number,
+    payload: DomainUpdatePayload
+  ): Promise<Domain> => {
+    return apiClient.patch<Domain>(`/api/v1/companies/${companyId}/domains/${domainId}`, payload);
+  },
+
+  deleteDomain: async (companyId: number, domainId: number): Promise<void> => {
+    return apiClient.delete<void>(`/api/v1/companies/${companyId}/domains/${domainId}`);
+  },
+
+  verifyDomain: async (companyId: number, domainId: number): Promise<Domain> => {
+    return apiClient.post<Domain>(`/api/v1/companies/${companyId}/domains/${domainId}/verify`);
   },
 };
 

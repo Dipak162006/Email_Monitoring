@@ -8,6 +8,7 @@ from app.modules.companies.routes import (
     invitations_router,
     router as companies_router,
 )
+from app.modules.domains.routes import router as domains_router
 from app.modules.email_accounts.routes import router as email_accounts_router
 from app.modules.emails.routes import router as emails_router
 from app.modules.health.routes import router as health_router
@@ -49,6 +50,7 @@ def create_application() -> FastAPI:
     app.include_router(auth_router, prefix=settings.API_V1_STR)
     app.include_router(companies_router, prefix=settings.API_V1_STR)
     app.include_router(invitations_router, prefix=settings.API_V1_STR)
+    app.include_router(domains_router, prefix=settings.API_V1_STR)
     app.include_router(email_accounts_router, prefix=settings.API_V1_STR)
     app.include_router(emails_router, prefix=settings.API_V1_STR)
     app.include_router(health_router, prefix=settings.API_V1_STR)

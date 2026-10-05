@@ -16,6 +16,7 @@ import {
   Users,
   Activity,
   Building2,
+  Globe,
   User as UserIcon,
   LogOut,
   Menu,
@@ -134,6 +135,7 @@ export function AppLayout() {
     }
     if (path.startsWith("/emails/")) return "Email Detail";
     if (path.startsWith("/compose")) return "Compose Email";
+    if (path.startsWith("/domains")) return "Settings / Domains";
     if (path.startsWith("/email-accounts")) return "Connected Accounts";
     if (path.startsWith("/templates")) return "Templates";
     if (path.startsWith("/signatures")) return "Signatures";
@@ -215,6 +217,7 @@ export function AppLayout() {
     if (canAccessEmailAccounts) {
       items.push({ label: "Connected Accounts", href: "/email-accounts", icon: HardDrive });
     }
+    items.push({ label: "Domains", href: "/domains", icon: Globe });
     items.push({ label: "Templates", href: "/templates", icon: LayoutGrid });
     items.push({ label: "Signatures", href: "/signatures", icon: PenTool });
     if (canAccessDiagnostics) {

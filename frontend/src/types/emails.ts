@@ -102,6 +102,7 @@ export interface EmailAccountItem {
   name: string;
   email_address: string;
   provider: EmailProvider;
+  domain_id?: number | null;
   smtp_host?: string | null;
   smtp_port?: number | null;
   smtp_security?: SecurityMode | null;
@@ -122,6 +123,7 @@ export interface EmailAccountCreatePayload {
   name: string;
   email_address: string;
   provider: EmailProvider;
+  domain_id?: number | null;
   smtp_host?: string | null;
   smtp_port?: number | null;
   smtp_security?: SecurityMode | null;
@@ -138,6 +140,7 @@ export interface EmailAccountUpdatePayload {
   name?: string;
   email_address?: string;
   provider?: EmailProvider;
+  domain_id?: number | null;
   smtp_host?: string | null;
   smtp_port?: number | null;
   smtp_security?: SecurityMode | null;
