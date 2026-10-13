@@ -49,6 +49,24 @@ import type {
   DomainCreatePayload,
   DomainUpdatePayload,
 } from "../types/domains";
+import type {
+  Campaign,
+  CampaignDetail,
+  CampaignCreatePayload,
+  CampaignUpdatePayload,
+  CampaignSchedulePayload,
+  CampaignListParams,
+  CampaignRecipient,
+  CampaignRecipientCreatePayload,
+  CampaignRecipientUpdatePayload,
+  CampaignRecipientBulkCreateRequest,
+  CampaignRecipientBulkCreateResponse,
+  CampaignRecipientImportResponse,
+  CampaignRecipientListParams,
+  CampaignPreflightResponse,
+  CampaignDispatchResponse,
+  CampaignAttachment,
+} from "../types/campaign";
 export type { ApiError } from "../types/api";
 
 export interface ServiceStatus {
@@ -577,6 +595,7 @@ export const signaturesApi = {
   getDefaultSignature: async (accountId: number): Promise<EmailSignatureItem | null> => {
     return apiClient.get<EmailSignatureItem | null>(`/api/v1/signatures/default?email_account_id=${accountId}`);
   },
+
 };
 
 export const companiesApi = {
@@ -737,6 +756,253 @@ export const domainsApi = {
 
   verifyDomain: async (companyId: number, domainId: number): Promise<Domain> => {
     return apiClient.post<Domain>(`/api/v1/companies/${companyId}/domains/${domainId}/verify`);
+  },
+};
+
+export const campaignsApi = {
+  listCampaigns: async (
+    companyId: number,
+    params?: CampaignListParams
+  ): Promise<Campaign[]> => {
+    const searchParams = new URLSearchParams();
+    if (params?.status) searchParams.set("status", params.status);
+    if (params?.limit !== undefined) searchParams.set("limit", String(params.limit));
+    if (params?.offset !== undefined) searchParams.set("offset", String(params.offset));
+    const qs = searchParams.toString();
+    return apiClient.get<Campaign[]>(
+      `/api/v1/companies/${companyId}/campaigns${qs ? `?${qs}` : ""}`
+    );
+  },
+
+  getCampaign: async (
+    companyId: number,
+    campaignId: number
+  ): Promise<CampaignDetail> => {
+    return apiClient.get<CampaignDetail>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}`
+    );
+  },
+
+  createCampaign: async (
+    companyId: number,
+    payload: CampaignCreatePayload
+  ): Promise<Campaign> => {
+    return apiClient.post<Campaign>(
+      `/api/v1/companies/${companyId}/campaigns`,
+      payload
+    );
+  },
+
+  updateCampaign: async (
+    companyId: number,
+    campaignId: number,
+    payload: CampaignUpdatePayload
+  ): Promise<Campaign> => {
+    return apiClient.patch<Campaign>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}`,
+      payload
+    );
+  },
+
+  deleteCampaign: async (
+    companyId: number,
+    campaignId: number
+  ): Promise<void> => {
+    return apiClient.delete<void>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}`
+    );
+  },
+
+  preflightCampaign: async (
+    companyId: number,
+    campaignId: number
+  ): Promise<CampaignPreflightResponse> => {
+    return apiClient.post<CampaignPreflightResponse>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/preflight`
+    );
+  },
+
+  dispatchCampaign: async (
+    companyId: number,
+    campaignId: number
+  ): Promise<CampaignDispatchResponse> => {
+    return apiClient.post<CampaignDispatchResponse>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/dispatch`
+    );
+  },
+
+  scheduleCampaign: async (
+    companyId: number,
+    campaignId: number,
+    payload?: CampaignSchedulePayload
+  ): Promise<Campaign> => {
+    return apiClient.post<Campaign>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/schedule`,
+      payload
+    );
+  },
+
+  pauseCampaign: async (
+    companyId: number,
+    campaignId: number
+  ): Promise<Campaign> => {
+    return apiClient.post<Campaign>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/pause`
+    );
+  },
+
+  resumeCampaign: async (
+    companyId: number,
+    campaignId: number
+  ): Promise<Campaign> => {
+    return apiClient.post<Campaign>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/resume`
+    );
+  },
+
+  cancelCampaign: async (
+    companyId: number,
+    campaignId: number
+  ): Promise<Campaign> => {
+    return apiClient.post<Campaign>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/cancel`
+    );
+  },
+
+  listRecipients: async (
+    companyId: number,
+    campaignId: number,
+    params?: CampaignRecipientListParams
+  ): Promise<CampaignRecipient[]> => {
+    const searchParams = new URLSearchParams();
+    if (params?.status && params.status !== "ALL") searchParams.set("status", params.status);
+    if (params?.search) searchParams.set("search", params.search);
+    if (params?.limit !== undefined) searchParams.set("limit", String(params.limit));
+    if (params?.offset !== undefined) searchParams.set("offset", String(params.offset));
+    const qs = searchParams.toString();
+    return apiClient.get<CampaignRecipient[]>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients${qs ? `?${qs}` : ""}`
+    );
+  },
+
+  getRecipient: async (
+    companyId: number,
+    campaignId: number,
+    recipientId: number
+  ): Promise<CampaignRecipient> => {
+    return apiClient.get<CampaignRecipient>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/${recipientId}`
+    );
+  },
+
+  createRecipient: async (
+    companyId: number,
+    campaignId: number,
+    payload: CampaignRecipientCreatePayload
+  ): Promise<CampaignRecipient> => {
+    return apiClient.post<CampaignRecipient>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients`,
+      payload
+    );
+  },
+
+  bulkCreateRecipients: async (
+    companyId: number,
+    campaignId: number,
+    payload: CampaignRecipientBulkCreateRequest
+  ): Promise<CampaignRecipientBulkCreateResponse> => {
+    return apiClient.post<CampaignRecipientBulkCreateResponse>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/bulk`,
+      payload
+    );
+  },
+
+  updateRecipient: async (
+    companyId: number,
+    campaignId: number,
+    recipientId: number,
+    payload: CampaignRecipientUpdatePayload
+  ): Promise<CampaignRecipient> => {
+    return apiClient.patch<CampaignRecipient>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/${recipientId}`,
+      payload
+    );
+  },
+
+  deleteRecipient: async (
+    companyId: number,
+    campaignId: number,
+    recipientId: number
+  ): Promise<void> => {
+    return apiClient.delete<void>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/${recipientId}`
+    );
+  },
+
+  importRecipientsCsv: async (
+    companyId: number,
+    campaignId: number,
+    file: File
+  ): Promise<CampaignRecipientImportResponse> => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiClient.post<CampaignRecipientImportResponse>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/import`,
+      formData
+    );
+  },
+
+  uploadAttachment: async (
+    companyId: number,
+    campaignId: number,
+    file: File
+  ): Promise<CampaignAttachment> => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiClient.post<CampaignAttachment>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/attachments`,
+      formData
+    );
+  },
+
+  listAttachments: async (
+    companyId: number,
+    campaignId: number
+  ): Promise<CampaignAttachment[]> => {
+    const res = await apiClient.get<{ attachments: CampaignAttachment[] }>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/attachments`
+    );
+    return res.attachments || [];
+  },
+
+  deleteAttachment: async (
+    companyId: number,
+    campaignId: number,
+    attachmentId: number
+  ): Promise<void> => {
+    return apiClient.delete<void>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/attachments/${attachmentId}`
+    );
+  },
+
+  getAttachmentDownloadUrl: (
+    companyId: number,
+    campaignId: number,
+    attachmentId: number
+  ): string => {
+    const base = import.meta.env.VITE_API_URL || "";
+    return `${base}/api/v1/companies/${companyId}/campaigns/${campaignId}/attachments/${attachmentId}/download`;
+  },
+
+  importDraft: async (
+    companyId: number,
+    campaignId: number,
+    draftId: number
+  ): Promise<Campaign> => {
+    return apiClient.post<Campaign>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/import-draft`,
+      { draft_id: draftId }
+    );
   },
 };
 
