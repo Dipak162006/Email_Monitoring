@@ -511,7 +511,11 @@ export const RichTextEditor = React.forwardRef<RichTextEditorRef, RichTextEditor
       `}</style>
 
       {/* Formatting Toolbar */}
-      <div className="px-4 py-2 bg-slate-50/80 border-b border-slate-200 flex flex-wrap items-center gap-1 text-slate-600 text-xs select-none">
+      <div
+        role="toolbar"
+        aria-label="Formatting controls"
+        className="px-4 py-2 bg-slate-50/80 border-b border-slate-200 flex flex-wrap items-center gap-1 text-slate-600 text-xs select-none"
+      >
         {/* Font Family Dropdown */}
         <div className="flex items-center gap-1 pr-2 border-r border-slate-200">
           <div className="relative">

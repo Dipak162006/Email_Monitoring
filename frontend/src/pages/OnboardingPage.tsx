@@ -150,7 +150,7 @@ export function OnboardingPage() {
   };
 
   return (
-    <div className="bg-[#f9f9ff] text-slate-800 min-h-screen flex flex-col justify-between selection:bg-indigo-100 selection:text-indigo-900">
+    <div className="bg-[#f9f9ff] text-slate-800 h-full min-h-full overflow-y-auto flex flex-col justify-between selection:bg-indigo-100 selection:text-indigo-900">
       {/* HEADER */}
       <header className="fixed top-0 left-0 right-0 z-50 bg-[#f9f9ff]/90 backdrop-blur-xl border-b border-slate-200/50 shadow-[0_1px_8px_rgba(0,0,0,0.04)]">
         <div className="h-16 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between">

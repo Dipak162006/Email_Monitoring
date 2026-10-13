@@ -4,7 +4,7 @@ import { HelpCircle, ArrowLeft } from "lucide-react";
 
 export function NotFoundPage() {
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+    <div className="h-full min-h-full overflow-y-auto bg-slate-50 flex items-center justify-center p-6">
       <div className="max-w-md w-full text-center space-y-4">
         <div className="h-16 w-16 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 mx-auto">
           <HelpCircle className="h-8 w-8" />

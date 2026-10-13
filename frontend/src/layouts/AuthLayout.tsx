@@ -17,7 +17,7 @@ export function AuthLayout() {
   }, []);
 
   return (
-    <div className="auth-layout no-scrollbar min-h-screen bg-[#F8FAFC] flex flex-col justify-between antialiased font-sans selection:bg-indigo-500 selection:text-white">
+    <div className="auth-layout no-scrollbar h-full min-h-full overflow-y-auto bg-[#F8FAFC] flex flex-col justify-between antialiased font-sans selection:bg-indigo-500 selection:text-white">
       {/* Top Header */}
       <header className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 sm:py-4 flex items-center justify-between shrink-0">
         {/* Brand */}

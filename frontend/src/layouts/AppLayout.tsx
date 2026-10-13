@@ -28,6 +28,7 @@ import {
   ChevronLeft,
   ChevronsUpDown,
   ChevronUp,
+  Megaphone,
 } from "lucide-react";
 import { useAuth } from "../hooks/useAuth";
 import { cn } from "../lib/utils";
@@ -135,6 +136,7 @@ export function AppLayout() {
     }
     if (path.startsWith("/emails/")) return "Email Detail";
     if (path.startsWith("/compose")) return "Compose Email";
+    if (path.startsWith("/campaigns")) return "Campaigns";
     if (path.startsWith("/domains")) return "Settings / Domains";
     if (path.startsWith("/email-accounts")) return "Connected Accounts";
     if (path.startsWith("/templates")) return "Templates";
@@ -209,6 +211,14 @@ export function AppLayout() {
       href: "/mailbox?folder=trash",
       icon: Trash2,
       count: mailboxCounts?.trash ?? 0,
+    },
+  ];
+
+  const outreachItems: NavLinkItem[] = [
+    {
+      label: "Campaigns",
+      href: "/campaigns",
+      icon: Megaphone,
     },
   ];
 
@@ -348,7 +358,7 @@ export function AppLayout() {
   );
 
   return (
-    <div className="h-screen overflow-hidden flex bg-slate-50 relative">
+    <div className="h-full w-full overflow-hidden flex bg-slate-50 relative">
       {/* Mobile menu backdrop */}
       {mobileMenuOpen && (
         <div
@@ -366,7 +376,7 @@ export function AppLayout() {
         onFocus={handleFocus}
         onBlur={handleBlur}
         className={cn(
-          "fixed inset-y-0 left-0 z-50 bg-white border-r border-slate-200 flex flex-col h-screen shrink-0 transition-[width,transform] duration-300 ease-in-out select-none",
+          "fixed inset-y-0 left-0 z-50 bg-white border-r border-slate-200 flex flex-col h-full shrink-0 transition-[width,transform] duration-300 ease-in-out select-none",
           // Mobile drawer behavior
           mobileMenuOpen ? "translate-x-0 w-64" : "-translate-x-full lg:translate-x-0",
           // Desktop dynamic width
@@ -458,6 +468,7 @@ export function AppLayout() {
         <nav className="flex-1 px-3 py-2 space-y-3 overflow-y-auto overflow-x-hidden">
           {renderNavGroup("Overview", overviewItems)}
           {renderNavGroup("Mailboxes", mailboxItems, true)}
+          {renderNavGroup("Outreach", outreachItems)}
           {renderNavGroup("Configuration", configItems)}
           {settingsItems.length > 0 && renderNavGroup("Settings", settingsItems)}
         </nav>
@@ -509,9 +520,9 @@ export function AppLayout() {
       {/* ===================================================================== */}
       {/* MAIN CONTENT AREA (Dynamically Expands and Scrolls Independently) */}
       {/* ===================================================================== */}
-      <div className="flex-1 flex flex-col min-w-0 h-screen overflow-y-auto">
+      <div className="flex-1 flex flex-col min-w-0 h-full overflow-y-auto scroll-pt-16">
         {/* Top Header Bar */}
-        <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between sticky top-0 z-20 shrink-0 shadow-2xs">
+        <header className="h-16 bg-white/95 backdrop-blur-xs border-b border-slate-200/90 px-4 sm:px-6 flex items-center justify-between sticky top-0 z-20 shrink-0 shadow-2xs">
           {/* Left: Mobile Menu Trigger + Breadcrumb Navigation + Workspace Switcher */}
           <div className="flex items-center space-x-3 min-w-0">
             <button
@@ -602,7 +613,7 @@ export function AppLayout() {
         </header>
 
         {/* Scrollable Page Outlet Content */}
-        <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto pb-10">
+        <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto pb-10 min-w-0">
           <Outlet />
         </main>
       </div>

@@ -21,6 +21,10 @@ import { DiagnosticsPage } from "../pages/DiagnosticsPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { ProfilePage } from "../pages/ProfilePage";
 import { DomainsPage } from "../pages/DomainsPage";
+import { CampaignsPage } from "../pages/CampaignsPage";
+import { CreateCampaignPage } from "../pages/CreateCampaignPage";
+import { CampaignDetailPage } from "../pages/CampaignDetailPage";
+import { CampaignRecipientsPage } from "../pages/CampaignRecipientsPage";
 import { NotFoundPage } from "../pages/NotFoundPage";
 
 export function AppRoutes() {
@@ -46,6 +50,11 @@ export function AppRoutes() {
             <Route path="/mailbox" element={<MailboxPage />} />
             <Route path="/emails/:emailId" element={<EmailDetailPage />} />
             <Route path="/compose" element={<ComposePage />} />
+            <Route path="/campaigns" element={<CampaignsPage />} />
+            <Route path="/campaigns/new" element={<CreateCampaignPage />} />
+            <Route path="/campaigns/:campaignId" element={<CampaignDetailPage />} />
+            <Route path="/campaigns/:campaignId/edit" element={<CreateCampaignPage />} />
+            <Route path="/campaigns/:campaignId/recipients" element={<CampaignRecipientsPage />} />
 
             {/* Role-Protected Admin / Owner Routes */}
             <Route element={<RoleRequiredRoute allowedRoles={["OWNER", "ADMIN"]} />}>

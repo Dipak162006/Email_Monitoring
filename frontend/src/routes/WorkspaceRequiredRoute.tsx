@@ -10,7 +10,7 @@ export function WorkspaceRequiredRoute() {
   // 1. Loading: avoid rendering workspace-dependent pages before resolved; prevent premature redirects
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+      <div className="h-full w-full flex items-center justify-center bg-slate-50">
         <LoadingSpinner message="Checking workspace..." size="lg" />
       </div>
     );
@@ -19,7 +19,7 @@ export function WorkspaceRequiredRoute() {
   // 2. API Failure: do not interpret server/network error as no workspace (never trigger false onboarding)
   if (isError) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+      <div className="h-full w-full flex items-center justify-center bg-slate-50 p-4">
         <div className="max-w-md w-full bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 text-center space-y-4">
           <div className="w-12 h-12 rounded-full bg-red-50 text-red-600 mx-auto flex items-center justify-center">
             <AlertCircle className="w-6 h-6 text-red-600" />
