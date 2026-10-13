@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.sanitizer import sanitize_html
 from app.modules.auth.models import User
 from app.modules.email_accounts.models import EmailAccount
-from app.modules.emails.models import Email, EmailDirection, EmailStatus, EmailThread
+from app.modules.emails.models import Email, EmailAttachment, EmailDirection, EmailStatus, EmailThread
 from app.modules.emails.schemas import EmailSendRequest
 from app.modules.emails.thread_service import EmailThreadService
 from app.services.smtp.adapter import BaseSMTPAdapter, StandardSMTPAdapter
@@ -23,17 +23,44 @@ from app.services.smtp.exceptions import (
     SMTPSendError,
     SMTPServiceException,
 )
+from app.services.transport.base import EmailTransport
+from app.services.transport.exceptions import (
+    EmailTransportException,
+    TransportAuthenticationError,
+    TransportConfigurationError,
+    TransportConnectionError,
+    TransportRecipientRejectedError,
+    TransportSendError,
+)
+from app.services.transport.models import EmailTransportRequest, EmailTransportResult
+from app.services.transport.smtp import SMTPTransport
 
 logger = logging.getLogger(__name__)
 
 
 class EmailService:
     """Service orchestrating email message construction, authorization verification,
-    SMTP transmission, and database audit persistence.
+    transport transmission, and database audit persistence.
     """
 
-    def __init__(self, smtp_adapter: Optional[BaseSMTPAdapter] = None):
-        self.smtp_adapter = smtp_adapter or StandardSMTPAdapter()
+    def __init__(
+        self,
+        transport: Optional[EmailTransport] = None,
+        smtp_adapter: Optional[BaseSMTPAdapter] = None,
+    ):
+        if transport is not None:
+            self.transport = transport
+            if isinstance(transport, SMTPTransport):
+                self.smtp_adapter = transport.smtp_adapter
+            else:
+                self.smtp_adapter = None
+        elif smtp_adapter is not None:
+            self.smtp_adapter = smtp_adapter
+            self.transport = SMTPTransport(smtp_adapter=smtp_adapter)
+        else:
+            adapter = StandardSMTPAdapter()
+            self.smtp_adapter = adapter
+            self.transport = SMTPTransport(smtp_adapter=adapter)
 
     @staticmethod
     def build_mime_message(
@@ -199,6 +226,19 @@ class EmailService:
                 current_user=current_user,
             )
 
+        campaign_attachments = []
+        if getattr(send_req, "campaign_attachment_ids", None):
+            from app.modules.campaigns.models import CampaignAttachment
+            unique_c_ids = list(dict.fromkeys(send_req.campaign_attachment_ids))
+            c_stmt = select(CampaignAttachment).where(
+                CampaignAttachment.id.in_(unique_c_ids),
+                CampaignAttachment.company_id == account.company_id,
+                CampaignAttachment.email_account_id == account.id,
+            )
+            c_res = await db.execute(c_stmt)
+            found_c = {att.id: att for att in c_res.scalars().all()}
+            campaign_attachments = [found_c[cid] for cid in unique_c_ids if cid in found_c]
+
         # 2. Resolve or Create Conversation Thread
         thread, parent_email = await EmailThreadService.resolve_or_create_outgoing_thread(
             db=db,
@@ -218,21 +258,23 @@ class EmailService:
         )
 
         # 3b. Attach files if present
-        if validated_attachments:
-            await AttachmentService.attach_to_mime_message(mime_msg, validated_attachments)
+        all_to_attach = list(validated_attachments) + list(campaign_attachments)
+        if all_to_attach:
+            await AttachmentService.attach_to_mime_message(mime_msg, all_to_attach)
 
         to_list = [str(r) for r in send_req.to]
         cc_list = [str(r) for r in send_req.cc] if send_req.cc else None
         bcc_list = [str(r) for r in send_req.bcc] if send_req.bcc else None
         sender_str = str(mime_msg["From"])
 
-        # 4. Attempt SMTP Transmission
+        # 4. Attempt Transport Transmission
         try:
-            await self.smtp_adapter.send(
+            transport_req = EmailTransportRequest(
                 account=account,
                 message=mime_msg,
                 envelope_recipients=envelope_recipients,
             )
+            await self.transport.send(transport_req)
 
             # Record successful transmission
             email_record = Email(
@@ -263,7 +305,31 @@ class EmailService:
 
             # Associate validated attachments with the resulting sent Email
             for att in validated_attachments:
-                att.email_id = email_record.id
+                if att.email_id and att.email_id != email_record.id:
+                    new_att = EmailAttachment(
+                        company_id=att.company_id,
+                        email_account_id=att.email_account_id,
+                        email_id=email_record.id,
+                        file_name=att.file_name,
+                        content_type=att.content_type,
+                        file_size=att.file_size,
+                        storage_path=att.storage_path,
+                    )
+                    db.add(new_att)
+                else:
+                    att.email_id = email_record.id
+
+            for c_att in campaign_attachments:
+                recip_att = EmailAttachment(
+                    company_id=c_att.company_id,
+                    email_account_id=c_att.email_account_id,
+                    email_id=email_record.id,
+                    file_name=c_att.file_name,
+                    content_type=c_att.content_type,
+                    file_size=c_att.file_size,
+                    storage_path=c_att.storage_path,
+                )
+                db.add(recip_att)
 
             await db.commit()
             await db.refresh(email_record)
@@ -309,16 +375,30 @@ class EmailService:
             await db.commit()
             await db.refresh(failed_email_record)
 
-            # Map domain exceptions to safe HTTP responses
-            if isinstance(exc, SMTPConfigurationError):
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=safe_error_msg)
-            elif isinstance(exc, (SMTPAuthenticationError, SMTPConnectionError, SMTPRecipientRejectedError, SMTPSendError, SMTPServiceException)):
-                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=safe_error_msg)
+            # Map domain and transport exceptions to safe HTTP responses
+            if isinstance(exc, (TransportConfigurationError, SMTPConfigurationError)):
+                http_exc = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=safe_error_msg)
+            elif isinstance(exc, (
+                TransportAuthenticationError,
+                TransportConnectionError,
+                TransportRecipientRejectedError,
+                TransportSendError,
+                EmailTransportException,
+                SMTPAuthenticationError,
+                SMTPConnectionError,
+                SMTPRecipientRejectedError,
+                SMTPSendError,
+                SMTPServiceException,
+            )):
+                http_exc = HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=safe_error_msg)
             else:
-                raise HTTPException(
+                http_exc = HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail="SMTP server error during email transmission.",
                 )
+            http_exc.email_record = failed_email_record
+            http_exc.original_exception = exc
+            raise http_exc
 
     @staticmethod
     async def get_email(db: AsyncSession, email_id: int) -> Optional[Email]:

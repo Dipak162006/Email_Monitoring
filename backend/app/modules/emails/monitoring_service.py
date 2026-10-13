@@ -96,7 +96,69 @@ class EmailMonitoringService:
             matched_email.message_id,
         )
 
+        # 4. Correlate with CampaignDelivery within the same company tenant if applicable
+        from app.modules.campaigns.models import (
+            Campaign,
+            CampaignDelivery,
+            CampaignDeliveryStatus,
+            CampaignRecipient,
+            CampaignRecipientStatus,
+        )
+        from app.modules.campaigns.suppression_service import SuppressionService
+
+        deliv_stmt = (
+            select(CampaignDelivery)
+            .join(Campaign, CampaignDelivery.campaign_id == Campaign.id)
+            .where(
+                Campaign.company_id == account.company_id,
+                (CampaignDelivery.email_id == matched_email.id)
+                | (CampaignDelivery.message_id == matched_email.message_id),
+            )
+        )
+        deliv_res = await db.execute(deliv_stmt)
+        campaign_delivery = deliv_res.scalars().first()
+
+        if campaign_delivery:
+            campaign_delivery.status = CampaignDeliveryStatus.BOUNCED.value
+            campaign_delivery.bounced_at = datetime.now(timezone.utc)
+            campaign_delivery.error_message = diagnostic_text
+
+            # Identify the recipient email for company suppression and update recipient status
+            recip_stmt = select(CampaignRecipient).where(CampaignRecipient.id == campaign_delivery.recipient_id)
+            recip_res = await db.execute(recip_stmt)
+            recipient = recip_res.scalar_one_or_none()
+
+            if recipient:
+                recipient.status = CampaignRecipientStatus.BOUNCED.value
+
+            recipient_email = recipient.email if recipient else (
+                matched_email.recipients[0] if (matched_email.recipients and len(matched_email.recipients) > 0) else None
+            )
+
+            if recipient_email:
+                await SuppressionService.record_bounce_suppression(
+                    db=db,
+                    company_id=account.company_id,
+                    email=recipient_email,
+                )
+                logger.info(
+                    "Recorded bounce suppression for campaign %d delivery %d recipient %s",
+                    campaign_delivery.campaign_id,
+                    campaign_delivery.id,
+                    recipient_email,
+                )
+
         return matched_email
+
+    @classmethod
+    async def record_bounce_event(
+        cls,
+        db: AsyncSession,
+        account: EmailAccount,
+        parsed: ParsedEmail,
+    ) -> Optional[Email]:
+        """Record an incoming bounce event for an account (alias for match_and_process_bounce)."""
+        return await cls.match_and_process_bounce(db=db, account=account, parsed=parsed)
 
     @staticmethod
     def is_genuine_reply(parsed: ParsedEmail) -> bool:
