@@ -18,6 +18,7 @@ export interface SignatureCardProps {
   onEdit: (sig: EmailSignatureItem) => void;
   onSetDefault: (sig: EmailSignatureItem) => void;
   onDuplicate: (sig: EmailSignatureItem) => void;
+  onCopyToAllAccounts?: (sig: EmailSignatureItem) => void;
   onPreview: (sig: EmailSignatureItem) => void;
   onDelete: (sig: EmailSignatureItem) => void;
   isUpdatingDefault?: boolean;
@@ -59,6 +60,7 @@ export const SignatureCard: React.FC<SignatureCardProps> = ({
   onEdit,
   onSetDefault,
   onDuplicate,
+  onCopyToAllAccounts,
   onPreview,
   onDelete,
   isUpdatingDefault = false,
@@ -194,6 +196,20 @@ export const SignatureCard: React.FC<SignatureCardProps> = ({
                   <Copy className="h-3.5 w-3.5 text-slate-400 shrink-0" />
                   <span>Duplicate</span>
                 </button>
+
+                {onCopyToAllAccounts && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMenuOpen(false);
+                      onCopyToAllAccounts(signature);
+                    }}
+                    className="w-full px-3.5 py-2 flex items-center gap-2.5 hover:bg-slate-50 text-slate-700 transition-colors text-xs font-medium"
+                  >
+                    <Copy className="h-3.5 w-3.5 text-indigo-500 shrink-0" />
+                    <span>Copy to All Accounts</span>
+                  </button>
+                )}
 
                 <button
                   type="button"

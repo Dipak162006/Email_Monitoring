@@ -30,6 +30,7 @@ from app.modules.emails.schemas import (
     EmailRead,
     EmailReadUpdate,
     EmailSendRequest,
+    EmailSignatureCopyRequest,
     EmailSignatureCreate,
     EmailSignatureListResponse,
     EmailSignatureRead,
@@ -2052,6 +2053,32 @@ async def set_company_default_signature(
         company_id=company_id,
     )
     return EmailSignatureRead.model_validate(sig)
+
+
+@router.post(
+    "/signatures/{signature_id}/copy",
+    response_model=EmailSignatureRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Copy an email signature to another email account within the same company",
+)
+async def copy_signature(
+    signature_id: int,
+    payload: EmailSignatureCopyRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailSignatureRead:
+    """Copy an email signature to another email account with strict authorization,
+    company isolation, idempotency, and preservation of existing signatures.
+    """
+    signature = await SignatureService.copy_signature(
+        db=db,
+        current_user=current_user,
+        signature_id=signature_id,
+        target_account_id=payload.target_email_account_id,
+        new_name=payload.new_name,
+        make_default=payload.make_default,
+    )
+    return EmailSignatureRead.model_validate(signature)
 
 
 # -----------------------------------------------------------------------------

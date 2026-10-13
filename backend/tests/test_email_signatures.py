@@ -1862,3 +1862,118 @@ async def test_34_default_signature_draft_autosave_lifecycle(async_client: Async
     )
     assert bad_up.status_code == 400
     assert "Signature does not belong to this draft's email account" in bad_up.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_35_copy_signature_authorization_isolation_idempotency_preservation(
+    async_client: AsyncClient,
+) -> None:
+    """Test 35: Copy signature cross-account endpoint verifies:
+    1. Authorized cross-account copy within same company succeeds.
+    2. Idempotency: repeating copy returns identical existing signature without creating duplicates.
+    3. Company isolation: copying to an account in another company returns HTTP 400.
+    4. Member without access to target account: rejected with HTTP 403.
+    5. Preserves existing default signature on target account.
+    """
+    # 1. Setup Company A with two accounts (acc_1, acc_2) and User Owner
+    owner_email = "owner_copy@test.com"
+    owner_token = await register_and_login(async_client, owner_email)
+    comp_a_id = await create_company_helper(async_client, owner_token, "Copy Comp A")
+    acc_1_id = await create_account_helper(async_client, owner_token, comp_a_id, "Acc 1", "acc1@compa.com")
+    acc_2_id = await create_account_helper(async_client, owner_token, comp_a_id, "Acc 2", "acc2@compa.com")
+
+    # Set existing default signature on acc_2 to test preservation
+    sig_existing_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={
+            "email_account_id": acc_2_id,
+            "name": "Existing Account 2 Default",
+            "body_text": "Acc 2 Original Signature",
+            "is_default": True,
+        },
+    )
+    assert sig_existing_resp.status_code == 201
+    existing_sig_2_id = sig_existing_resp.json()["id"]
+
+    # Create source signature on acc_1
+    sig_src_resp = await async_client.post(
+        "/api/v1/signatures",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={
+            "email_account_id": acc_1_id,
+            "name": "Sales Official",
+            "body_text": "Dipak Odhavani - Sales",
+            "body_html": "<b>Dipak Odhavani - Sales</b>",
+            "is_default": True,
+        },
+    )
+    assert sig_src_resp.status_code == 201
+    src_sig_id = sig_src_resp.json()["id"]
+
+    # 2. Test Success & Preservation: Copy to acc_2 without make_default
+    copy_resp = await async_client.post(
+        f"/api/v1/signatures/{src_sig_id}/copy",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={
+            "target_email_account_id": acc_2_id,
+            "make_default": False,
+        },
+    )
+    assert copy_resp.status_code == 201
+    copied_data = copy_resp.json()
+    assert copied_data["email_account_id"] == acc_2_id
+    assert copied_data["name"] == "Sales Official"
+    assert copied_data["is_default"] is False  # Preserved!
+
+    # Verify acc_2 default is still existing_sig_2_id
+    acc2_default = await async_client.get(
+        f"/api/v1/signatures/default?email_account_id={acc_2_id}",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert acc2_default.status_code == 200
+    assert acc2_default.json()["id"] == existing_sig_2_id
+
+    # 3. Test Idempotency: copying again returns the exact same signature without creating duplicate
+    copy_again_resp = await async_client.post(
+        f"/api/v1/signatures/{src_sig_id}/copy",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"target_email_account_id": acc_2_id},
+    )
+    assert copy_again_resp.status_code == 201
+    assert copy_again_resp.json()["id"] == copied_data["id"]
+
+    # Verify list for acc_2 has exactly 2 signatures (original default + copied one), not 3
+    list_acc2 = await async_client.get(
+        f"/api/v1/signatures?email_account_id={acc_2_id}",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert list_acc2.status_code == 200
+    assert len(list_acc2.json()["signatures"]) == 2
+
+    # 4. Test Cross-Company Isolation: attempt copying to account in Company B
+    comp_b_id = await create_company_helper(async_client, owner_token, "Copy Comp B")
+    acc_b_id = await create_account_helper(async_client, owner_token, comp_b_id, "Acc B", "acc@compb.com")
+
+    cross_resp = await async_client.post(
+        f"/api/v1/signatures/{src_sig_id}/copy",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"target_email_account_id": acc_b_id},
+    )
+    assert cross_resp.status_code == 400
+    assert "different company" in cross_resp.json()["detail"].lower()
+
+    # 5. Test Authorization: member without access to target account
+    member_email = "member_copy@test.com"
+    member_token = await register_and_login(async_client, member_email)
+    member_user_id = await add_company_member_helper(async_client, owner_token, comp_a_id, member_email, "MEMBER")
+    # Grant access only to acc_1, not acc_2
+    await grant_account_access_helper(async_client, owner_token, comp_a_id, acc_1_id, member_user_id)
+
+    unauth_resp = await async_client.post(
+        f"/api/v1/signatures/{src_sig_id}/copy",
+        headers={"Authorization": f"Bearer {member_token}"},
+        json={"target_email_account_id": acc_2_id},
+    )
+    assert unauth_resp.status_code == 403
+

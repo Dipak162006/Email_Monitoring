@@ -579,10 +579,30 @@ class EmailSignatureListResponse(BaseModel):
     offset: int
 
 
+class EmailSignatureCopyRequest(BaseModel):
+    """Schema for copying an email signature to another email account."""
+    model_config = ConfigDict(extra="forbid")
+
+    target_email_account_id: int = Field(
+        ...,
+        description="Destination EmailAccount ID within the same company",
+    )
+    new_name: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        description="Optional custom name for the copied signature",
+    )
+    make_default: bool = Field(
+        default=False,
+        description="Whether to make the copied signature default on the destination account",
+    )
+
+
 # Schema Aliases
 SignatureCreate = EmailSignatureCreate
 SignatureUpdate = EmailSignatureUpdate
 SignatureRead = EmailSignatureRead
+SignatureCopyRequest = EmailSignatureCopyRequest
 SignatureListResponse = EmailSignatureListResponse
 
 

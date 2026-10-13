@@ -18,6 +18,7 @@ import type {
   EmailSignatureItem,
   EmailSignatureUpdatePayload,
 } from "../../types/emails";
+import { signaturesApi } from "../../services/api";
 
 export interface SignatureDrawerProps {
   isOpen: boolean;
@@ -51,6 +52,7 @@ export const SignatureDrawer: React.FC<SignatureDrawerProps> = ({
   // Form State
   const [name, setName] = useState("");
   const [accountId, setAccountId] = useState<number | undefined>(undefined);
+  const [applyToAllAccounts, setApplyToAllAccounts] = useState(false);
   const [isDefault, setIsDefault] = useState(false);
   const [bodyHtml, setBodyHtml] = useState("");
   const [bodyText, setBodyText] = useState("");
@@ -186,6 +188,20 @@ export const SignatureDrawer: React.FC<SignatureDrawerProps> = ({
 
     try {
       await onSave(payload, isEditMode);
+      if (!isEditMode && applyToAllAccounts && accounts.length > 1) {
+        const otherAccounts = accounts.filter((a) => a.id !== accountId);
+        for (const other of otherAccounts) {
+          try {
+            await signaturesApi.createSignature({
+              ...payload,
+              email_account_id: other.id,
+              is_default: false,
+            });
+          } catch (e) {
+            console.warn(`Could not create signature for account ${other.id}:`, e);
+          }
+        }
+      }
       onClose();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to save signature. Please try again.";
@@ -269,6 +285,24 @@ export const SignatureDrawer: React.FC<SignatureDrawerProps> = ({
                   </option>
                 ))}
               </select>
+
+              {!isEditMode && accounts.length > 1 && (
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    type="checkbox"
+                    id="apply-to-all-accounts"
+                    checked={applyToAllAccounts}
+                    onChange={(e) => setApplyToAllAccounts(e.target.checked)}
+                    className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                  />
+                  <label
+                    htmlFor="apply-to-all-accounts"
+                    className="text-xs text-slate-600 cursor-pointer select-none"
+                  >
+                    Also create this signature for all my connected email accounts ({accounts.length})
+                  </label>
+                </div>
+              )}
             </div>
 
             {/* Default Signature Toggle */}

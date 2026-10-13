@@ -1069,6 +1069,7 @@ export function ComposePage() {
       <SignatureModal
         isOpen={isSignatureModalOpen}
         accountId={selectedAccountId || undefined}
+        companyId={currentCompanyId || undefined}
         onClose={() => setIsSignatureModalOpen(false)}
         onSelectSignature={handleSelectSignature}
       />

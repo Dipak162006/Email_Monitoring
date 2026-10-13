@@ -190,6 +190,9 @@ class SignatureService:
 
             base_query = select(EmailSignature).where(EmailSignature.email_account_id == account_id)
             count_query = select(func.count(EmailSignature.id)).where(EmailSignature.email_account_id == account_id)
+            if company_id is not None:
+                base_query = base_query.where(EmailSignature.company_id == company_id)
+                count_query = count_query.where(EmailSignature.company_id == company_id)
 
             total_res = await db.execute(count_query)
             total = total_res.scalar() or 0
@@ -238,6 +241,9 @@ class SignatureService:
 
         base_query = select(EmailSignature).where(EmailSignature.email_account_id.in_(accessible_account_ids))
         count_query = select(func.count(EmailSignature.id)).where(EmailSignature.email_account_id.in_(accessible_account_ids))
+        if company_id is not None:
+            base_query = base_query.where(EmailSignature.company_id == company_id)
+            count_query = count_query.where(EmailSignature.company_id == company_id)
 
         total_res = await db.execute(count_query)
         total = total_res.scalar() or 0
@@ -248,6 +254,173 @@ class SignatureService:
             .offset(offset)
         )
         return list(signatures_res.scalars().all()), total
+
+    @classmethod
+    async def copy_signature(
+        cls,
+        db: AsyncSession,
+        current_user: User,
+        signature_id: int,
+        target_account_id: int,
+        new_name: Optional[str] = None,
+        make_default: bool = False,
+    ) -> EmailSignature:
+        """Copy an email signature to another email account with strict authorization,
+        company isolation, idempotency, and preservation of existing signatures.
+        """
+        # 1. Fetch source signature
+        source_sig = await db.get(EmailSignature, signature_id)
+        if not source_sig:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Source signature not found.",
+            )
+
+        # 2. Check source company membership and account access
+        source_membership = await CompanyService.get_user_membership(
+            db=db,
+            company_id=source_sig.company_id,
+            user_id=current_user.id,
+        )
+        if not source_membership:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not belong to the company that owns this signature.",
+            )
+
+        source_account = await EmailAccountService.get_email_account(db, source_sig.email_account_id)
+        if not source_account:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Source email account not found.",
+            )
+
+        has_source_access = await EmailAccountService.check_user_access(
+            db=db,
+            account=source_account,
+            user_id=current_user.id,
+            user_role=source_membership.role,
+        )
+        if not has_source_access:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to access the source signature's account.",
+            )
+
+        # 3. Fetch and validate target email account
+        target_account = await EmailAccountService.get_email_account(db, target_account_id)
+        if not target_account:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Target email account not found.",
+            )
+
+        if not target_account.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Target email account is inactive.",
+            )
+
+        # 4. Enforce strict company isolation: cannot copy signatures across different companies
+        if target_account.company_id != source_sig.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot copy signature to an account in a different company.",
+            )
+
+        # 5. Check target account access
+        has_target_access = await EmailAccountService.check_user_access(
+            db=db,
+            account=target_account,
+            user_id=current_user.id,
+            user_role=source_membership.role,
+        )
+        if not has_target_access:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to create signatures for the target email account.",
+            )
+
+        # 6. Idempotency Check: if target account already has an identical signature (matching body_html and body_text), reuse it!
+        stmt_existing = select(EmailSignature).where(
+            EmailSignature.email_account_id == target_account_id,
+            EmailSignature.body_html == source_sig.body_html,
+            EmailSignature.body_text == source_sig.body_text,
+        )
+        res_existing = await db.execute(stmt_existing)
+        existing_identical = res_existing.scalars().first()
+        if existing_identical:
+            logger.info(
+                "Idempotent signature copy: target account %d already has identical signature id=%d ('%s')",
+                target_account_id,
+                existing_identical.id,
+                existing_identical.name,
+            )
+            return existing_identical
+
+        # 7. Safe Name Resolution: prevent accidental duplicate names on target account
+        desired_name = (new_name or source_sig.name).strip()
+        candidate_name = desired_name
+        name_check_stmt = select(EmailSignature.id).where(
+            EmailSignature.email_account_id == target_account_id,
+            EmailSignature.name == candidate_name,
+        )
+        res_name = await db.execute(name_check_stmt)
+        if res_name.scalar_one_or_none() is not None:
+            # Suffix with (Copy) or unique identifier so existing signature isn't collided
+            candidate_name = f"{desired_name} (Copy)"
+            res_copy = await db.execute(
+                select(EmailSignature.id).where(
+                    EmailSignature.email_account_id == target_account_id,
+                    EmailSignature.name == candidate_name,
+                )
+            )
+            if res_copy.scalar_one_or_none() is not None:
+                candidate_name = f"{desired_name} (from {source_account.name or source_account.email_address})"
+
+        # 8. Default Signature Preservation
+        effective_default = False
+        if make_default:
+            await db.execute(
+                select(EmailAccount.id)
+                .where(EmailAccount.id == target_account_id)
+                .with_for_update()
+            )
+            await db.execute(
+                update(EmailSignature)
+                .where(
+                    EmailSignature.email_account_id == target_account_id,
+                    EmailSignature.is_default == True,
+                )
+                .values(is_default=False)
+            )
+            effective_default = True
+
+        # 9. Create copied signature record
+        cloned = EmailSignature(
+            company_id=source_sig.company_id,
+            email_account_id=target_account_id,
+            user_id=current_user.id,
+            name=candidate_name,
+            body_text=source_sig.body_text,
+            body_html=source_sig.body_html,
+            is_default=effective_default,
+        )
+        db.add(cloned)
+        await db.commit()
+        await db.refresh(cloned)
+
+        logger.info(
+            "Copied signature id=%d from account %d to account %d as id=%d ('%s', default=%s) by user %d",
+            source_sig.id,
+            source_sig.email_account_id,
+            target_account_id,
+            cloned.id,
+            cloned.name,
+            cloned.is_default,
+            current_user.id,
+        )
+        return cloned
 
     @classmethod
     async def get_signature(

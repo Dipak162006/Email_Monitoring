@@ -596,6 +596,18 @@ export const signaturesApi = {
     return apiClient.get<EmailSignatureItem | null>(`/api/v1/signatures/default?email_account_id=${accountId}`);
   },
 
+  copySignature: async (
+    signatureId: number,
+    targetAccountId: number,
+    newName?: string,
+    makeDefault?: boolean
+  ): Promise<EmailSignatureItem> => {
+    return apiClient.post<EmailSignatureItem>(`/api/v1/signatures/${signatureId}/copy`, {
+      target_email_account_id: targetAccountId,
+      new_name: newName,
+      make_default: makeDefault ?? false,
+    });
+  },
 };
 
 export const companiesApi = {

@@ -136,6 +136,23 @@ export function SignaturesPage() {
     },
   });
 
+  const copyToAllAccountsMutation = useMutation({
+    mutationFn: async (sig: EmailSignatureItem) => {
+      const otherAccounts = accounts.filter((a) => a.id !== sig.email_account_id);
+      for (const acc of otherAccounts) {
+        try {
+          await signaturesApi.copySignature(sig.id, acc.id, undefined, false);
+        } catch (e) {
+          console.warn(`Could not copy signature to account ${acc.id}:`, e);
+        }
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["signatures"] });
+      showToast("Signature safely synced across accounts.");
+    },
+  });
+
   // Client-side Filter Logic
   const filteredSignatures = useMemo(() => {
     return signatures.filter((sig) => {
@@ -365,6 +382,9 @@ export function SignaturesPage() {
               onEdit={handleOpenEdit}
               onSetDefault={(s) => setDefaultMutation.mutate(s.id)}
               onDuplicate={(s) => duplicateMutation.mutate(s)}
+              onCopyToAllAccounts={
+                accounts.length > 1 ? (s) => copyToAllAccountsMutation.mutate(s) : undefined
+              }
               onPreview={(s) => setPreviewSignature(s)}
               onDelete={(s) => setDeletingSignature(s)}
               isUpdatingDefault={setDefaultMutation.isPending}
