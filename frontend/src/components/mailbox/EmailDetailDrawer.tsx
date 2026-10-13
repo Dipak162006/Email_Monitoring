@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -10,8 +10,6 @@ import {
   ShieldCheck,
   Clock,
   Users,
-  Code,
-  FileText,
   RotateCcw,
   Trash2,
   PenTool,
@@ -20,7 +18,7 @@ import type { EmailItem } from "../../types/emails";
 import { emailsApi } from "../../services/api";
 import { AttachmentList } from "./AttachmentList";
 import { EmailConversation } from "./EmailConversation";
-import DOMPurify from "dompurify";
+import { EmailBodyViewer } from "./EmailBodyViewer";
 
 interface EmailDetailDrawerProps {
   email: EmailItem | null;
@@ -57,8 +55,6 @@ export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({
   onPermanentDelete,
   onMoveToTrash,
 }) => {
-  const [viewMode, setViewMode] = useState<"html" | "text">("html");
-
   // Escape key handler
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -85,9 +81,6 @@ export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({
   if (!email) {
     return null;
   }
-
-  const hasHtml = !!email.body_html;
-  const sanitizedHtml = hasHtml ? DOMPurify.sanitize(email.body_html || "") : null;
 
   return createPortal(
     <>
@@ -178,46 +171,12 @@ export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({
             </div>
           </div>
 
-          {/* Message Body Switcher & Content */}
-          <div className="space-y-3">
-            {hasHtml && email.body_text && (
-              <div className="flex items-center space-x-1 bg-slate-100 p-0.5 rounded-lg w-fit text-xs">
-                <button
-                  type="button"
-                  onClick={() => setViewMode("html")}
-                  className={`px-2.5 py-1 rounded-md font-medium transition-colors flex items-center gap-1.5 ${
-                    viewMode === "html" ? "bg-white text-slate-900 shadow-2xs font-semibold" : "text-slate-600 hover:text-slate-900"
-                  }`}
-                >
-                  <Code className="h-3.5 w-3.5" />
-                  HTML View
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode("text")}
-                  className={`px-2.5 py-1 rounded-md font-medium transition-colors flex items-center gap-1.5 ${
-                    viewMode === "text" ? "bg-white text-slate-900 shadow-2xs font-semibold" : "text-slate-600 hover:text-slate-900"
-                  }`}
-                >
-                  <FileText className="h-3.5 w-3.5" />
-                  Plain Text
-                </button>
-              </div>
-            )}
-
-            <div className="text-sm text-slate-700 leading-relaxed bg-white rounded-xl border border-slate-100 p-5 shadow-2xs">
-              {viewMode === "html" && sanitizedHtml ? (
-                <div
-                  className="prose prose-sm max-w-none break-words text-slate-800"
-                  dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
-                />
-              ) : (
-                <pre className="whitespace-pre-wrap font-sans text-xs sm:text-sm text-slate-800 leading-relaxed break-words">
-                  {email.body_text || email.body_html || "No message body content."}
-                </pre>
-              )}
-            </div>
-          </div>
+          {/* Email Body Viewer */}
+          <EmailBodyViewer
+            html={email.body_html}
+            text={email.body_text}
+            defaultMode={email.body_html ? "html" : "text"}
+          />
 
           {/* Attachments Area */}
           {attachmentsData?.attachments && attachmentsData.attachments.length > 0 && (

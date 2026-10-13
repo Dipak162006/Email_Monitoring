@@ -4,7 +4,7 @@ import { ChevronDown, ChevronUp, MessageSquare, CornerDownLeft } from "lucide-re
 import type { EmailItem } from "../../types/emails";
 import { emailsApi } from "../../services/api";
 import { useWorkspace } from "../../hooks/useWorkspace";
-import DOMPurify from "dompurify";
+import { EmailBodyViewer } from "./EmailBodyViewer";
 
 interface EmailConversationProps {
   threadId: number;
@@ -61,7 +61,6 @@ export const EmailConversation: React.FC<EmailConversationProps> = ({ threadId, 
         {threadEmails.map((item: EmailItem) => {
           const isCurrent = item.id === currentEmailId;
           const isExpanded = expandedIds.has(item.id) || isCurrent;
-          const sanitizedHtml = item.body_html ? DOMPurify.sanitize(item.body_html) : null;
 
           return (
             <div
@@ -107,15 +106,13 @@ export const EmailConversation: React.FC<EmailConversationProps> = ({ threadId, 
               </div>
 
               {isExpanded && !isCurrent && (
-                <div className="px-3 pb-3 pt-1 border-t border-slate-200/60 text-slate-600 leading-relaxed">
-                  {sanitizedHtml ? (
-                    <div
-                      className="prose prose-xs max-w-none break-words"
-                      dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
-                    />
-                  ) : (
-                    <p className="whitespace-pre-wrap font-sans">{item.body_text || "No message body."}</p>
-                  )}
+                <div className="px-3 pb-3 pt-2 border-t border-slate-200/60">
+                  <EmailBodyViewer
+                    html={item.body_html}
+                    text={item.body_text}
+                    defaultMode={item.body_html ? "html" : "text"}
+                    minHeight={80}
+                  />
                 </div>
               )}
             </div>

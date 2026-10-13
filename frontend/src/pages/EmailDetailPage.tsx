@@ -11,32 +11,42 @@ import {
   MailOpen,
   ShieldCheck,
   Clock,
-  User,
-  Users,
-  Code,
-  FileText,
   AlertCircle,
   RotateCcw,
   CheckCircle2,
   X,
   PenTool,
+  ChevronDown,
 } from "lucide-react";
 import { emailsApi } from "../services/api";
 import { Card, CardContent } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { AttachmentList } from "../components/mailbox/AttachmentList";
 import { EmailConversation } from "../components/mailbox/EmailConversation";
+import { EmailBodyViewer } from "../components/mailbox/EmailBodyViewer";
 import { RestoreConfirmModal } from "../components/mailbox/RestoreConfirmModal";
 import { PermanentDeleteConfirmModal } from "../components/mailbox/PermanentDeleteConfirmModal";
 import { useWorkspace } from "../hooks/useWorkspace";
-import DOMPurify from "dompurify";
+
+function parseSenderDisplay(sender: string): { name: string; address: string; initial: string } {
+  if (!sender) return { name: "Unknown", address: "", initial: "U" };
+  const match = sender.match(/^(.*?)\s*<(.+?)>$/);
+  if (match) {
+    const name = match[1].trim().replace(/^["']|["']$/g, "");
+    const address = match[2].trim();
+    const initial = (name || address).charAt(0).toUpperCase();
+    return { name: name || address, address, initial };
+  }
+  const clean = sender.trim().replace(/^["']|["']$/g, "");
+  return { name: clean, address: clean, initial: clean.charAt(0).toUpperCase() };
+}
 
 export function EmailDetailPage() {
   const { emailId } = useParams<{ emailId: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { currentCompanyId } = useWorkspace();
-  const [viewMode, setViewMode] = useState<"html" | "text">("html");
+  const [showDetails, setShowDetails] = useState<boolean>(false);
 
   // Modals and feedback state
   const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
@@ -167,12 +177,11 @@ export function EmailDetailPage() {
     );
   }
 
-  const hasHtml = !!email.body_html;
-  const sanitizedHtml = hasHtml ? DOMPurify.sanitize(email.body_html || "") : null;
   const formattedDate = new Date(email.sent_at || email.received_at || email.created_at).toLocaleString([], {
     dateStyle: "medium",
     timeStyle: "short",
   });
+  const senderInfo = parseSenderDisplay(email.sender);
 
   return (
     <div className="space-y-4 max-w-5xl mx-auto pb-10">
@@ -314,89 +323,83 @@ export function EmailDetailPage() {
       <Card className="border-slate-200 shadow-2xs overflow-hidden">
         <CardContent className="p-6 sm:p-8 space-y-6">
           {/* Header Info */}
-          <div className="border-b border-slate-100 pb-5 space-y-3">
+          <div className="border-b border-slate-100 pb-5 space-y-4">
             <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
               {email.subject || "(No Subject)"}
             </h1>
 
-            <div className="space-y-1.5 text-xs text-slate-600">
-              <div className="flex items-center gap-2">
-                <User className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                <span className="font-semibold text-slate-900">From:</span>
-                <span className="text-slate-800">{email.sender}</span>
+            {/* Sender, Recipient, Date Row (Gmail standard) */}
+            <div className="flex items-start justify-between gap-4 flex-wrap">
+              <div className="flex items-start gap-3 min-w-0">
+                {/* Sender Avatar */}
+                <div className="h-10 w-10 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold text-sm shadow-xs shrink-0 select-none">
+                  {senderInfo.initial}
+                </div>
+
+                <div className="min-w-0 space-y-0.5">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-sm text-slate-900 tracking-tight">
+                      {senderInfo.name}
+                    </span>
+                    {senderInfo.address && senderInfo.address !== senderInfo.name && (
+                      <span className="text-xs text-slate-500 font-normal">
+                        &lt;{senderInfo.address}&gt;
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1.5 text-xs text-slate-500">
+                    <span>
+                      to {email.recipients && email.recipients.length > 0 ? (email.recipients.length === 1 ? email.recipients[0] : `${email.recipients[0]} +${email.recipients.length - 1}`) : "me"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowDetails((prev) => !prev)}
+                      className="p-0.5 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-600 cursor-pointer transition-colors"
+                      title="Show security and delivery details"
+                    >
+                      <ChevronDown className={`h-3 w-3 transition-transform ${showDetails ? "rotate-180" : ""}`} />
+                    </button>
+                  </div>
+                </div>
               </div>
 
-              {email.recipients && email.recipients.length > 0 && (
-                <div className="flex items-center gap-2">
-                  <Users className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                  <span className="font-semibold text-slate-900">To:</span>
-                  <span className="text-slate-800">{email.recipients.join(", ")}</span>
-                </div>
-              )}
-
-              <div className="flex items-center gap-2 text-slate-500">
+              {/* Timestamp */}
+              <div className="flex items-center gap-2 text-xs text-slate-500 shrink-0">
                 <Clock className="h-3.5 w-3.5 text-slate-400 shrink-0" />
                 <span>{formattedDate}</span>
               </div>
             </div>
-          </div>
 
-          {/* Telemetry Trace Box */}
-          <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl space-y-2">
-            <div className="flex items-center justify-between text-[11px] text-slate-500 uppercase tracking-wider font-semibold">
-              <span>Telemetry Protocol Trace</span>
-              <span className="text-emerald-700 font-mono font-medium flex items-center gap-1">
-                <ShieldCheck className="h-3.5 w-3.5" />
-                DKIM: PASS • SPF: PASS
-              </span>
-            </div>
-            <div className="font-mono text-xs text-slate-600 space-y-1">
-              <div>Return-Path: &lt;{email.sender}&gt;</div>
-              <div>Status: {email.status} • Direction: {email.direction}</div>
-              <div>Message ID: {email.message_id || `MSG-${email.id}`}</div>
-            </div>
-          </div>
+            {/* Collapsible Security & Telemetry Details Card */}
+            {showDetails && (
+              <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl space-y-2 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-slate-700 font-mono">
+                  <div><span className="font-sans font-semibold text-slate-500">From: </span>{email.sender}</div>
+                  {email.reply_to && <div><span className="font-sans font-semibold text-slate-500">Reply-To: </span>{email.reply_to}</div>}
+                  <div><span className="font-sans font-semibold text-slate-500">To: </span>{email.recipients?.join(", ") || "me"}</div>
+                  {email.cc && email.cc.length > 0 && <div><span className="font-sans font-semibold text-slate-500">Cc: </span>{email.cc.join(", ")}</div>}
+                  <div><span className="font-sans font-semibold text-slate-500">Date: </span>{formattedDate}</div>
+                  <div><span className="font-sans font-semibold text-slate-500">Message-ID: </span><span className="break-all">{email.message_id || `MSG-${email.id}`}</span></div>
+                </div>
 
-          {/* Body Viewer */}
-          <div className="space-y-3">
-            {hasHtml && email.body_text && (
-              <div className="flex items-center space-x-1 bg-slate-100 p-0.5 rounded-lg w-fit text-xs">
-                <button
-                  type="button"
-                  onClick={() => setViewMode("html")}
-                  className={`px-2.5 py-1 rounded-md font-medium transition-colors flex items-center gap-1 ${
-                    viewMode === "html" ? "bg-white text-slate-900 shadow-2xs" : "text-slate-600 hover:text-slate-900"
-                  }`}
-                >
-                  <Code className="h-3 w-3" />
-                  HTML View
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode("text")}
-                  className={`px-2.5 py-1 rounded-md font-medium transition-colors flex items-center gap-1 ${
-                    viewMode === "text" ? "bg-white text-slate-900 shadow-2xs" : "text-slate-600 hover:text-slate-900"
-                  }`}
-                >
-                  <FileText className="h-3 w-3" />
-                  Plain Text
-                </button>
+                <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500 flex-wrap gap-2">
+                  <span className="text-emerald-700 font-medium flex items-center gap-1 font-mono">
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    Standard TLS Encryption • SPF: PASS • DKIM: PASS
+                  </span>
+                  <span className="font-medium text-slate-500">Direction: {email.direction} • Status: {email.status}</span>
+                </div>
               </div>
             )}
-
-            <div className="text-sm text-slate-800 leading-relaxed bg-white rounded-lg border border-slate-100 p-6 min-h-[160px]">
-              {viewMode === "html" && sanitizedHtml ? (
-                <div
-                  className="prose prose-sm max-w-none break-words text-slate-800"
-                  dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
-                />
-              ) : (
-                <pre className="whitespace-pre-wrap font-sans text-xs sm:text-sm text-slate-800 leading-relaxed">
-                  {email.body_text || email.body_html || "No message body content."}
-                </pre>
-              )}
-            </div>
           </div>
+
+          {/* Email Body Canvas */}
+          <EmailBodyViewer
+            html={email.body_html}
+            text={email.body_text}
+            defaultMode={email.body_html ? "html" : "text"}
+          />
 
           {/* Attachments */}
           {attachmentsData?.attachments && attachmentsData.attachments.length > 0 && (
