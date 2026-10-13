@@ -110,14 +110,14 @@ function renderFormattedPlainText(rawText: string) {
 
 /**
  * Sandboxed, auto-resizing HTML Email Viewer adhering to industry SaaS standards (Gmail/Superhuman/Front).
- * Isolates email stylesheets, prevents CSS pollution, respects tables and inline layouts, and resizes dynamically.
+ * Isolates email stylesheets, prevents CSS pollution, eliminates inner scrollbars, and resizes dynamically.
  */
 export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
   html,
   text,
   defaultMode = "html",
   className = "",
-  minHeight = 160,
+  minHeight = 200,
 }) => {
   const hasHtml = Boolean(html && html.trim().length > 0);
   const hasText = Boolean(text && text.trim().length > 0);
@@ -129,14 +129,18 @@ export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
   });
 
   const [iframeHeight, setIframeHeight] = useState<number>(minHeight);
+  const [isReady, setIsReady] = useState<boolean>(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const mutationObserverRef = useRef<MutationObserver | null>(null);
 
-  // Prepare sanitized, encapsulated HTML document
+  // Prepare sanitized, encapsulated HTML document preserving original <style> and media queries
   const preparedDocHtml = useMemo(() => {
     if (!html) return "";
 
-    // Sanitize with rich email tag & attribute preservation
-    const cleanBody = DOMPurify.sanitize(html, {
+    // Sanitize with whole-document preservation so <head> and <style> tags (media queries, responsive hiding) are preserved
+    const sanitized = DOMPurify.sanitize(html, {
+      WHOLE_DOCUMENT: true,
       ADD_TAGS: [
         "style",
         "table",
@@ -174,6 +178,8 @@ export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
         "code",
         "font",
         "center",
+        "meta",
+        "title",
       ],
       ADD_ATTR: [
         "target",
@@ -193,18 +199,18 @@ export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
         "itemtype",
         "itemprop",
         "data-o-mail-quote",
+        "content",
+        "http-equiv",
+        "name",
       ],
       ALLOW_DATA_ATTR: true,
-      FORCE_BODY: false,
     });
 
-    return `<!DOCTYPE html>
-<html>
-<head>
+    const baselineHead = `
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <base target="_blank">
-  <style>
+  <style id="pulsemail-baseline-reset">
     /* Gmail/Standard Webmail Baseline Styles */
     *, *:before, *:after {
       box-sizing: border-box;
@@ -213,6 +219,10 @@ export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
       margin: 0;
       padding: 0;
       width: 100%;
+      height: auto !important;
+      min-height: 0 !important;
+      overflow-y: hidden !important;
+      overflow-x: auto;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       font-size: 14px;
       line-height: 1.5;
@@ -222,8 +232,18 @@ export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
       overflow-wrap: break-word;
       -webkit-text-size-adjust: 100%;
     }
+    /* Suppress scrollbars inside the iframe */
+    ::-webkit-scrollbar {
+      width: 0px;
+      height: 4px;
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+    }
     body {
-      padding: 2px 0 16px 0;
+      padding: 4px 0 16px 0;
     }
     img {
       max-width: 100%;
@@ -241,53 +261,181 @@ export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
     }
     /* Suppress invisible preheader tracking blocks */
     div[style*="display: none"], div[style*="display:none"],
-    span[style*="display: none"], span[style*="display:none"] {
+    span[style*="display: none"], span[style*="display:none"],
+    div[style*="display: none !important"], span[style*="display: none !important"] {
       display: none !important;
       height: 0 !important;
       max-height: 0 !important;
       line-height: 0 !important;
       font-size: 0 !important;
       overflow: hidden !important;
+      visibility: hidden !important;
+      mso-hide: all !important;
     }
     /* Muted quote / thread styling */
     [data-o-mail-quote="1"], .gmail_quote, .gmail_signature {
       color: #5f6368;
     }
-  </style>
-</head>
-<body>
-  ${cleanBody}
-</body>
-</html>`;
+  </style>`;
+
+    let finalDoc = sanitized;
+    if (finalDoc.includes("<head>")) {
+      finalDoc = finalDoc.replace("<head>", `<head>${baselineHead}`);
+    } else if (/<head[^>]*>/i.test(finalDoc)) {
+      finalDoc = finalDoc.replace(/<head[^>]*>/i, (m) => `${m}${baselineHead}`);
+    } else if (finalDoc.includes("<html>")) {
+      finalDoc = finalDoc.replace("<html>", `<html><head>${baselineHead}</head>`);
+    } else {
+      finalDoc = `<!DOCTYPE html><html><head>${baselineHead}</head><body>${finalDoc}</body></html>`;
+    }
+
+    if (!finalDoc.toLowerCase().startsWith("<!doctype")) {
+      finalDoc = `<!DOCTYPE html>\n${finalDoc}`;
+    }
+
+    return finalDoc;
   }, [html]);
 
-  // Dynamic Auto-Resize calculation
-  const updateIframeHeight = useCallback(() => {
+  // Reset ready state on new email HTML content
+  useEffect(() => {
+    setIsReady(false);
+    setIframeHeight(minHeight);
+  }, [preparedDocHtml, minHeight]);
+
+  // Dynamic Auto-Resize calculation with child bounding box & scroll height
+  const measureAndSetHeight = useCallback(() => {
     const iframe = iframeRef.current;
-    if (!iframe || !iframe.contentWindow || !iframe.contentDocument) return;
+    if (!iframe) return;
 
     try {
       const doc = iframe.contentDocument;
+      if (!doc) return;
       const body = doc.body;
       const htmlEl = doc.documentElement;
-
       if (!body || !htmlEl) return;
 
-      const measuredHeight = Math.max(
-        body.scrollHeight,
-        body.offsetHeight,
-        htmlEl.clientHeight,
-        htmlEl.scrollHeight,
-        htmlEl.offsetHeight
+      // 1. Calculate bottom coordinate of all top-level children
+      let maxChildBottom = 0;
+      try {
+        const children = body.children;
+        for (let i = 0; i < children.length; i++) {
+          const child = children[i] as HTMLElement;
+          if (child && typeof child.getBoundingClientRect === "function") {
+            const rect = child.getBoundingClientRect();
+            if (rect.bottom > maxChildBottom) {
+              maxChildBottom = rect.bottom;
+            }
+          }
+        }
+      } catch {
+        // Fallback
+      }
+
+      // 2. Comprehensive measurement across scrollHeight, offsetHeight, and child bounds
+      const measured = Math.ceil(
+        Math.max(
+          body.scrollHeight || 0,
+          body.offsetHeight || 0,
+          htmlEl.scrollHeight || 0,
+          htmlEl.offsetHeight || 0,
+          maxChildBottom
+        )
       );
 
-      if (measuredHeight > 0) {
-        setIframeHeight(Math.max(measuredHeight + 20, minHeight));
+      if (measured > 0) {
+        // Add a 16px bottom padding cushion to ensure no subpixel cutoffs
+        const targetHeight = Math.max(measured + 16, minHeight);
+        setIframeHeight((prev) => {
+          if (Math.abs(prev - targetHeight) > 2) {
+            return targetHeight;
+          }
+          return prev;
+        });
+        setIsReady(true);
       }
     } catch {
-      // Access errors ignored in constrained environments
+      // In restricted environments, reveal content safely
+      setIsReady(true);
     }
   }, [minHeight]);
+
+  // Setup listeners and observers inside the iframe document
+  const setupIframeDocument = useCallback(() => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+
+    try {
+      const doc = iframe.contentDocument;
+      if (!doc) {
+        setIsReady(true);
+        return;
+      }
+
+      // Ensure all links open securely in new tabs
+      doc.querySelectorAll("a").forEach((anchor) => {
+        anchor.setAttribute("target", "_blank");
+        anchor.setAttribute("rel", "noopener noreferrer");
+      });
+
+      // Immediate measurement
+      measureAndSetHeight();
+
+      // Clean up previous observers
+      if (resizeObserverRef.current) {
+        resizeObserverRef.current.disconnect();
+        resizeObserverRef.current = null;
+      }
+      if (mutationObserverRef.current) {
+        mutationObserverRef.current.disconnect();
+        mutationObserverRef.current = null;
+      }
+
+      // Observe element resizing (body & documentElement)
+      if (typeof ResizeObserver !== "undefined" && doc.body) {
+        const ro = new ResizeObserver(() => {
+          measureAndSetHeight();
+        });
+        ro.observe(doc.body);
+        if (doc.documentElement) {
+          ro.observe(doc.documentElement);
+        }
+        resizeObserverRef.current = ro;
+      }
+
+      // Observe DOM mutations
+      if (typeof MutationObserver !== "undefined" && doc.body) {
+        const mo = new MutationObserver(() => {
+          measureAndSetHeight();
+        });
+        mo.observe(doc.body, { childList: true, subtree: true, attributes: true });
+        mutationObserverRef.current = mo;
+      }
+
+      // Watch all images for load/error events to re-measure on image completion
+      doc.querySelectorAll("img").forEach((img) => {
+        if (!img.complete) {
+          img.addEventListener("load", measureAndSetHeight, { once: true });
+          img.addEventListener("error", measureAndSetHeight, { once: true });
+        }
+      });
+
+      // Trigger on font loading resolution
+      if (doc.fonts && doc.fonts.ready) {
+        doc.fonts.ready.then(measureAndSetHeight).catch(() => {});
+      }
+
+      // Staggered interval passes for delayed layouts / CSS reflows / remote image loads
+      const timers = [40, 120, 250, 500, 1000, 2000].map((ms) =>
+        setTimeout(measureAndSetHeight, ms)
+      );
+
+      return () => {
+        timers.forEach(clearTimeout);
+      };
+    } catch {
+      setIsReady(true);
+    }
+  }, [measureAndSetHeight]);
 
   useEffect(() => {
     if (viewMode !== "html") return;
@@ -295,41 +443,26 @@ export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
     const iframe = iframeRef.current;
     if (!iframe) return;
 
-    const handleLoad = () => {
-      updateIframeHeight();
+    // If the document is already parsed and ready, run setup immediately
+    if (
+      iframe.contentDocument &&
+      (iframe.contentDocument.readyState === "complete" ||
+        iframe.contentDocument.readyState === "interactive")
+    ) {
+      setupIframeDocument();
+    }
 
-      try {
-        const doc = iframe.contentDocument;
-        if (!doc) return;
-
-        // Force all links to target _blank and open safely
-        doc.querySelectorAll("a").forEach((anchor) => {
-          anchor.setAttribute("target", "_blank");
-          anchor.setAttribute("rel", "noopener noreferrer");
-        });
-
-        // Watch for image loads that change dimensions
-        doc.querySelectorAll("img").forEach((img) => {
-          img.addEventListener("load", updateIframeHeight);
-        });
-
-        // Watch DOM mutations and size changes
-        if (typeof ResizeObserver !== "undefined" && doc.body) {
-          const resizeObserver = new ResizeObserver(() => {
-            updateIframeHeight();
-          });
-          resizeObserver.observe(doc.body);
-        }
-      } catch {
-        // Ignored
+    return () => {
+      if (resizeObserverRef.current) {
+        resizeObserverRef.current.disconnect();
+        resizeObserverRef.current = null;
+      }
+      if (mutationObserverRef.current) {
+        mutationObserverRef.current.disconnect();
+        mutationObserverRef.current = null;
       }
     };
-
-    iframe.addEventListener("load", handleLoad);
-    return () => {
-      iframe.removeEventListener("load", handleLoad);
-    };
-  }, [viewMode, preparedDocHtml, updateIframeHeight]);
+  }, [viewMode, preparedDocHtml, setupIframeDocument]);
 
   return (
     <div className={`space-y-3 ${className}`}>
@@ -366,19 +499,52 @@ export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
       )}
 
       {/* Email Body Canvas */}
-      <div className="w-full bg-white rounded-xl border border-slate-200/80 p-4 sm:p-6 shadow-2xs transition-all overflow-hidden">
+      <div className="w-full bg-white rounded-xl border border-slate-200/80 p-4 sm:p-6 shadow-2xs transition-all overflow-x-auto overflow-y-visible">
         {viewMode === "html" && hasHtml ? (
-          <iframe
-            ref={iframeRef}
-            title="Email Message Body"
-            sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin"
-            srcDoc={preparedDocHtml}
-            className="w-full border-0 overflow-hidden block"
-            style={{
-              height: `${iframeHeight}px`,
-              minHeight: `${minHeight}px`,
-            }}
-          />
+          <div className="relative w-full" style={{ minHeight: `${minHeight}px` }}>
+            {/* Sleek Skeleton Loading state while iframe calculates initial layout */}
+            {!isReady && (
+              <div
+                className="absolute inset-0 bg-white z-10 space-y-4 animate-pulse py-2 pointer-events-none"
+                aria-hidden="true"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 bg-slate-100 rounded-full shrink-0" />
+                  <div className="space-y-1.5 flex-1">
+                    <div className="h-3.5 bg-slate-200/70 rounded w-1/4" />
+                    <div className="h-2.5 bg-slate-100 rounded w-1/3" />
+                  </div>
+                </div>
+                <div className="space-y-2.5 pt-1">
+                  <div className="h-3 bg-slate-200/60 rounded w-3/4" />
+                  <div className="h-3 bg-slate-100 rounded w-full" />
+                  <div className="h-3 bg-slate-100 rounded w-5/6" />
+                  <div className="h-3 bg-slate-100 rounded w-2/3" />
+                </div>
+                <div className="pt-2">
+                  <div className="h-28 bg-slate-100/70 rounded-xl w-full" />
+                </div>
+              </div>
+            )}
+
+            {/* Sandboxed Iframe (Strictly no inner vertical scrollbar, smoothly synced height) */}
+            <iframe
+              ref={iframeRef}
+              title="Email Message Body"
+              scrolling="no"
+              sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin"
+              srcDoc={preparedDocHtml}
+              onLoad={setupIframeDocument}
+              className={`w-full border-0 block transition-opacity duration-200 ${
+                isReady ? "opacity-100" : "opacity-0"
+              }`}
+              style={{
+                height: `${iframeHeight}px`,
+                minHeight: `${minHeight}px`,
+                transition: "height 0.15s ease-out, opacity 0.2s ease-in-out",
+              }}
+            />
+          </div>
         ) : (
           renderFormattedPlainText(text || html || "")
         )}

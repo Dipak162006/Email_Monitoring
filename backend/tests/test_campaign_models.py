@@ -456,17 +456,60 @@ async def test_email_account_restrict_delete_with_campaign(db_session: AsyncSess
     await db_session.rollback()
 
 
-def test_migration_015_upgrade_downgrade_cycle():
-    """Test that migration 015 can be downgraded to 014 and re-upgraded to 015 cleanly."""
-    from pathlib import Path
+@pytest.mark.asyncio
+async def test_migration_015_upgrade_downgrade_cycle(test_alembic_config):
+    """Test that migration 015 can be downgraded to 014 and re-upgraded cleanly on isolated test db."""
     from alembic import command
-    from alembic.config import Config
+    from sqlalchemy.engine import make_url
+    from tests.conftest import test_async_engine
 
-    alembic_ini_path = Path(__file__).resolve().parent.parent / "alembic.ini"
-    alembic_cfg = Config(str(alembic_ini_path))
+    # Dispose any open async pool connections before sync DDL migrations
+    await test_async_engine.dispose()
 
-    # Downgrade 015 -> 014
-    command.downgrade(alembic_cfg, "014_email_accounts_domain_id")
+    # Immediate fail-closed validation of target database before destructive migration operations
+    target_url = test_alembic_config.get_main_option("sqlalchemy.url")
+    assert target_url is not None, "Target URL must be configured for migration test"
 
-    # Upgrade 014 -> 015
-    command.upgrade(alembic_cfg, "015_create_campaigns_tables")
+    db_name = (make_url(target_url).database or "").lower()
+    assert db_name.endswith("_test") or "test" in db_name, f"Expected test database, got: {db_name}"
+    assert db_name not in {"email_monitoring", "production", "prod", "postgres", "default"}, f"Unsafe target: {db_name}"
+
+    # Ensure test database revision is stamped at head before cycle
+    command.stamp(test_alembic_config, "head")
+
+    # Downgrade 015 -> 014 on isolated test database
+    command.downgrade(test_alembic_config, "014_email_accounts_domain_id")
+
+    # Re-upgrade 014 -> 015
+    command.upgrade(test_alembic_config, "015_create_campaigns_tables")
+
+    # Re-upgrade all the way back to head so test database schema remains current for other tests
+    command.upgrade(test_alembic_config, "head")
+
+    # Dispose again after DDL
+    await test_async_engine.dispose()
+
+
+def test_migration_safety_guard_rejects_protected_database(test_alembic_config):
+    """Test that fail-closed safety guard blocks migration execution on protected databases during test runs."""
+    from alembic import command
+    from sqlalchemy.engine import make_url
+
+    # Artificially set Alembic target to protected development database name
+    unsafe_url = str(make_url(test_alembic_config.get_main_option("sqlalchemy.url")).set(database="email_monitoring"))
+    test_alembic_config.set_main_option("sqlalchemy.url", unsafe_url)
+
+    with pytest.raises(RuntimeError, match=r"FATAL SAFETY INTERLOCK.*protected development/production database"):
+        command.downgrade(test_alembic_config, "014_email_accounts_domain_id")
+
+
+def test_migration_safety_guard_rejects_missing_url(test_alembic_config):
+    """Test that fail-closed safety guard blocks migration execution when target database URL is empty or missing."""
+    from alembic import command
+
+    test_alembic_config.set_main_option("sqlalchemy.url", "")
+
+    with pytest.raises(RuntimeError, match=r"FATAL SAFETY INTERLOCK.*no target database URL was provided"):
+        command.downgrade(test_alembic_config, "014_email_accounts_domain_id")
+
+
