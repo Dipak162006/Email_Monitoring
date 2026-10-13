@@ -59,6 +59,10 @@ class EmailSendRequest(BaseModel):
         default=None,
         description="Optional list of pre-uploaded EmailAttachment IDs to attach to the message",
     )
+    campaign_attachment_ids: Optional[List[int]] = Field(
+        default=None,
+        description="Optional list of CampaignAttachment IDs to attach to the message",
+    )
 
     @field_validator("to", "cc", "bcc", mode="before")
     @classmethod
