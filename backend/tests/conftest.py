@@ -49,10 +49,10 @@ async def clean_database():
     """Ensure clean database state before each test."""
     async with test_async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments RESTART IDENTITY CASCADE;"))
+        await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments, campaigns, campaign_recipients, campaign_deliveries, suppression_list, campaign_attachments RESTART IDENTITY CASCADE;"))
     yield
     async with test_async_engine.begin() as conn:
-        await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments RESTART IDENTITY CASCADE;"))
+        await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments, campaigns, campaign_recipients, campaign_deliveries, suppression_list, campaign_attachments RESTART IDENTITY CASCADE;"))
     await test_async_engine.dispose()
 
 

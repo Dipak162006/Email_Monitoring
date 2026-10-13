@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     SYNC_INTERVAL_MINUTES: int = 5
     MAX_SYNC_RETRIES: int = 3
     SYNC_RETRY_BACKOFF_SECONDS: int = 60
+    MAX_CAMPAIGN_DELIVERY_RETRIES: int = 3
+    CAMPAIGN_RETRY_BACKOFF_SECONDS: int = 60
 
     # File Storage
     UPLOAD_DIR: str = "./uploads"
