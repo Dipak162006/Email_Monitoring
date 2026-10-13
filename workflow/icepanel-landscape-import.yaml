@@ -1,0 +1,625 @@
+# yaml-language-server: $schema=https://api.icepanel.io/v1/schemas/LandscapeImportData
+namespace: email-monitoring-system
+modelObjects:
+  - id: domain-1
+    name: Email Monitoring System
+    type: domain
+    caption: Standalone Email Monitoring and Management Platform
+    description: A comprehensive platform for monitoring, managing, and orchestrating email communications across multiple accounts and domains with team collaboration features.
+
+  - id: actor-1
+    name: End User
+    type: actor
+    parentId: domain-1
+    caption: Application user
+    description: Individuals who use the platform to manage email accounts, compose messages, and monitor email campaigns.
+
+  - id: system-1
+    name: Email Monitoring Platform
+    type: system
+    parentId: domain-1
+    caption: Core platform system
+    description: The main software system providing email monitoring, management, and campaign orchestration capabilities.
+    icon:
+      technologyId: 4QZq23Fxy9oyoCTmURM6
+    technologyIds:
+      - 4QZq23Fxy9oyoCTmURM6
+    links:
+      - url: https://github.com/dipak/Email_Monitoring
+        customName: Source code
+
+  - id: app-1
+    name: React Frontend SPA
+    type: app
+    parentId: system-1
+    caption: User interface application
+    description: React-based single-page application providing the user interface for email management, dashboard, and configuration.
+    icon:
+      technologyId: 9ZYWgwsvAwKsjKK8lNgg
+    technologyIds:
+      - 9ZYWgwsvAwKsjKK8lNgg
+      - unq9eBvtMu9rTTSQqqUP
+      - RGGR8ElsMwiF1HjOmLMm
+      - 2xBuwaRiSkpnXWZoS5K9
+    links:
+      - url: https://github.com/dipak/Email_Monitoring/tree/main/frontend
+        customName: Frontend source code
+
+  - id: app-2
+    name: FastAPI Backend API
+    type: app
+    parentId: system-1
+    caption: RESTful API backend
+    description: FastAPI-based backend providing RESTful APIs for authentication, email management, campaign orchestration, and team collaboration.
+    icon:
+      technologyId: iGksOBIeifVFXOknv8fh
+    technologyIds:
+      - iGksOBIeifVFXOknv8fh
+      - fK3P9HZzJS9tIt7J4tlb
+    links:
+      - url: https://github.com/dipak/Email_Monitoring/tree/main/backend
+        customName: Backend source code
+
+  - id: app-3
+    name: Celery Background Worker
+    type: app
+    parentId: system-1
+    caption: Asynchronous task processor
+    description: Celery-based worker for processing background tasks including email synchronization, campaign delivery, and periodic operations.
+    icon:
+      technologyId: H4sWT7XtLSYwIOpkCutY
+    technologyIds:
+      - H4sWT7XtLSYwIOpkCutY
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: app-4
+    name: Celery Beat Scheduler
+    type: app
+    parentId: system-1
+    caption: Periodic task scheduler
+    description: Celery Beat scheduler for triggering periodic tasks such as scheduled email syncs and campaign launches.
+    icon:
+      technologyId: H4sWT7XtLSYwIOpkCutY
+    technologyIds:
+      - H4sWT7XtLSYwIOpkCutY
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: app-5
+    name: NGINX Reverse Proxy
+    type: app
+    parentId: system-1
+    caption: Web server and reverse proxy
+    description: NGINX serving the React frontend SPA and proxying API requests to the FastAPI backend.
+    icon:
+      technologyId: sm5fJOzD78Gc6jWclyP1
+    technologyIds:
+      - sm5fJOzD78Gc6jWclyP1
+
+  - id: store-1
+    name: PostgreSQL Database
+    type: store
+    parentId: system-1
+    caption: Primary relational database
+    description: PostgreSQL database storing user accounts, companies, email accounts, emails, campaigns, templates, signatures, and all application data.
+    icon:
+      technologyId: AtAwOo48GPChCWOkPkkj
+    technologyIds:
+      - AtAwOo48GPChCWOkPkkj
+
+  - id: store-2
+    name: Redis Cache
+    type: store
+    parentId: system-1
+    caption: In-memory cache and message broker
+    description: Redis providing caching layer and serving as message broker for Celery task queue.
+    icon:
+      technologyId: Yj8CPPXztMD4nMBi04y8
+    technologyIds:
+      - Yj8CPPXztMD4nMBi04y8
+
+  - id: system-2
+    name: External Email Providers
+    type: system
+    parentId: domain-1
+    caption: Third-party email services
+    description: External SMTP and IMAP providers (Google, Yahoo, Zoho, custom) for email delivery and monitoring.
+    external: true
+
+  - id: component-1
+    name: Auth Router
+    type: component
+    parentId: app-2
+    caption: Authentication endpoints
+    description: FastAPI router handling user registration, login, JWT token management, and profile operations.
+    technologyIds:
+      - iGksOBIeifVFXOknv8fh
+
+  - id: component-2
+    name: Companies Router
+    type: component
+    parentId: app-2
+    caption: Company management endpoints
+    description: FastAPI router for company CRUD operations, member management, and invitation workflows.
+    technologyIds:
+      - iGksOBIeifVFXOknv8fh
+
+  - id: component-3
+    name: Email Accounts Router
+    type: component
+    parentId: app-2
+    caption: Email account management endpoints
+    description: FastAPI router for managing email account configurations, access permissions, and sync triggers.
+    technologyIds:
+      - iGksOBIeifVFXOknv8fh
+
+  - id: component-4
+    name: Emails Router
+    type: component
+    parentId: app-2
+    caption: Email operations endpoints
+    description: FastAPI router for email CRUD operations, draft management, threading, attachments, templates, and signatures.
+    technologyIds:
+      - iGksOBIeifVFXOknv8fh
+
+  - id: component-5
+    name: Campaigns Router
+    type: component
+    parentId: app-2
+    caption: Campaign management endpoints
+    description: FastAPI router for campaign creation, scheduling, delivery orchestration, and suppression list management.
+    technologyIds:
+      - iGksOBIeifVFXOknv8fh
+
+  - id: component-6
+    name: Domains Router
+    type: component
+    parentId: app-2
+    caption: Domain management endpoints
+    description: FastAPI router for domain registration, DNS verification, and DKIM configuration.
+    technologyIds:
+      - iGksOBIeifVFXOknv8fh
+
+  - id: component-7
+    name: Health Router
+    type: component
+    parentId: app-2
+    caption: Health check endpoints
+    description: FastAPI router providing system health checks and diagnostics.
+    technologyIds:
+      - iGksOBIeifVFXOknv8fh
+
+  - id: component-8
+    name: Service Layer
+    type: component
+    parentId: app-2
+    caption: Business logic services
+    description: Collection of service modules implementing business logic for authentication, companies, emails, campaigns, and domains.
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: component-9
+    name: Database Session Manager
+    type: component
+    parentId: app-2
+    caption: Database connection management
+    description: SQLAlchemy async and sync session factory managing database connections and transactions.
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: component-10
+    name: IMAP Service
+    type: component
+    parentId: app-2
+    caption: Email fetching service
+    description: IMAP client adapter for fetching emails from external email providers and parsing message content.
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: component-11
+    name: SMTP Service
+    type: component
+    parentId: app-2
+    caption: Email delivery service
+    description: SMTP client adapter for sending emails through external email providers.
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: component-12
+    name: DNS Resolver Service
+    type: component
+    parentId: app-2
+    caption: DNS validation service
+    description: DNS resolver for validating domain records including MX, SPF, DKIM, and DMARC.
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: component-13
+    name: Auth Context Provider
+    type: component
+    parentId: app-1
+    caption: Authentication state management
+    description: React Context provider managing user authentication state, JWT token, and auth operations.
+    technologyIds:
+      - 9ZYWgwsvAwKsjKK8lNgg
+
+  - id: component-14
+    name: Workspace Context Provider
+    type: component
+    parentId: app-1
+    caption: Workspace state management
+    description: React Context provider managing active company/workspace selection and role-based permissions.
+    technologyIds:
+      - 9ZYWgwsvAwKsjKK8lNgg
+
+  - id: component-15
+    name: API Client Layer
+    type: component
+    parentId: app-1
+    caption: HTTP client abstraction
+    description: Centralized API client layer with typed endpoints for all backend services, JWT authentication, and error handling.
+    technologyIds:
+      - 9ZYWgwsvAwKsjKK8lNgg
+      - 2BwgmtWSZFSCzVjQkGOn
+
+  - id: component-16
+    name: Campaign Task Worker
+    type: component
+    parentId: app-3
+    caption: Campaign delivery processor
+    description: Celery task processor for executing campaign delivery, recipient management, and retry logic.
+    technologyIds:
+      - H4sWT7XtLSYwIOpkCutY
+
+  - id: component-17
+    name: Email Sync Task Worker
+    type: component
+    parentId: app-3
+    caption: Email synchronization processor
+    description: Celery task processor for scheduled email account synchronization with external IMAP providers.
+    technologyIds:
+      - H4sWT7XtLSYwIOpkCutY
+
+modelConnections:
+  - id: conn-1
+    name: Accesses web application
+    direction: outgoing
+    originId: actor-1
+    targetId: app-5
+    technologyIds:
+      - 20VtuIRnZRytNwM9vvxn
+
+  - id: conn-2
+    name: Serves React SPA
+    direction: outgoing
+    originId: app-5
+    targetId: app-1
+    technologyIds:
+      - 20VtuIRnZRytNwM9vvxn
+
+  - id: conn-3
+    name: Proxies API requests
+    direction: outgoing
+    originId: app-5
+    targetId: app-2
+    technologyIds:
+      - 20VtuIRnZRytNwM9vvxn
+
+  - id: conn-4
+    name: Makes REST API calls
+    direction: outgoing
+    originId: component-15
+    targetId: app-2
+    technologyIds:
+      - 20VtuIRnZRytNwM9vvxn
+
+  - id: conn-5
+    name: Reads from database
+    direction: outgoing
+    originId: component-9
+    targetId: store-1
+    technologyIds:
+      - AtAwOo48GPChCWOkPkkj
+
+  - id: conn-6
+    name: Writes to database
+    direction: outgoing
+    originId: component-9
+    targetId: store-1
+    technologyIds:
+      - AtAwOo48GPChCWOkPkkj
+
+  - id: conn-7
+    name: Caches data
+    direction: outgoing
+    originId: app-2
+    targetId: store-2
+    technologyIds:
+      - Yj8CPPXztMD4nMBi04y8
+
+  - id: conn-8
+    name: Publishes tasks
+    direction: outgoing
+    originId: app-2
+    targetId: store-2
+    technologyIds:
+      - vTKQqNRJD8xGw1USgxYR
+
+  - id: conn-9
+    name: Consumes tasks
+    direction: outgoing
+    originId: app-3
+    targetId: store-2
+    technologyIds:
+      - vTKQqNRJD8xGw1USgxYR
+
+  - id: conn-10
+    name: Consumes scheduled tasks
+    direction: outgoing
+    originId: app-4
+    targetId: store-2
+    technologyIds:
+      - vTKQqNRJD8xGw1USgxYR
+
+  - id: conn-11
+    name: Fetches emails via IMAP
+    direction: outgoing
+    originId: component-10
+    targetId: system-2
+    technologyIds:
+      - cAlnYgrQ5Q18f0EEUXgI
+
+  - id: conn-12
+    name: Sends emails via SMTP
+    direction: outgoing
+    originId: component-11
+    targetId: system-2
+    technologyIds:
+      - cAlnYgrQ5Q18f0EEUXgI
+
+  - id: conn-13
+    name: Queries DNS records
+    direction: outgoing
+    originId: component-12
+    targetId: system-2
+    technologyIds:
+      - 2BwgmtWSZFSCzVjQkGOn
+
+  - id: conn-14
+    name: Reads from database
+    direction: outgoing
+    originId: app-3
+    targetId: store-1
+    technologyIds:
+      - AtAwOo48GPChCWOkPkkj
+
+  - id: conn-15
+    name: Writes to database
+    direction: outgoing
+    originId: app-3
+    targetId: store-1
+    technologyIds:
+      - AtAwOo48GPChCWOkPkkj
+
+  - id: conn-16
+    name: Reads from database
+    direction: outgoing
+    originId: app-4
+    targetId: store-1
+    technologyIds:
+      - AtAwOo48GPChCWOkPkkj
+
+  - id: conn-17
+    name: Routes to auth endpoints
+    direction: outgoing
+    originId: app-2
+    targetId: component-1
+    technologyIds:
+      - 2BwgmtWSZFSCzVjQkGOn
+
+  - id: conn-18
+    name: Routes to company endpoints
+    direction: outgoing
+    originId: app-2
+    targetId: component-2
+    technologyIds:
+      - 2BwgmtWSZFSCzVjQkGOn
+
+  - id: conn-19
+    name: Routes to email account endpoints
+    direction: outgoing
+    originId: app-2
+    targetId: component-3
+    technologyIds:
+      - 2BwgmtWSZFSCzVjQkGOn
+
+  - id: conn-20
+    name: Routes to email endpoints
+    direction: outgoing
+    originId: app-2
+    targetId: component-4
+    technologyIds:
+      - 2BwgmtWSZFSCzVjQkGOn
+
+  - id: conn-21
+    name: Routes to campaign endpoints
+    direction: outgoing
+    originId: app-2
+    targetId: component-5
+    technologyIds:
+      - 2BwgmtWSZFSCzVjQkGOn
+
+  - id: conn-22
+    name: Routes to domain endpoints
+    direction: outgoing
+    originId: app-2
+    targetId: component-6
+    technologyIds:
+      - 2BwgmtWSZFSCzVjQkGOn
+
+  - id: conn-23
+    name: Routes to health endpoints
+    direction: outgoing
+    originId: app-2
+    targetId: component-7
+    technologyIds:
+      - 2BwgmtWSZFSCzVjQkGOn
+
+  - id: conn-24
+    name: Delegates to service layer
+    direction: outgoing
+    originId: component-1
+    targetId: component-8
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: conn-25
+    name: Delegates to service layer
+    direction: outgoing
+    originId: component-2
+    targetId: component-8
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: conn-26
+    name: Delegates to service layer
+    direction: outgoing
+    originId: component-3
+    targetId: component-8
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: conn-27
+    name: Delegates to service layer
+    direction: outgoing
+    originId: component-4
+    targetId: component-8
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: conn-28
+    name: Delegates to service layer
+    direction: outgoing
+    originId: component-5
+    targetId: component-8
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: conn-29
+    name: Delegates to service layer
+    direction: outgoing
+    originId: component-6
+    targetId: component-8
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: conn-30
+    name: Uses database sessions
+    direction: outgoing
+    originId: component-8
+    targetId: component-9
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: conn-31
+    name: Calls IMAP service
+    direction: outgoing
+    originId: component-8
+    targetId: component-10
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: conn-32
+    name: Calls SMTP service
+    direction: outgoing
+    originId: component-8
+    targetId: component-11
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: conn-33
+    name: Calls DNS resolver
+    direction: outgoing
+    originId: component-8
+    targetId: component-12
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: conn-34
+    name: Provides auth state
+    direction: outgoing
+    originId: component-13
+    targetId: app-1
+    technologyIds:
+      - 9ZYWgwsvAwKsjKK8lNgg
+
+  - id: conn-35
+    name: Provides workspace state
+    direction: outgoing
+    originId: component-14
+    targetId: app-1
+    technologyIds:
+      - 9ZYWgwsvAwKsjKK8lNgg
+
+  - id: conn-36
+    name: Calls auth API endpoints
+    direction: outgoing
+    originId: component-15
+    targetId: component-1
+    technologyIds:
+      - 20VtuIRnZRytNwM9vvxn
+
+  - id: conn-37
+    name: Calls company API endpoints
+    direction: outgoing
+    originId: component-15
+    targetId: component-2
+    technologyIds:
+      - 20VtuIRnZRytNwM9vvxn
+
+  - id: conn-38
+    name: Calls email account API endpoints
+    direction: outgoing
+    originId: component-15
+    targetId: component-3
+    technologyIds:
+      - 20VtuIRnZRytNwM9vvxn
+
+  - id: conn-39
+    name: Calls email API endpoints
+    direction: outgoing
+    originId: component-15
+    targetId: component-4
+    technologyIds:
+      - 20VtuIRnZRytNwM9vvxn
+
+  - id: conn-40
+    name: Calls campaign API endpoints
+    direction: outgoing
+    originId: component-15
+    targetId: component-5
+    technologyIds:
+      - 20VtuIRnZRytNwM9vvxn
+
+  - id: conn-41
+    name: Calls domain API endpoints
+    direction: outgoing
+    originId: component-15
+    targetId: component-6
+    technologyIds:
+      - 20VtuIRnZRytNwM9vvxn
+
+  - id: conn-42
+    name: Processes campaign tasks
+    direction: outgoing
+    originId: component-16
+    targetId: component-11
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
+
+  - id: conn-43
+    name: Syncs email accounts
+    direction: outgoing
+    originId: component-17
+    targetId: component-10
+    technologyIds:
+      - fK3P9HZzJS9tIt7J4tlb
