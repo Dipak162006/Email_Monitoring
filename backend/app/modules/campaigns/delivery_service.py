@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+from html import escape
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -7,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.sanitizer import sanitize_html
 from app.modules.campaigns.models import (
     Campaign,
     CampaignDelivery,
@@ -24,16 +26,26 @@ from app.modules.emails.service import EmailService
 logger = logging.getLogger(__name__)
 
 
-def render_content_for_recipient(template: Optional[str], recipient: CampaignRecipient) -> Optional[str]:
+def render_content_for_recipient(
+    template: Optional[str],
+    recipient: CampaignRecipient,
+    is_html: bool = False,
+) -> Optional[str]:
     """Replace approved {{first_name}} merge-tags with recipient.first_name (or empty string).
     
     Safe empty-value replacement applies when first_name is None.
     Handles optional whitespace inside braces, e.g. {{ first_name }}.
+    Escapes HTML entities and performs URL safety sanitization when rendering HTML content
+    to prevent HTML injection and malicious script execution in href/src attributes.
     """
     if template is None:
         return None
-    first_name_val = recipient.first_name if recipient.first_name is not None else ""
-    return re.sub(r"\{\{\s*first_name\s*\}\}", first_name_val, template)
+    raw_name = recipient.first_name if recipient.first_name is not None else ""
+    first_name_val = escape(raw_name, quote=True) if is_html else raw_name
+    rendered = re.sub(r"\{\{\s*first_name\s*\}\}", first_name_val, template)
+    if is_html and rendered:
+        return sanitize_html(rendered)
+    return rendered
 
 
 def is_retryable_delivery_error(exc: Optional[Exception]) -> bool:
@@ -419,7 +431,7 @@ class CampaignDeliveryService:
             # 3b. Render recipient-specific content
             rendered_subject = render_content_for_recipient(camp_subject, recipient_obj) or ""
             rendered_body_text = render_content_for_recipient(camp_body_text, recipient_obj)
-            rendered_body_html = render_content_for_recipient(camp_body_html, recipient_obj)
+            rendered_body_html = render_content_for_recipient(camp_body_html, recipient_obj, is_html=True)
 
             send_req = EmailSendRequest(
                 email_account_id=sender_account.id,
@@ -873,7 +885,7 @@ class CampaignDeliveryService:
         # ---------------------------------------------------------------------
         rendered_subject = render_content_for_recipient(camp_subject, recipient) or ""
         rendered_body_text = render_content_for_recipient(camp_body_text, recipient)
-        rendered_body_html = render_content_for_recipient(camp_body_html, recipient)
+        rendered_body_html = render_content_for_recipient(camp_body_html, recipient, is_html=True)
 
         send_req = EmailSendRequest(
             email_account_id=sender_account.id,

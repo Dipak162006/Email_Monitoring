@@ -6,8 +6,9 @@ Outlook, Apple Mail, Yahoo), while preserving original <style> blocks (for @medi
 queries and responsive layouts).
 """
 
+from html.parser import HTMLParser
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 def extract_style_blocks(html: str) -> str:
@@ -201,3 +202,140 @@ def selector_matches(
         i -= 1
 
     return True
+
+
+class _CSSInlinerParser(HTMLParser):
+    VOID_TAGS: Set[str] = {"br", "hr", "img", "meta", "input", "col", "base", "link"}
+
+    def __init__(self, css_rules: List[Tuple[str, Dict[str, str], int, int]]):
+        super().__init__(convert_charrefs=False)
+        self.css_rules = css_rules
+        self.output: List[str] = []
+        self.ancestor_stack: List[Tuple[str, List[str], Optional[str]]] = []
+
+    def handle_decl(self, decl: str) -> None:
+        self.output.append(f"<!{decl}>")
+
+    def handle_comment(self, comment: str) -> None:
+        self.output.append(f"<!--{comment}-->")
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        tag_lower = tag.lower()
+        raw_attrs_dict: Dict[str, str] = {}
+        ordered_attrs: List[Tuple[str, Optional[str]]] = []
+        for k, v in attrs:
+            k_lower = k.lower().strip()
+            v_val = (v or "").strip() if v is not None else ""
+            raw_attrs_dict[k_lower] = v_val
+            ordered_attrs.append((k, v))
+
+        elem_id = raw_attrs_dict.get("id") or None
+        cls_str = raw_attrs_dict.get("class", "")
+        classes = cls_str.split() if cls_str else []
+
+        matching_rules = []
+        if self.css_rules and tag_lower not in {"html", "head", "title", "style", "meta"}:
+            for r in self.css_rules:
+                sel, decls, spec, order = r
+                if selector_matches(sel, tag_lower, classes, elem_id, self.ancestor_stack):
+                    matching_rules.append(r)
+
+        existing_style = raw_attrs_dict.get("style")
+        final_style: Optional[str] = None
+
+        if matching_rules:
+            matching_rules.sort(key=lambda r: (r[2], r[3]))
+            merged_styles: Dict[str, str] = {}
+            for sel, decls, spec, order in matching_rules:
+                for prop, val in decls.items():
+                    is_important = "!important" in val.lower()
+                    curr_val = merged_styles.get(prop)
+                    if curr_val is None:
+                        merged_styles[prop] = val
+                    else:
+                        curr_important = "!important" in curr_val.lower()
+                        if is_important or not curr_important:
+                            merged_styles[prop] = val
+
+            if existing_style:
+                parsed_inline = parse_css_declarations(existing_style)
+                for prop, val in parsed_inline.items():
+                    merged_styles[prop] = val
+
+            style_str = "; ".join([f"{k}: {v}" for k, v in merged_styles.items()])
+            if style_str and not style_str.endswith(";"):
+                style_str += ";"
+            final_style = style_str
+        elif existing_style:
+            final_style = existing_style
+
+        # Reconstruct element start tag with updated style
+        attrs_parts = []
+        style_written = False
+        for k, v in ordered_attrs:
+            k_lower = k.lower().strip()
+            if k_lower == "style":
+                if final_style:
+                    attrs_parts.append(f'{k}="{final_style}"')
+                    style_written = True
+            else:
+                if v is None:
+                    attrs_parts.append(k)
+                else:
+                    attrs_parts.append(f'{k}="{v}"')
+
+        if final_style and not style_written:
+            attrs_parts.append(f'style="{final_style}"')
+
+        attrs_str = (" " + " ".join(attrs_parts)) if attrs_parts else ""
+
+        if tag_lower in {"br", "hr"}:
+            self.output.append(f"<{tag}{attrs_str}>")
+        elif tag_lower in self.VOID_TAGS:
+            self.output.append(f"<{tag}{attrs_str} />")
+        else:
+            self.output.append(f"<{tag}{attrs_str}>")
+            self.ancestor_stack.append((tag_lower, classes, elem_id))
+
+    def handle_endtag(self, tag: str) -> None:
+        tag_lower = tag.lower()
+        if tag_lower not in self.VOID_TAGS:
+            self.output.append(f"</{tag}>")
+            for idx in range(len(self.ancestor_stack) - 1, -1, -1):
+                if self.ancestor_stack[idx][0] == tag_lower:
+                    self.ancestor_stack.pop(idx)
+                    break
+
+    def handle_data(self, data: str) -> None:
+        self.output.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        self.output.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        self.output.append(f"&#{name};")
+
+
+def inline_css(html: Optional[str]) -> Optional[str]:
+    """Inlines CSS <style> block declarations onto matching element style attributes.
+    
+    Preserves existing inline style declarations with higher priority.
+    """
+    if not html or "<style" not in html.lower():
+        return html
+
+    style_content = extract_style_blocks(html)
+    if not style_content.strip():
+        return html
+
+    rules = parse_css_rules(style_content)
+    if not rules:
+        return html
+
+    parser = _CSSInlinerParser(css_rules=rules)
+    try:
+        parser.feed(html)
+        parser.close()
+        return "".join(parser.output)
+    except Exception:
+        return html

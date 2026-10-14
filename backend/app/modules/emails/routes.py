@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.models import User
+from app.modules.companies.dependencies import get_company_membership
 from app.modules.companies.models import CompanyRole
 from app.modules.companies.service import CompanyService
 from app.modules.email_accounts.service import EmailAccountService
@@ -2571,4 +2572,82 @@ async def get_company_dashboard_account_health(
         db=db,
         current_user=current_user,
         company_id=company_id,
+    )
+
+
+# =============================================================================
+# Media Endpoints (Template & Email Rich-Text Media Upload & Serving)
+# =============================================================================
+
+@router.post(
+    "/companies/{company_id}/media",
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload media image for templates and rich-text emails",
+)
+async def upload_company_media(
+    company_id: int,
+    file: UploadFile = File(...),
+    membership=Depends(get_company_membership),
+) -> Dict[str, Any]:
+    """Upload an image file (PNG, JPEG, GIF, WebP up to 5MB) for a company."""
+    from app.core.storage import AttachmentStorageService
+
+    try:
+        safe_name, content_type, file_size, rel_path, filename = await AttachmentStorageService.save_media_file(
+            company_id=company_id,
+            upload_file=file,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    return {
+        "media_id": f"{company_id}/{filename}",
+        "url": f"/api/v1/media/{company_id}/{filename}",
+        "file_name": safe_name,
+        "content_type": content_type,
+        "file_size": file_size,
+    }
+
+
+@router.get(
+    "/media/{company_id}/{filename}",
+    status_code=status.HTTP_200_OK,
+    summary="Serve uploaded media image",
+)
+async def get_media_file(
+    company_id: int,
+    filename: str,
+) -> FileResponse:
+    """Public endpoint to serve media images for web views and email editors."""
+    from app.core.storage import AttachmentStorageService
+
+    if company_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid company ID.",
+        )
+
+    try:
+        target_path = AttachmentStorageService.resolve_media_path(company_id, filename)
+    except (ValueError, PermissionError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    if not target_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Media file not found.",
+        )
+
+    ext = target_path.suffix.lower()
+    media_type = "image/jpeg" if ext in {".jpg", ".jpeg"} else f"image/{ext.lstrip('.')}"
+    return FileResponse(
+        path=str(target_path),
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=86400"},
     )

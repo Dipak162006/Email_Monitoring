@@ -14,6 +14,7 @@ import urllib.parse
 
 from app.core.css_inliner import (
     extract_style_blocks,
+    inline_css,
     parse_css_declarations,
     parse_css_rules,
     selector_matches,
@@ -45,23 +46,24 @@ class _HTMLSanitizerParser(HTMLParser):
         "form", "input", "button", "textarea", "select",
     }
 
-    ALLOWED_SCHEMES: Set[str] = {"http", "https", "mailto", "tel"}
+    ALLOWED_SCHEMES: Set[str] = {"http", "https", "mailto", "tel", "cid"}
 
     # Allowed safe attributes per tag, and universal attributes
     GLOBAL_ALLOWED_ATTRS: Set[str] = {
         "class", "id", "style", "title", "dir", "align", "valign",
-        "color", "bgcolor", "width", "height", "lang",
+        "color", "bgcolor", "width", "height", "lang", "role", "border",
     }
     TAG_SPECIFIC_ATTRS: dict = {
-        "a": {"href", "title", "target", "rel"},
-        "img": {"src", "alt", "title", "width", "height", "border"},
-        "font": {"color", "size", "face"},
-        "td": {"colspan", "rowspan", "width", "height", "align", "valign", "bgcolor"},
-        "th": {"colspan", "rowspan", "width", "height", "align", "valign", "bgcolor"},
-        "table": {"border", "cellpadding", "cellspacing", "width", "height", "align", "bgcolor"},
+        "a": {"href", "title", "target", "rel", "style"},
+        "img": {"src", "alt", "title", "width", "height", "border", "style", "data-media-id"},
+        "font": {"color", "size", "face", "style"},
+        "tr": {"bgcolor", "align", "valign", "style"},
+        "td": {"colspan", "rowspan", "width", "height", "align", "valign", "bgcolor", "style"},
+        "th": {"colspan", "rowspan", "width", "height", "align", "valign", "bgcolor", "style"},
+        "table": {"border", "cellpadding", "cellspacing", "width", "height", "align", "bgcolor", "role", "style"},
         "meta": {"charset", "name", "content", "http-equiv"},
         "style": {"type", "media"},
-        "body": {"bgcolor", "text", "link", "vlink", "alink", "marginwidth", "marginheight", "topmargin", "leftmargin"},
+        "body": {"bgcolor", "text", "link", "vlink", "alink", "marginwidth", "marginheight", "topmargin", "leftmargin", "style"},
         "html": {"lang", "xmlns"},
     }
 
@@ -159,7 +161,7 @@ class _HTMLSanitizerParser(HTMLParser):
 
             # 3. URL attribute security check (href, src)
             if attr_lower in {"href", "src"}:
-                if not self._is_safe_url(val_str):
+                if not self._is_safe_url(val_str, tag_lower=tag_lower, attr_lower=attr_lower):
                     continue
 
             # 4. Skip style here; we attach validated final_style below
@@ -221,13 +223,25 @@ class _HTMLSanitizerParser(HTMLParser):
             else:
                 self.output.append(escape(data, quote=False))
 
-    def _is_safe_url(self, url_str: str) -> bool:
+    def _is_safe_url(self, url_str: str, tag_lower: str = "", attr_lower: str = "") -> bool:
         """Validate URL to ensure it does not use executable schemes like javascript:."""
         # Strip ASCII control characters and whitespace
         clean_url = "".join(c for c in url_str if c.isprintable()).strip()
+        # Reject URLs containing raw quotes, brackets, or backticks (attribute breakout vectors)
+        if any(c in clean_url for c in ('"', "'", "<", ">", "`")):
+            return False
+
         # Collapse whitespace/tabs that attackers use to bypass scheme checks: "java\nscript:"
         collapsed = re.sub(r"\s+", "", clean_url).lower()
-        if collapsed.startswith(("javascript:", "vbscript:", "data:")):
+        if collapsed.startswith(("javascript:", "vbscript:")):
+            return False
+
+        if collapsed.startswith("data:"):
+            # Only allow safe raster image data URIs in img src attributes
+            # Disallow data:text/html, data:image/svg+xml (XSS vectors), and data in href
+            if tag_lower == "img" and attr_lower == "src":
+                if re.match(r"^data:image\/(png|jpeg|jpg|gif|webp);base64,[a-z0-9+/=]+$", collapsed):
+                    return True
             return False
 
         parsed = urllib.parse.urlparse(clean_url)
@@ -249,6 +263,15 @@ def sanitize_html(raw_html: Optional[str]) -> Optional[str]:
         return None
     if not raw_html.strip():
         return ""
+
+    # Pre-inline CSS rules onto element style attributes before sanitization
+    if "<style" in raw_html.lower():
+        try:
+            inlined = inline_css(raw_html)
+            if inlined:
+                raw_html = inlined
+        except Exception:
+            pass
 
     style_content = extract_style_blocks(raw_html)
     css_rules = parse_css_rules(style_content) if style_content else []

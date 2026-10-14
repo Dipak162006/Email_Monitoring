@@ -913,6 +913,7 @@ export function ComposePage() {
             initialHtml={bodyHtml}
             onChange={handleBodyChange}
             placeholder="Write your email message here..."
+            companyId={currentCompanyId}
           />
 
           {/* Attachment Upload List */}

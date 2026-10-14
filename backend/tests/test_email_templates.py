@@ -1719,5 +1719,131 @@ async def test_38_member_with_account_access_can_mutate_account_scoped_template(
     assert del_resp.status_code == 204
 
 
+@pytest.mark.asyncio
+async def test_39_sanitizer_preserves_safe_raster_base64_and_blocks_malicious_data_uris():
+    """39. Verify sanitizer preserves safe raster base64 images in img tags but blocks executable data URIs."""
+    from app.core.sanitizer import sanitize_html
+
+    safe_base64_img = '<div style="text-align: center;"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" alt="Sample Logo" /></div>'
+    sanitized = sanitize_html(safe_base64_img)
+    assert sanitized is not None
+    assert "data:image/png;base64," in sanitized
+    assert "alt=\"Sample Logo\"" in sanitized
+
+    # Malicious data:text/html or SVG XSS
+    malicious_data_html = '<img src="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==" alt="xss" />'
+    malicious_svg = '<img src="data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+" alt="svg" />'
+    malicious_link = '<a href="data:image/png;base64,abc">Click me</a>'
+
+    assert "data:text/html" not in sanitize_html(malicious_data_html)
+    assert "data:image/svg+xml" not in sanitize_html(malicious_svg)
+    assert "data:image/png" not in sanitize_html(malicious_link)
+
+
+@pytest.mark.asyncio
+async def test_40_campaign_merge_tags_escape_html_for_html_bodies():
+    """40. Verify merge variables escape HTML entities in HTML bodies to prevent script/markup injection."""
+    from app.modules.campaigns.delivery_service import render_content_for_recipient
+    from app.modules.campaigns.models import CampaignRecipient
+
+    recipient = CampaignRecipient(
+        id=999,
+        campaign_id=1,
+        email="target@example.com",
+        first_name="<script>alert(1)</script>",
+    )
+
+    # In HTML body, HTML must be escaped
+    html_body = "<p>Welcome, {{first_name}}!</p>"
+    rendered_html = render_content_for_recipient(html_body, recipient, is_html=True)
+    assert "<script>" not in rendered_html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered_html
+
+    # In plain text body or subject, raw text is preserved without double-escaping
+    text_body = "Welcome, {{first_name}}!"
+    rendered_text = render_content_for_recipient(text_body, recipient, is_html=False)
+    assert rendered_text == "Welcome, <script>alert(1)</script>!"
+
+
+@pytest.mark.asyncio
+async def test_41_campaign_merge_variables_url_safety_and_legitimate_links():
+    """41. Verify merge-variable URL safety in href/src attributes and preservation of legitimate links."""
+    from app.modules.campaigns.delivery_service import render_content_for_recipient
+    from app.modules.campaigns.models import CampaignRecipient
+
+    # 1. Malicious javascript: scheme in recipient-controlled field inside href
+    js_recipient = CampaignRecipient(
+        id=1001,
+        campaign_id=1,
+        email="attacker@example.com",
+        first_name="javascript:alert('xss')",
+    )
+    html_with_href = '<p>Check <a href="{{first_name}}">your portal</a></p>'
+    rendered_js = render_content_for_recipient(html_with_href, js_recipient, is_html=True)
+    assert "javascript:" not in rendered_js
+    assert "href" not in rendered_js
+    assert "<a>your portal</a>" in rendered_js
+
+    # 2. Malicious vbscript: and data:text/html in href
+    vbs_recipient = CampaignRecipient(
+        id=1002,
+        campaign_id=1,
+        email="attacker@example.com",
+        first_name="vbscript:msgbox(1)",
+    )
+    rendered_vbs = render_content_for_recipient(html_with_href, vbs_recipient, is_html=True)
+    assert "vbscript:" not in rendered_vbs
+    assert "href" not in rendered_vbs
+
+    data_recipient = CampaignRecipient(
+        id=1003,
+        campaign_id=1,
+        email="attacker@example.com",
+        first_name="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+    )
+    rendered_data = render_content_for_recipient(html_with_href, data_recipient, is_html=True)
+    assert "data:text/html" not in rendered_data
+    assert "href" not in rendered_data
+
+    # 3. Malicious javascript: in img src attribute
+    html_with_img = '<p>Avatar: <img src="{{first_name}}" alt="avatar" /></p>'
+    rendered_img_js = render_content_for_recipient(html_with_img, js_recipient, is_html=True)
+    assert "javascript:" not in rendered_img_js
+    assert "src" not in rendered_img_js
+
+    # 4. Attribute breakout attempt with event handler
+    breakout_recipient = CampaignRecipient(
+        id=1004,
+        campaign_id=1,
+        email="attacker@example.com",
+        first_name='https://example.com" onclick="alert(1)"',
+    )
+    html_with_attr = '<p><a href="{{first_name}}">Safe Link</a></p>'
+    rendered_breakout = render_content_for_recipient(html_with_attr, breakout_recipient, is_html=True)
+    assert "onclick" not in rendered_breakout
+
+    # 5. Legitimate HTTPS unsubscribe link and {{unsubscribe_url}} placeholder are preserved
+    safe_recipient = CampaignRecipient(
+        id=1005,
+        campaign_id=1,
+        email="user@example.com",
+        first_name="Alice",
+    )
+    template_with_unsub = (
+        '<div style="font-family: sans-serif;">'
+        '<p>Hi {{first_name}},</p>'
+        '<p>Thanks for reading.</p>'
+        '<p><a href="https://example.com/unsubscribe?token=safe999" target="_blank">Unsubscribe</a></p>'
+        '<p><a href="{{unsubscribe_url}}">Opt-Out Placeholder</a></p>'
+        '</div>'
+    )
+    rendered_safe = render_content_for_recipient(template_with_unsub, safe_recipient, is_html=True)
+    assert "Hi Alice," in rendered_safe
+    assert 'href="https://example.com/unsubscribe?token=safe999"' in rendered_safe
+    assert 'href="{{unsubscribe_url}}"' in rendered_safe
+
+
+
+
 
 

@@ -558,6 +558,24 @@ export const templatesApi = {
   },
 };
 
+export interface MediaUploadResponse {
+  media_id: string;
+  url: string;
+  file_name: string;
+  content_type: string;
+  file_size: number;
+}
+
+export const uploadMedia = async (companyId: number, file: File): Promise<MediaUploadResponse> => {
+  const formData = new FormData();
+  formData.append("file", file);
+  return apiClient.post<MediaUploadResponse>(`/api/v1/companies/${companyId}/media`, formData);
+};
+
+export const mediaApi = {
+  uploadMedia,
+};
+
 export const signaturesApi = {
   listSignatures: async (accountId?: number, companyId?: number): Promise<EmailSignatureItem[]> => {
     const params = new URLSearchParams();

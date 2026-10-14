@@ -12,11 +12,15 @@ import {
   CheckCircle,
   AlertCircle,
   Loader2,
+  Sparkles,
 } from "lucide-react";
 import { templatesApi, emailAccountsApi, RequestError } from "../services/api";
 import { RichTextEditor, type RichTextEditorRef } from "../components/compose/RichTextEditor";
 import { TemplatePreviewModal } from "../components/templates/TemplatePreviewModal";
 import { DeleteTemplateModal } from "../components/templates/DeleteTemplateModal";
+import { StarterTemplatesModal } from "../components/templates/StarterTemplatesModal";
+import { TemplateBlocksPalette } from "../components/templates/TemplateBlocksPalette";
+import { type StarterTemplate } from "../components/templates/starterTemplatesData";
 import { LoadingState } from "../components/ui/LoadingState";
 import { ErrorState } from "../components/ui/ErrorState";
 import { useWorkspace } from "../hooks/useWorkspace";
@@ -51,6 +55,7 @@ export function TemplateEditorPage() {
   // Modals
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
+  const [isStarterModalOpen, setIsStarterModalOpen] = useState(false);
 
   // Tracking last focused element for variable insertion
   const [lastFocusedField, setLastFocusedField] = useState<"subject" | "body">("body");
@@ -233,6 +238,54 @@ export function TemplateEditorPage() {
     }
   };
 
+  // Modular Block Insertion
+  const handleInsertBlock = (blockHtml: string) => {
+    if (isHtmlMode) {
+      const textarea = codeTextareaRef.current;
+      if (textarea) {
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        const newHtml = bodyHtml.substring(0, start) + blockHtml + bodyHtml.substring(end);
+        setBodyHtml(newHtml);
+        setBodyText(newHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+        setTimeout(() => {
+          textarea.focus();
+          const nextPos = start + blockHtml.length;
+          textarea.setSelectionRange(nextPos, nextPos);
+        }, 0);
+      } else {
+        setBodyHtml((prev) => prev + blockHtml);
+      }
+    } else {
+      editorRef.current?.insertBlockHtml(blockHtml);
+    }
+  };
+
+  // Apply Starter Template
+  const handleApplyStarterTemplate = (template: StarterTemplate) => {
+    const hasExistingContent =
+      bodyHtml &&
+      bodyHtml.trim() &&
+      bodyHtml !== "<p><br></p>" &&
+      bodyHtml !== "<p><br/></p>";
+
+    if (hasExistingContent) {
+      const confirmed = window.confirm(
+        "Applying this starter template will replace your current editor content. Would you like to continue?"
+      );
+      if (!confirmed) return;
+    }
+
+    setSubject(template.subject);
+    if (!name.trim()) {
+      setName(template.name);
+    }
+    setBodyHtml(template.bodyHtml);
+    setBodyText(template.bodyHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+    editorRef.current?.setHtml(template.bodyHtml);
+    setIsStarterModalOpen(false);
+  };
+
   // Sync Rich Text changes
   const handleEditorChange = (html: string, text: string) => {
     setBodyHtml(html);
@@ -280,8 +333,8 @@ export function TemplateEditorPage() {
   }
 
   return (
-    <div className="max-w-4xl w-full mx-auto space-y-6 pb-12">
-      {/* Workspace Sticky / Top Action Header */}
+    <div className="max-w-7xl w-full mx-auto space-y-6 pb-12">
+      {/* Workspace Top Action Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
         <div>
           <button
@@ -292,15 +345,30 @@ export function TemplateEditorPage() {
             <ArrowLeft className="h-4 w-4 transition-transform group-hover:-translate-x-0.5" />
             <span>Back to Templates</span>
           </button>
-          <h2 className="text-xl font-bold text-slate-900 tracking-tight">
-            {isEditMode ? "Edit Template" : "Create Template"}
-          </h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-xl font-bold text-slate-900 tracking-tight">
+              {isEditMode ? "Edit Template" : "Template Studio"}
+            </h2>
+            <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              Interactive Builder
+            </span>
+          </div>
           <p className="text-xs text-slate-500">
-            Configure subject line, dynamic tags, and HTML message body.
+            Design responsive email templates with modular blocks, dynamic merge tags, and custom styling.
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2.5 flex-wrap">
+          {/* Starter Templates Modal Trigger */}
+          <button
+            type="button"
+            onClick={() => setIsStarterModalOpen(true)}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50/70 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold transition-all shadow-2xs"
+          >
+            <Sparkles className="h-4 w-4 text-indigo-600" />
+            <span>Starter Templates</span>
+          </button>
+
           <button
             type="button"
             disabled={isSubmitting}
@@ -351,199 +419,218 @@ export function TemplateEditorPage() {
         </div>
       )}
 
-      {/* Section A: Template Information Card */}
-      <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-xs">
-        <h3 className="font-semibold text-sm text-slate-900 border-b border-slate-100 pb-3 mb-4 flex items-center gap-2">
-          <Sliders className="h-4 w-4 text-slate-400" />
-          <span>Template Information</span>
-        </h3>
+      {/* Main Studio 2-Column Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* Left Column: Canvas, Settings & Subject (8 cols) */}
+        <div className="lg:col-span-8 space-y-6">
+          {/* Section A: Template Information Card */}
+          <div className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 shadow-xs">
+            <h3 className="font-semibold text-sm text-slate-900 border-b border-slate-100 pb-3 mb-4 flex items-center gap-2">
+              <Sliders className="h-4 w-4 text-slate-400" />
+              <span>Template Settings</span>
+            </h3>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
-          <div>
-            <label
-              htmlFor="template-name"
-              className="block text-xs font-semibold text-slate-700 mb-1.5"
-            >
-              Template Name <span className="text-rose-500">*</span>
-            </label>
-            <input
-              id="template-name"
-              type="text"
-              required
-              maxLength={255}
-              value={name}
-              onChange={(e) => {
-                setName(e.target.value);
-                if (validationError) setValidationError(null);
-              }}
-              placeholder="e.g. Customer Onboarding Welcome"
-              className="w-full bg-slate-50 focus:bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition-all"
-            />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
+              <div>
+                <label
+                  htmlFor="template-name"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Template Name <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  id="template-name"
+                  type="text"
+                  required
+                  maxLength={255}
+                  value={name}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    if (validationError) setValidationError(null);
+                  }}
+                  placeholder="e.g. Customer Onboarding Welcome"
+                  className="w-full bg-slate-50 focus:bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition-all"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="template-account"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Email Account Scope <span className="text-rose-500">*</span>
+                </label>
+                <select
+                  id="template-account"
+                  value={accountScope}
+                  onChange={(e) => setAccountScope(e.target.value)}
+                  className="w-full bg-slate-50 focus:bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition-all cursor-pointer"
+                >
+                  <option value="global">Global (All Connected Accounts)</option>
+                  {accounts.map((acc) => (
+                    <option key={acc.id} value={String(acc.id)}>
+                      {acc.name ? `${acc.name} (${acc.email_address})` : acc.email_address}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Active Status Toggle Switch */}
+            <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+              <div className="flex flex-col">
+                <span className="text-xs font-semibold text-slate-800">Active Status</span>
+                <span className="text-[11px] text-slate-500">
+                  When enabled, this template appears in campaign composers &amp; mailbox reply tools.
+                </span>
+              </div>
+
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isActive}
+                  onChange={(e) => setIsActive(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600" />
+              </label>
+            </div>
           </div>
 
-          <div>
-            <label
-              htmlFor="template-account"
-              className="block text-xs font-semibold text-slate-700 mb-1.5"
-            >
-              Email Account Scope <span className="text-rose-500">*</span>
-            </label>
-            <select
-              id="template-account"
-              value={accountScope}
-              onChange={(e) => setAccountScope(e.target.value)}
-              className="w-full bg-slate-50 focus:bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition-all cursor-pointer"
-            >
-              <option value="global">Global (All Connected Accounts)</option>
-              {accounts.map((acc) => (
-                <option key={acc.id} value={String(acc.id)}>
-                  {acc.name ? `${acc.name} (${acc.email_address})` : acc.email_address}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        {/* Active Status Toggle Switch */}
-        <div className="flex items-center justify-between pt-3 border-t border-slate-100">
-          <div className="flex flex-col">
-            <span className="text-xs font-semibold text-slate-800">Active Status</span>
-            <span className="text-[11px] text-slate-500">
-              When enabled, this template appears in the global compose picker &amp; API dispatchers.
-            </span>
-          </div>
-
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              checked={isActive}
-              onChange={(e) => setIsActive(e.target.checked)}
-              className="sr-only peer"
-            />
-            <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600" />
-          </label>
-        </div>
-      </div>
-
-      {/* Section B: Subject & Dynamic Variables Card */}
-      <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-xs">
-        <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
-          <h3 className="font-semibold text-sm text-slate-900 flex items-center gap-2">
-            <AtSign className="h-4 w-4 text-slate-400" />
-            <span>Subject &amp; Merge Variables</span>
-          </h3>
-          <span
-            className={`text-[11px] font-mono ${
-              subject.length > 998 ? "text-rose-600 font-bold" : "text-slate-400"
-            }`}
-          >
-            {subject.length} / 998 characters
-          </span>
-        </div>
-
-        <div className="mb-4">
-          <label
-            htmlFor="template-subject"
-            className="block text-xs font-semibold text-slate-700 mb-1.5"
-          >
-            Email Subject Line <span className="text-rose-500">*</span>
-          </label>
-          <input
-            ref={subjectInputRef}
-            id="template-subject"
-            type="text"
-            maxLength={998}
-            value={subject}
-            onFocus={() => setLastFocusedField("subject")}
-            onChange={(e) => {
-              setSubject(e.target.value);
-              if (validationError) setValidationError(null);
-            }}
-            placeholder="e.g. Welcome to {{company_name}} — Getting Started Guide"
-            className="w-full bg-slate-50 focus:bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-900 font-medium focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition-all"
-          />
-        </div>
-
-        {/* Variable Insertion Bar */}
-        <div>
-          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2 block">
-            Dynamic Variables — Click a chip to insert at cursor:
-          </label>
-          <div className="flex flex-wrap items-center gap-1.5">
-            {DYNAMIC_VARIABLES.map((v) => (
-              <button
-                key={v}
-                type="button"
-                onClick={() => handleInsertVariable(v)}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-mono bg-indigo-50/70 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/80 transition-colors shadow-2xs select-none"
+          {/* Section B: Subject & Dynamic Variables Card */}
+          <div className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 shadow-xs">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
+              <h3 className="font-semibold text-sm text-slate-900 flex items-center gap-2">
+                <AtSign className="h-4 w-4 text-slate-400" />
+                <span>Subject &amp; Merge Variables</span>
+              </h3>
+              <span
+                className={`text-[11px] font-mono ${
+                  subject.length > 998 ? "text-rose-600 font-bold" : "text-slate-400"
+                }`}
               >
-                <span className="text-slate-400">+</span> {v}
-              </button>
-            ))}
+                {subject.length} / 998 characters
+              </span>
+            </div>
+
+            <div className="mb-4">
+              <label
+                htmlFor="template-subject"
+                className="block text-xs font-semibold text-slate-700 mb-1.5"
+              >
+                Email Subject Line <span className="text-rose-500">*</span>
+              </label>
+              <input
+                ref={subjectInputRef}
+                id="template-subject"
+                type="text"
+                maxLength={998}
+                value={subject}
+                onFocus={() => setLastFocusedField("subject")}
+                onChange={(e) => {
+                  setSubject(e.target.value);
+                  if (validationError) setValidationError(null);
+                }}
+                placeholder="e.g. Welcome to {{company_name}} — Getting Started Guide"
+                className="w-full bg-slate-50 focus:bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-900 font-medium focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition-all"
+              />
+            </div>
+
+            {/* Quick Variable Insertion Bar */}
+            <div>
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2 block">
+                Quick Merge Tags — Click to insert at cursor:
+              </label>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {DYNAMIC_VARIABLES.map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => handleInsertVariable(v)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-mono bg-indigo-50/70 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/80 transition-colors shadow-2xs select-none"
+                  >
+                    <span className="text-slate-400">+</span> {v}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Section C: Email Body Editor Card */}
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+            {/* Editor Toolbar Header */}
+            <div className="bg-slate-50 border-b border-slate-200 px-4 py-2 flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsHtmlMode((prev) => !prev)}
+                  className={`px-2.5 py-1 rounded-md border text-xs font-mono flex items-center gap-1.5 transition-colors shadow-2xs ${
+                    isHtmlMode
+                      ? "bg-indigo-600 text-white border-indigo-700"
+                      : "bg-white border-slate-200 hover:bg-slate-100 text-slate-700"
+                  }`}
+                >
+                  <Code className="h-3.5 w-3.5" />
+                  <span>{isHtmlMode ? "Visual Mode" : "</> HTML Mode"}</span>
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsPreviewOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50/70 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold transition-colors shadow-2xs"
+                >
+                  <Eye className="h-4 w-4" />
+                  <span>Preview Email</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Editor Body */}
+            <div onFocus={() => setLastFocusedField("body")}>
+              {isHtmlMode ? (
+                <textarea
+                  ref={codeTextareaRef}
+                  value={bodyHtml}
+                  onChange={(e) => {
+                    setBodyHtml(e.target.value);
+                    setBodyText(e.target.value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+                  }}
+                  placeholder="<!-- Write raw email HTML here -->"
+                  className="w-full min-h-[420px] p-6 text-xs font-mono bg-slate-900 text-slate-100 outline-none resize-y border-0 focus:ring-0 leading-relaxed"
+                />
+              ) : (
+                <RichTextEditor
+                  ref={editorRef}
+                  initialHtml={bodyHtml}
+                  onChange={handleEditorChange}
+                  placeholder="Type your email template body here or drag & drop blocks from the right panel..."
+                  minHeightClass="min-h-[420px]"
+                  companyId={currentCompanyId}
+                />
+              )}
+            </div>
+
+            {/* Deliverability Standards Note / Footer */}
+            <div className="px-6 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500">
+              <div className="flex items-center gap-1.5">
+                <CheckCircle className="h-4 w-4 text-emerald-600" />
+                <span>Responsive 600px width layout • Unsubscribe Footer</span>
+              </div>
+              <div className="font-mono text-slate-400">UTF-8 • Mobile &amp; Desktop Optimized</div>
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Section C: Email Body Editor Card */}
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
-        {/* Editor Toolbar Header */}
-        <div className="bg-slate-50 border-b border-slate-200 px-4 py-2 flex items-center justify-between flex-wrap gap-2">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setIsHtmlMode((prev) => !prev)}
-              className={`px-2.5 py-1 rounded-md border text-xs font-mono flex items-center gap-1.5 transition-colors shadow-2xs ${
-                isHtmlMode
-                  ? "bg-indigo-600 text-white border-indigo-700"
-                  : "bg-white border-slate-200 hover:bg-slate-100 text-slate-700"
-              }`}
-            >
-              <Code className="h-3.5 w-3.5" />
-              <span>{isHtmlMode ? "Visual Mode" : "</> HTML Mode"}</span>
-            </button>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setIsPreviewOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50/70 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold transition-colors shadow-2xs"
-          >
-            <Eye className="h-4 w-4" />
-            <span>Preview Email</span>
-          </button>
-        </div>
-
-        {/* Editor Body */}
-        <div onFocus={() => setLastFocusedField("body")}>
-          {isHtmlMode ? (
-            <textarea
-              ref={codeTextareaRef}
-              value={bodyHtml}
-              onChange={(e) => {
-                setBodyHtml(e.target.value);
-                setBodyText(e.target.value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
-              }}
-              placeholder="<!-- Write raw HTML here -->"
-              className="w-full min-h-[380px] p-6 text-xs font-mono bg-slate-900 text-slate-100 outline-none resize-y border-0 focus:ring-0 leading-relaxed"
-            />
-          ) : (
-            <RichTextEditor
-              ref={editorRef}
-              initialHtml={bodyHtml}
-              onChange={handleEditorChange}
-              placeholder="Type your email template body here..."
-              minHeightClass="min-h-[380px]"
-            />
-          )}
-        </div>
-
-        {/* Deliverability Standards Note / Footer */}
-        <div className="px-6 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500">
-          <div className="flex items-center gap-1.5">
-            <CheckCircle className="h-4 w-4 text-emerald-600" />
-            <span>Responsive 600px width layout with RFC 8058 One-Click Unsubscribe compliance</span>
-          </div>
-          <div className="font-mono text-slate-400">UTF-8 • HTML5 Compatible</div>
+        {/* Right Column: Modular Email Blocks & Presets Sidebar (4 cols) */}
+        <div className="lg:col-span-4 sticky top-6 space-y-4">
+          <TemplateBlocksPalette
+            onInsertHtml={handleInsertBlock}
+            onInsertVariable={handleInsertVariable}
+            onApplyTemplate={handleApplyStarterTemplate}
+            onOpenStarterModal={() => setIsStarterModalOpen(true)}
+          />
         </div>
       </div>
 
@@ -555,6 +642,13 @@ export function TemplateEditorPage() {
         bodyHtml={bodyHtml}
         bodyText={bodyText}
         accountSender={accountSenderText}
+      />
+
+      {/* Industry Starter Templates Modal */}
+      <StarterTemplatesModal
+        isOpen={isStarterModalOpen}
+        onClose={() => setIsStarterModalOpen(false)}
+        onSelectTemplate={handleApplyStarterTemplate}
       />
 
       {/* Delete Confirmation Modal */}

@@ -122,6 +122,25 @@
       pointer-events: auto !important;
     }
   }
+
+  /* Scoped styles for email editor and preview canvases to prevent Gmail/Uber clipping & table borders */
+  .pulsemail-editor-canvas table,
+  .pulsemail-preview-canvas table {
+    max-width: 100% !important;
+    border-collapse: collapse;
+  }
+  .pulsemail-editor-canvas td,
+  .pulsemail-editor-canvas th,
+  .pulsemail-preview-canvas td,
+  .pulsemail-preview-canvas th {
+    border-color: transparent;
+    box-sizing: border-box;
+  }
+  .pulsemail-editor-canvas img,
+  .pulsemail-preview-canvas img {
+    max-width: 100%;
+    height: auto;
+  }
 }
 
 

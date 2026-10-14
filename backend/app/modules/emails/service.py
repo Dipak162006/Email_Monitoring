@@ -4,7 +4,7 @@ from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 import logging
 import re
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +36,73 @@ from app.services.transport.models import EmailTransportRequest, EmailTransportR
 from app.services.transport.smtp import SMTPTransport
 
 logger = logging.getLogger(__name__)
+
+
+def process_inline_media_images(
+    html_content: str,
+    company_id: int,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Scan HTML for local company media images and convert them for inline CID email embedding.
+
+    Scans for src=".../api/v1/media/{company_id}/{filename}".
+    Returns:
+        Tuple of (mime_html_copy, list_of_inline_media_dicts)
+    """
+    if not html_content or "/api/v1/media/" not in html_content:
+        return html_content, []
+
+    from app.core.storage import AttachmentStorageService
+
+    # Match src attributes containing /api/v1/media/{company_id}/{filename}
+    pattern = re.compile(
+        r'''(?i)(src=["'])(?:https?://[^/"'>]+)?(?:/api/v1/media/'''
+        + str(company_id)
+        + r'''/([a-f0-9]{32}\.(?:png|jpg|jpeg|gif|webp)))(["'])'''
+    )
+
+    found_files: Dict[str, Any] = {}
+    for match in pattern.finditer(html_content):
+        filename = match.group(2)
+        if filename not in found_files:
+            try:
+                path = AttachmentStorageService.resolve_media_path(company_id, filename)
+                if path.is_file():
+                    found_files[filename] = path
+            except Exception:
+                pass
+
+    if not found_files:
+        return html_content, []
+
+    inline_items: List[Dict[str, Any]] = []
+    mime_html = html_content
+
+    for filename, path in found_files.items():
+        cid_val = f"media_{filename}@pulsemail"
+        ext = path.suffix.lower()
+        subtype = "jpeg" if ext in {".jpg", ".jpeg"} else ext.lstrip(".")
+        img_bytes = path.read_bytes()
+
+        # Replace src with cid: in outgoing MIME HTML copy
+        replace_pattern = re.compile(
+            r'''(?i)(src=["'])(?:https?://[^/"'>]+)?(?:/api/v1/media/'''
+            + str(company_id)
+            + r'''/'''
+            + re.escape(filename)
+            + r''')(["'])'''
+        )
+        mime_html = replace_pattern.sub(rf'\1cid:{cid_val}\2', mime_html)
+
+        inline_items.append({
+            "cid": cid_val,
+            "cid_header": f"<{cid_val}>",
+            "bytes": img_bytes,
+            "maintype": "image",
+            "subtype": subtype,
+            "filename": filename,
+        })
+
+    return mime_html, inline_items
 
 
 class EmailService:
@@ -125,12 +192,24 @@ class EmailService:
         has_text = bool(send_req.body_text and send_req.body_text.strip())
         has_html = bool(send_req.body_html and send_req.body_html.strip())
         if has_html:
-            final_html = sanitize_html(send_req.body_html) or send_req.body_html
+            sanitized = sanitize_html(send_req.body_html) or send_req.body_html
+            mime_html, inline_media = process_inline_media_images(sanitized, account.company_id)
             if has_text:
                 msg.set_content(send_req.body_text)
-                msg.add_alternative(final_html, subtype="html")
+                msg.add_alternative(mime_html, subtype="html")
             else:
-                msg.set_content(final_html, subtype="html")
+                msg.set_content(mime_html, subtype="html")
+
+            # Attach local media images as inline related parts
+            for item in inline_media:
+                msg.add_related(
+                    item["bytes"],
+                    maintype=item["maintype"],
+                    subtype=item["subtype"],
+                    cid=item["cid_header"],
+                    filename=item["filename"],
+                    disposition="inline",
+                )
         else:
             msg.set_content(send_req.body_text or "")
 

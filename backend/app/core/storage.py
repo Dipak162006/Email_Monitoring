@@ -24,6 +24,11 @@ class AttachmentStorageService:
         ".com", ".pif", ".cpl", ".jar", ".dll", ".sys",
     }
 
+    ALLOWED_MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+    ALLOWED_MEDIA_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"}
+    MAX_MEDIA_SIZE_BYTES = 5 * 1024 * 1024  # 5MB
+    MEDIA_FILENAME_PATTERN = re.compile(r"^[a-f0-9]{32}\.(png|jpg|jpeg|gif|webp)$", re.IGNORECASE)
+
     @classmethod
     def get_base_upload_dir(cls) -> Path:
         """Resolve and ensure the base upload directory exists."""
@@ -232,6 +237,89 @@ class AttachmentStorageService:
         except Exception:
             pass
         return False
+
+    @classmethod
+    def get_company_media_dir(cls, company_id: int) -> Path:
+        """Resolve partitioned directory for company media uploads."""
+        target_dir = cls.get_base_upload_dir() / "media" / f"company_{company_id}"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return target_dir
+
+    @classmethod
+    async def save_media_file(
+        cls,
+        company_id: int,
+        upload_file: UploadFile,
+    ) -> Tuple[str, str, int, str, str]:
+        """Read and store a media image file under media/company_{company_id}/{uuid_hex}.{ext}.
+
+        Returns:
+            Tuple of (safe_original_name, content_type, file_size_bytes, relative_storage_path, filename)
+        """
+        raw_filename = upload_file.filename or "image.png"
+        safe_original_name = cls.sanitize_filename(raw_filename)
+        ext = Path(safe_original_name).suffix.lower()
+        if ext not in cls.ALLOWED_MEDIA_EXTENSIONS:
+            raise ValueError(f"File extension '{ext}' is not supported for media. Allowed: png, jpg, jpeg, gif, webp.")
+
+        raw_content_type = (upload_file.content_type or "").lower().strip()
+        if raw_content_type and raw_content_type not in cls.ALLOWED_MEDIA_CONTENT_TYPES:
+            if not (raw_content_type in {"image/jpg", "image/pjpeg"} and ext in {".jpg", ".jpeg"}):
+                raise ValueError(f"Content type '{raw_content_type}' is not supported. Must be a valid image.")
+
+        content_type = raw_content_type or ("image/jpeg" if ext in {".jpg", ".jpeg"} else f"image/{ext.lstrip('.')}")
+        if content_type == "image/jpg":
+            content_type = "image/jpeg"
+
+        unique_id = uuid.uuid4().hex
+        internal_name = f"{unique_id}{ext}"
+        dest_dir = cls.get_company_media_dir(company_id)
+        dest_path = dest_dir / internal_name
+
+        total_size = 0
+        chunk_size = 64 * 1024
+        try:
+            with open(dest_path, "wb") as out_file:
+                while True:
+                    chunk = await upload_file.read(chunk_size)
+                    if not chunk:
+                        break
+                    total_size += len(chunk)
+                    if total_size > cls.MAX_MEDIA_SIZE_BYTES:
+                        raise ValueError("Media file size exceeds maximum limit of 5MB.")
+                    out_file.write(chunk)
+        except Exception:
+            if dest_path.exists():
+                try:
+                    dest_path.unlink()
+                except OSError:
+                    pass
+            raise
+
+        if total_size == 0:
+            if dest_path.exists():
+                try:
+                    dest_path.unlink()
+                except OSError:
+                    pass
+            raise ValueError("Uploaded media file is empty (0 bytes).")
+
+        base_dir = cls.get_base_upload_dir()
+        rel_storage_path = str(dest_path.relative_to(base_dir)).replace("\\", "/")
+        return safe_original_name, content_type, total_size, rel_storage_path, internal_name
+
+    @classmethod
+    def resolve_media_path(cls, company_id: int, filename: str) -> Path:
+        """Resolve a media file path safely, ensuring strict regex filename and company boundary."""
+        if not cls.MEDIA_FILENAME_PATTERN.match(filename):
+            raise ValueError("Invalid media filename format.")
+        media_dir = cls.get_company_media_dir(company_id)
+        target_path = (media_dir / filename).resolve()
+        try:
+            target_path.relative_to(media_dir.resolve())
+        except ValueError:
+            raise PermissionError("Access to the specified media path is forbidden.")
+        return target_path
 
 
 attachment_storage_service = AttachmentStorageService

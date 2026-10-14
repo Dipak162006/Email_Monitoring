@@ -721,12 +721,24 @@ class EmailDraftService:
         has_text = bool(draft.body_text and draft.body_text.strip())
         has_html = bool(draft.body_html and draft.body_html.strip())
         if has_html:
-            final_html = sanitize_html(draft.body_html) or draft.body_html
+            sanitized = sanitize_html(draft.body_html) or draft.body_html
+            from app.modules.emails.service import process_inline_media_images
+            mime_html, inline_media = process_inline_media_images(sanitized, account.company_id)
             if has_text:
                 mime_msg.set_content(draft.body_text)
-                mime_msg.add_alternative(final_html, subtype="html")
+                mime_msg.add_alternative(mime_html, subtype="html")
             else:
-                mime_msg.set_content(final_html, subtype="html")
+                mime_msg.set_content(mime_html, subtype="html")
+
+            for item in inline_media:
+                mime_msg.add_related(
+                    item["bytes"],
+                    maintype=item["maintype"],
+                    subtype=item["subtype"],
+                    cid=item["cid_header"],
+                    filename=item["filename"],
+                    disposition="inline",
+                )
         else:
             mime_msg.set_content(draft.body_text or "")
 
