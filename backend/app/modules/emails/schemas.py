@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from app.core.sanitizer import sanitize_html
 from app.modules.emails.models import EmailDirection, EmailStatus
@@ -62,6 +62,14 @@ class EmailSendRequest(BaseModel):
     campaign_attachment_ids: Optional[List[int]] = Field(
         default=None,
         description="Optional list of CampaignAttachment IDs to attach to the message",
+    )
+    unsubscribe_url: Optional[str] = Field(
+        default=None,
+        description="Optional RFC 8058 one-click unsubscribe URL",
+    )
+    custom_headers: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Optional custom MIME headers to attach to the outgoing message",
     )
 
     @field_validator("to", "cc", "bcc", mode="before")

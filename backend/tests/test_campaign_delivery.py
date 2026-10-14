@@ -684,3 +684,213 @@ async def test_celery_worker_task_executes_delivery_engine(async_client: AsyncCl
     deliv = deliv_res.scalar_one()
     assert deliv.status == CampaignDeliveryStatus.SENT.value
     assert deliv.email_id is not None
+
+
+@pytest.mark.anyio
+async def test_render_content_for_recipient_resolves_all_standard_and_custom_variables():
+    """Verify that render_content_for_recipient resolves standard and custom variables,
+    supports case-insensitivity, and escapes HTML safely without leaking raw tags."""
+    recipient = CampaignRecipient(
+        id=777,
+        campaign_id=1,
+        email="john.doe@example.com",
+        first_name="John",
+        last_name="Doe",
+        custom_variables={
+            "role": "VIP Developer",
+            "tier": "Enterprise",
+            "account_code": "ACC-9988",
+        },
+    )
+
+    ctx = {
+        "company_name": "Acme Global",
+        "sender_name": "Alice Support",
+        "sender_email": "support@acme.com",
+        "login_url": "https://acme.com/login",
+        "unsubscribe_url": "https://acme.com/api/v1/public/unsubscribe/sampletoken123",
+        "ticket_id": "TICK-4040",
+    }
+
+    # 1. Plain text resolution
+    template_text = (
+        "Hello {{first_name}} {{last_name}},\n"
+        "Welcome {{Customer_Name}} ({{customer_email}}).\n"
+        "Company: {{COMPANY_NAME}}, Sender: {{sender_name}} <{{sender_email}}>.\n"
+        "Your role: {{Role}}, Tier: {{tier}}.\n"
+        "Login: {{login_url}}\n"
+        "Unsubscribe: {{unsubscribe_url}}\n"
+        "Ticket: {{ticket_id}}\n"
+        "Empty: [{{unknown_standard}}]"
+    )
+
+    rendered_text = render_content_for_recipient(
+        template=template_text,
+        recipient=recipient,
+        is_html=False,
+        context_vars=ctx,
+    )
+
+    assert "Hello John Doe," in rendered_text
+    assert "Welcome John Doe (john.doe@example.com)." in rendered_text
+    assert "Company: Acme Global, Sender: Alice Support <support@acme.com>." in rendered_text
+    assert "Your role: VIP Developer, Tier: Enterprise." in rendered_text
+    assert "Login: https://acme.com/login" in rendered_text
+    assert "Unsubscribe: https://acme.com/api/v1/public/unsubscribe/sampletoken123" in rendered_text
+    assert "Ticket: TICK-4040" in rendered_text
+
+    # 2. HTML escaping on user-provided values
+    xss_recipient = CampaignRecipient(
+        id=888,
+        campaign_id=1,
+        email="hacker@example.com",
+        first_name='<script>alert("xss")</script>',
+        last_name='& "quoted"',
+        custom_variables={"role": "<b>Hacker</b>"},
+    )
+    template_html = "<p>Hi {{first_name}} {{last_name}}, Role: {{role}}</p>"
+    rendered_html = render_content_for_recipient(
+        template=template_html,
+        recipient=xss_recipient,
+        is_html=True,
+        context_vars=ctx,
+    )
+    assert "<script>" not in rendered_html
+    assert "&lt;script&gt;" in rendered_html
+    assert '&amp; "quoted"' in rendered_html or '&amp; &quot;quoted&quot;' in rendered_html or '&amp; &#34;quoted&#34;' in rendered_html
+    assert "<b>" not in rendered_html
+    assert "&lt;b&gt;Hacker&lt;/b&gt;" in rendered_html
+
+
+@pytest.mark.anyio
+async def test_execute_campaign_injects_unsubscribe_headers_and_resolves_context(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Verify that execute_campaign generates signed unsubscribe headers and resolves
+    all template merge tags in delivered emails."""
+    owner_token = await register_and_login(async_client, "owner_deliv10@test.com", "Owner Ten")
+    company_id = await create_company_helper(async_client, owner_token, "Acme Merge Org")
+    camp_id, acc_id = await setup_delivery_campaign(async_client, db_session, owner_token, company_id)
+
+    # Update campaign content with merge variables
+    camp = await db_session.get(Campaign, camp_id)
+    camp.subject = "Welcome {{first_name}} to {{company_name}}!"
+    camp.body_text = "Hi {{customer_name}}, your plan is {{plan}}. Unsubscribe at {{unsubscribe_url}}"
+    camp.body_html = "<p>Hi {{customer_name}}, your plan is {{plan}}. <a href='{{unsubscribe_url}}'>Unsubscribe</a></p>"
+    await db_session.commit()
+
+    # Add recipient with custom variables
+    recip = CampaignRecipient(
+        campaign_id=camp_id,
+        email="bob@customer.com",
+        first_name="Bob",
+        last_name="Builder",
+        custom_variables={"plan": "Pro Annual"},
+        status=CampaignRecipientStatus.PENDING.value,
+    )
+    db_session.add(recip)
+    await db_session.commit()
+    await db_session.refresh(recip)
+
+    await queue_campaign_helper(db_session, camp_id)
+
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync") as mock_smtp:
+        mock_smtp.return_value = (True, "250 OK Message accepted")
+        result = await CampaignDeliveryService.execute_campaign(campaign_id=camp_id, company_id=company_id)
+        assert result["status"] == CampaignStatus.COMPLETED.value
+        assert result["sent_count"] == 1
+        mock_smtp.assert_called_once()
+
+        # Inspect the EmailMessage passed to SMTPClient
+        sent_mime = mock_smtp.call_args.kwargs.get("message") or mock_smtp.call_args[0][0]
+
+        # Check RFC 8058 headers
+        assert "List-Unsubscribe" in sent_mime
+        assert "List-Unsubscribe-Post" in sent_mime
+        assert sent_mime["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+        assert "/api/v1/public/unsubscribe/" in sent_mime["List-Unsubscribe"]
+
+        # Check Subject resolution
+        assert sent_mime["Subject"] == "Welcome Bob to Acme Merge Org!"
+
+        # Check body resolution
+        plain_part = sent_mime.get_body(preferencelist=("plain",))
+        plain_content = plain_part.get_content() if plain_part else sent_mime.get_content()
+        assert "Hi Bob Builder, your plan is Pro Annual." in plain_content
+        assert "/api/v1/public/unsubscribe/" in plain_content
+
+
+@pytest.mark.anyio
+async def test_public_unsubscribe_get_and_post_endpoints(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Verify that public GET and POST /api/v1/public/unsubscribe/{token} idempotently
+    suppress the recipient, mark pending recipients as suppressed, and reject tampered tokens."""
+    from app.core.security import create_unsubscribe_token
+
+    owner_token = await register_and_login(async_client, "owner_unsub@test.com", "Owner Unsub")
+    company_id = await create_company_helper(async_client, owner_token, "Unsub Test Org")
+    camp_id, _ = await setup_delivery_campaign(async_client, db_session, owner_token, company_id)
+
+    target_email = "optout_user@target.com"
+    await add_recipient_helper(async_client, owner_token, company_id, camp_id, target_email, first_name="Opt")
+
+    # 1. Generate valid token
+    valid_token = create_unsubscribe_token(company_id=company_id, email=target_email, campaign_id=camp_id)
+
+    # 2. GET request with Accept: application/json
+    get_resp = await async_client.get(
+        f"/api/v1/public/unsubscribe/{valid_token}",
+        headers={"Accept": "application/json"},
+    )
+    assert get_resp.status_code == 200
+    data = get_resp.json()
+    assert data["status"] == "unsubscribed"
+    assert data["email"] == target_email
+    assert data["company_id"] == company_id
+
+    # 3. Verify suppression entry created via company suppressions API
+    supp_resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/suppressions",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert supp_resp.status_code == 200
+    supp_data = supp_resp.json()
+    assert any(s["email"] == target_email and s["reason"] == "UNSUBSCRIBE" for s in supp_data)
+
+    # 4. Verify pending CampaignRecipient transitioned to SUPPRESSED via API
+    recips_resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert recips_resp.status_code == 200
+    assert any(r["email"] == target_email and r["status"] == "SUPPRESSED" for r in recips_resp.json())
+
+    # 5. POST request (RFC 8058 One-Click Unsubscribe) - idempotent
+    post_resp = await async_client.post(
+        f"/api/v1/public/unsubscribe/{valid_token}",
+        headers={"List-Unsubscribe": "One-Click"},
+    )
+    assert post_resp.status_code == 200
+    assert post_resp.json()["status"] == "unsubscribed"
+
+    # 6. GET request requesting HTML returns 200 HTMLResponse
+    html_resp = await async_client.get(
+        f"/api/v1/public/unsubscribe/{valid_token}",
+        headers={"Accept": "text/html"},
+    )
+    assert html_resp.status_code == 200
+    assert "text/html" in html_resp.headers["content-type"]
+    assert "You're Unsubscribed" in html_resp.text
+    assert target_email in html_resp.text
+
+    # 7. Tampered token returns 400 Bad Request
+    tampered_token = valid_token[:-4] + "abcd"
+    bad_resp = await async_client.get(
+        f"/api/v1/public/unsubscribe/{tampered_token}",
+        headers={"Accept": "application/json"},
+    )
+    assert bad_resp.status_code == 400
+

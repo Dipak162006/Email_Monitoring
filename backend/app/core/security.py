@@ -94,3 +94,52 @@ def decrypt_credential(ciphertext: Optional[str]) -> Optional[str]:
         return fernet.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
     except Exception:
         return None
+
+
+def create_unsubscribe_token(
+    company_id: int,
+    email: str,
+    campaign_id: Optional[int] = None,
+    expires_delta: Optional[timedelta] = None,
+) -> str:
+    """Generate a signed, tamper-proof JWT token for email unsubscription."""
+    now = datetime.now(timezone.utc)
+    expire = now + (expires_delta or timedelta(days=365))
+
+    to_encode = {
+        "company_id": company_id,
+        "email": email.strip().lower(),
+        "campaign_id": campaign_id,
+        "type": "unsubscribe",
+        "iat": int(now.timestamp()),
+        "exp": int(expire.timestamp()),
+    }
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def decode_unsubscribe_token(token: str) -> dict:
+    """Decode and validate a signed unsubscribe token.
+    
+    Raises:
+        jwt.ExpiredSignatureError: When the token has expired.
+        jwt.InvalidTokenError: When the token is invalid, tampered with, or of wrong type.
+    """
+    payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    if payload.get("type") != "unsubscribe":
+        raise jwt.InvalidTokenError("Invalid token type for unsubscription")
+    if "company_id" not in payload or "email" not in payload:
+        raise jwt.InvalidTokenError("Missing required unsubscribe claims")
+    return payload
+
+
+def build_unsubscribe_url(
+    company_id: int,
+    email: str,
+    campaign_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+) -> str:
+    """Construct the full RFC 8058 one-click unsubscribe URL with signed token."""
+    token = create_unsubscribe_token(company_id=company_id, email=email, campaign_id=campaign_id)
+    base = base_url or getattr(settings, "BACKEND_URL", "http://localhost:8000")
+    return f"{base.rstrip('/')}/api/v1/public/unsubscribe/{token}"
+

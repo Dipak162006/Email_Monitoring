@@ -17,6 +17,8 @@ from app.modules.campaigns.models import (
     CampaignRecipientStatus,
     CampaignStatus,
 )
+from app.core.config import settings
+from app.core.security import build_unsubscribe_url
 from app.modules.campaigns.service import CampaignService
 from app.modules.campaigns.suppression_service import SuppressionService
 from app.modules.emails.models import Email
@@ -30,19 +32,82 @@ def render_content_for_recipient(
     template: Optional[str],
     recipient: CampaignRecipient,
     is_html: bool = False,
+    context_vars: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    """Replace approved {{first_name}} merge-tags with recipient.first_name (or empty string).
+    """Replace approved merge tags and custom recipient variables in template.
     
-    Safe empty-value replacement applies when first_name is None.
+    Safe empty-value replacement applies when fields are None or omitted.
     Handles optional whitespace inside braces, e.g. {{ first_name }}.
     Escapes HTML entities and performs URL safety sanitization when rendering HTML content
     to prevent HTML injection and malicious script execution in href/src attributes.
     """
     if template is None:
         return None
-    raw_name = recipient.first_name if recipient.first_name is not None else ""
-    first_name_val = escape(raw_name, quote=True) if is_html else raw_name
-    rendered = re.sub(r"\{\{\s*first_name\s*\}\}", first_name_val, template)
+
+    ctx = context_vars or {}
+
+    first_name = (recipient.first_name or "").strip()
+    last_name = (getattr(recipient, "last_name", None) or "").strip()
+    full_name = " ".join(filter(None, [first_name, last_name])).strip()
+    customer_name = full_name if full_name else first_name
+    email = (recipient.email or "").strip()
+
+    resolved: Dict[str, str] = {
+        "first_name": first_name,
+        "last_name": last_name,
+        "full_name": full_name,
+        "customer_name": customer_name,
+        "customer_email": email,
+        "email": email,
+        "company_name": str(ctx.get("company_name", "") or "").strip(),
+        "sender_name": str(ctx.get("sender_name", "") or "").strip(),
+        "sender_email": str(ctx.get("sender_email", "") or "").strip(),
+        "login_url": str(ctx.get("login_url", "") or "").strip(),
+        "unsubscribe_url": str(ctx.get("unsubscribe_url", "") or "").strip(),
+        "ticket_id": str(ctx.get("ticket_id", recipient.id if getattr(recipient, "id", None) is not None else "") or "").strip(),
+    }
+
+    # Overlay any keys from recipient.custom_variables (case-insensitive keys)
+    custom_vars = getattr(recipient, "custom_variables", None)
+    if isinstance(custom_vars, dict):
+        for k, v in custom_vars.items():
+            if k is not None and v is not None:
+                clean_k = str(k).strip().lower()
+                resolved[clean_k] = str(v)
+
+    STANDARD_TAGS = {
+        "first_name",
+        "last_name",
+        "full_name",
+        "customer_name",
+        "customer_email",
+        "email",
+        "company_name",
+        "sender_name",
+        "sender_email",
+        "login_url",
+        "unsubscribe_url",
+        "ticket_id",
+    }
+
+    def replacer(match: re.Match) -> str:
+        tag_key = match.group(1).lower()
+        if tag_key in resolved:
+            val = resolved[tag_key]
+            # Special preservation: if unsubscribe_url was not provided in context,
+            # leave placeholder intact (e.g. for preview or tests asserting '{{unsubscribe_url}}')
+            if tag_key == "unsubscribe_url" and not val:
+                return match.group(0)
+            if is_html:
+                return escape(val, quote=True)
+            return val
+        elif tag_key in STANDARD_TAGS:
+            if tag_key == "unsubscribe_url":
+                return match.group(0)
+            return ""
+        return match.group(0)
+
+    rendered = re.sub(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}", replacer, template)
     if is_html and rendered:
         return sanitize_html(rendered)
     return rendered
@@ -155,7 +220,10 @@ class CampaignDeliveryService:
         async with db_factory() as db:
             stmt = (
                 select(Campaign)
-                .options(selectinload(Campaign.email_account))
+                .options(
+                    selectinload(Campaign.email_account),
+                    selectinload(Campaign.company),
+                )
                 .where(
                     Campaign.id == campaign_id,
                     Campaign.company_id == company_id,
@@ -339,6 +407,7 @@ class CampaignDeliveryService:
             camp_subject: str = ""
             camp_body_text: Optional[str] = None
             camp_body_html: Optional[str] = None
+            camp_company_name: str = ""
             sender_account = None
             recipient_obj = None
 
@@ -351,6 +420,7 @@ class CampaignDeliveryService:
                     select(Campaign)
                     .options(
                         selectinload(Campaign.email_account),
+                        selectinload(Campaign.company),
                         selectinload(Campaign.attachments),
                     )
                     .where(Campaign.id == campaign_id)
@@ -376,6 +446,7 @@ class CampaignDeliveryService:
                 camp_body_text = campaign.body_text
                 camp_body_html = campaign.body_html
                 sender_account = campaign.email_account
+                camp_company_name = (campaign.company.name if campaign.company and campaign.company.name else "") or (sender_account.name if sender_account and sender_account.name else "")
                 camp_attachment_ids = [att.id for att in campaign.attachments]
 
                 # Check or create CampaignDelivery under row-level lock
@@ -428,10 +499,23 @@ class CampaignDeliveryService:
             if delivery_id is None or recipient_obj is None:
                 continue
 
-            # 3b. Render recipient-specific content
-            rendered_subject = render_content_for_recipient(camp_subject, recipient_obj) or ""
-            rendered_body_text = render_content_for_recipient(camp_body_text, recipient_obj)
-            rendered_body_html = render_content_for_recipient(camp_body_html, recipient_obj, is_html=True)
+            # 3b. Render recipient-specific content with full template variables
+            sender_name = sender_account.name or sender_account.email_address
+            sender_email = sender_account.email_address
+            unsub_url = build_unsubscribe_url(company_id=company_id, email=recipient_email, campaign_id=campaign_id)
+            login_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
+
+            context_vars = {
+                "company_name": camp_company_name,
+                "sender_name": sender_name,
+                "sender_email": sender_email,
+                "unsubscribe_url": unsub_url,
+                "login_url": login_url,
+            }
+
+            rendered_subject = render_content_for_recipient(camp_subject, recipient_obj, context_vars=context_vars) or ""
+            rendered_body_text = render_content_for_recipient(camp_body_text, recipient_obj, context_vars=context_vars)
+            rendered_body_html = render_content_for_recipient(camp_body_html, recipient_obj, is_html=True, context_vars=context_vars)
 
             send_req = EmailSendRequest(
                 email_account_id=sender_account.id,
@@ -440,6 +524,7 @@ class CampaignDeliveryService:
                 body_text=rendered_body_text,
                 body_html=rendered_body_html,
                 campaign_attachment_ids=camp_attachment_ids if camp_attachment_ids else None,
+                unsubscribe_url=unsub_url,
             )
 
             # 3c. Transmit via EmailService (NO DB locks held during transport I/O)
@@ -503,7 +588,6 @@ class CampaignDeliveryService:
                         failed_count += 1
 
                         # Schedule retry if error is retryable and attempt_count < max_retries
-                        from app.core.config import settings
                         max_retries = getattr(settings, "MAX_CAMPAIGN_DELIVERY_RETRIES", 3)
                         if is_retryable_delivery_error(caught_exc) and delivery.attempt_count < max_retries:
                             try:
@@ -774,7 +858,6 @@ class CampaignDeliveryService:
         if email_service is None:
             email_service = EmailService()
 
-        from app.core.config import settings
         max_retries = getattr(settings, "MAX_CAMPAIGN_DELIVERY_RETRIES", 3)
 
         # ---------------------------------------------------------------------
@@ -785,6 +868,7 @@ class CampaignDeliveryService:
                 select(CampaignDelivery)
                 .options(
                     selectinload(CampaignDelivery.campaign).selectinload(Campaign.email_account),
+                    selectinload(CampaignDelivery.campaign).selectinload(Campaign.company),
                     selectinload(CampaignDelivery.campaign).selectinload(Campaign.attachments),
                     selectinload(CampaignDelivery.recipient),
                 )
@@ -879,13 +963,27 @@ class CampaignDeliveryService:
             camp_attachment_ids = [att.id for att in campaign.attachments]
             recip_email = recipient.email
             attempt_number = delivery.attempt_count
+            camp_company_name = (campaign.company.name if campaign.company and campaign.company.name else "") or (sender_account.name if sender_account and sender_account.name else "")
 
         # ---------------------------------------------------------------------
         # Step 2: Render Content & Transmit (NO DB LOCK HELD)
         # ---------------------------------------------------------------------
-        rendered_subject = render_content_for_recipient(camp_subject, recipient) or ""
-        rendered_body_text = render_content_for_recipient(camp_body_text, recipient)
-        rendered_body_html = render_content_for_recipient(camp_body_html, recipient, is_html=True)
+        sender_name = sender_account.name or sender_account.email_address
+        sender_email = sender_account.email_address
+        unsub_url = build_unsubscribe_url(company_id=company_id, email=recip_email, campaign_id=campaign.id)
+        login_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
+
+        context_vars = {
+            "company_name": camp_company_name,
+            "sender_name": sender_name,
+            "sender_email": sender_email,
+            "unsubscribe_url": unsub_url,
+            "login_url": login_url,
+        }
+
+        rendered_subject = render_content_for_recipient(camp_subject, recipient, context_vars=context_vars) or ""
+        rendered_body_text = render_content_for_recipient(camp_body_text, recipient, context_vars=context_vars)
+        rendered_body_html = render_content_for_recipient(camp_body_html, recipient, is_html=True, context_vars=context_vars)
 
         send_req = EmailSendRequest(
             email_account_id=sender_account.id,
@@ -894,6 +992,7 @@ class CampaignDeliveryService:
             body_text=rendered_body_text,
             body_html=rendered_body_html,
             campaign_attachment_ids=camp_attachment_ids if camp_attachment_ids else None,
+            unsubscribe_url=unsub_url,
         )
 
         send_success = False

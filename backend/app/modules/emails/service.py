@@ -163,6 +163,17 @@ class EmailService:
         if send_req.reply_to:
             msg["Reply-To"] = str(send_req.reply_to)
 
+        # RFC 8058 One-Click Unsubscribe headers
+        if getattr(send_req, "unsubscribe_url", None):
+            msg["List-Unsubscribe"] = f"<{send_req.unsubscribe_url}>"
+            msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+
+        # Custom headers
+        if getattr(send_req, "custom_headers", None) and isinstance(send_req.custom_headers, dict):
+            for h_name, h_val in send_req.custom_headers.items():
+                if h_name not in msg:
+                    msg[h_name] = str(h_val)
+
         # 3. Subject & Identification Headers
         msg["Subject"] = send_req.subject or ""
         domain = account.email_address.split("@")[-1] if "@" in account.email_address else "localhost"
