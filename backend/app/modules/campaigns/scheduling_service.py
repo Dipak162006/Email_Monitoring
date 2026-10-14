@@ -264,3 +264,85 @@ class CampaignSchedulingService:
 
         return recovered
 
+    @classmethod
+    async def recover_stale_sending_deliveries(
+        cls,
+        db_factory=None,
+        now_utc: Optional[datetime] = None,
+        stale_minutes: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Recover stale SENDING deliveries caused by crashed workers or ungraceful task termination.
+        
+        Guarantees:
+        - Finds CampaignDelivery rows in SENDING status with last_attempt_at <= (now_utc - stale_minutes).
+        - Uses row-level lock (with_for_update skip_locked=True) to safely isolate recovery.
+        - Transitions delivery to FAILED with error_message='Delivery timed out or worker interrupted while sending.'
+        - Updates associated CampaignRecipient to FAILED if still PENDING.
+        - Returns list of recovered delivery descriptors for observability.
+        """
+        if db_factory is None:
+            from app.workers.tasks import get_worker_db
+            db_factory = get_worker_db
+
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        elif now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+        from datetime import timedelta
+        from app.modules.campaigns.models import (
+            CampaignDelivery,
+            CampaignDeliveryStatus,
+            CampaignRecipient,
+            CampaignRecipientStatus,
+        )
+
+        stale_cutoff = now_utc - timedelta(minutes=stale_minutes)
+        recovered: List[Dict[str, Any]] = []
+
+        async with db_factory() as db:
+            stmt = (
+                select(CampaignDelivery)
+                .where(
+                    CampaignDelivery.status == CampaignDeliveryStatus.SENDING.value,
+                    CampaignDelivery.last_attempt_at.is_not(None),
+                    CampaignDelivery.last_attempt_at <= stale_cutoff,
+                )
+                .order_by(CampaignDelivery.last_attempt_at.asc())
+                .with_for_update(skip_locked=True)
+            )
+            res = await db.execute(stmt)
+            stale_deliveries = list(res.scalars().all())
+
+            for deliv in stale_deliveries:
+                deliv.status = CampaignDeliveryStatus.FAILED.value
+                deliv.error_message = "Delivery timed out or worker interrupted while sending."
+
+                # Update associated CampaignRecipient if still in PENDING
+                if deliv.recipient_id:
+                    recip_stmt = select(CampaignRecipient).where(
+                        CampaignRecipient.id == deliv.recipient_id,
+                        CampaignRecipient.status == CampaignRecipientStatus.PENDING.value,
+                    )
+                    recip_res = await db.execute(recip_stmt)
+                    recip = recip_res.scalar_one_or_none()
+                    if recip:
+                        recip.status = CampaignRecipientStatus.FAILED.value
+
+                recovered.append({
+                    "delivery_id": deliv.id,
+                    "campaign_id": deliv.campaign_id,
+                    "recipient_id": deliv.recipient_id,
+                    "last_attempt_at": deliv.last_attempt_at.isoformat() if deliv.last_attempt_at else None,
+                })
+
+            if stale_deliveries:
+                await db.commit()
+                logger.info(
+                    "Recovered %d stale SENDING deliveries older than %d minutes.",
+                    len(stale_deliveries),
+                    stale_minutes,
+                )
+
+        return recovered
+

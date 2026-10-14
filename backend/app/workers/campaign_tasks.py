@@ -82,11 +82,14 @@ async def _async_scheduled_campaign_dispatch_task() -> Dict[str, Any]:
         from app.modules.campaigns.scheduling_service import CampaignSchedulingService
         dispatched = await CampaignSchedulingService.dispatch_due_campaigns()
         recovered = await CampaignSchedulingService.recover_due_paced_campaigns()
+        stale_deliveries = await CampaignSchedulingService.recover_stale_sending_deliveries()
         return {
             "dispatched_count": len(dispatched),
             "dispatched": dispatched,
             "recovered_count": len(recovered),
             "recovered": recovered,
+            "stale_deliveries_count": len(stale_deliveries),
+            "stale_deliveries": stale_deliveries,
         }
     except Exception as exc:
         logger.exception("Unhandled failure in periodic scheduled campaign dispatch task: %s", exc)

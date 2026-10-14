@@ -1,3 +1,4 @@
+import asyncio
 from typing import List, Optional
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -171,7 +172,8 @@ class DomainService:
         domain = await DomainService.get_domain(db, company_id, domain_id)
         dns_resolver = resolver if isinstance(resolver, DNSResolver) else None
 
-        result = verify_domain_dns(
+        result = await asyncio.to_thread(
+            verify_domain_dns,
             domain_name=domain.domain_name,
             dkim_selector=domain.dkim_selector,
             resolver=dns_resolver,

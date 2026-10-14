@@ -461,3 +461,139 @@ async def test_email_account_company_mismatch_fails_campaign(
     assert result["status"] == "FAILED"
     await db_session.refresh(camp)
     assert camp.status == CampaignStatus.FAILED.value
+
+
+# =============================================================================
+# 8. Stale SENDING Delivery Self-Healing & Deadlock Prevention
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_stale_sending_delivery_recovery_and_campaign_completion(
+    async_client: AsyncClient, db_session: AsyncSession
+):
+    """Test that CampaignDelivery rows stuck in SENDING (e.g. crashed worker) are recovered
+    to FAILED and do not permanently deadlock campaign completion."""
+    from datetime import timedelta
+    from app.modules.campaigns.scheduling_service import CampaignSchedulingService
+
+    token = await register_and_login(async_client, "stale_recovery_owner@example.com")
+    comp_id = await create_company_helper(async_client, token, "Stale Recovery Org")
+    camp_id, acc_id = await setup_test_campaign(async_client, db_session, token, comp_id)
+
+    # Add 2 recipients
+    r1_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "sent_user@test.com", "first_name": "Sent"},
+    )
+    r1_id = r1_resp.json()["id"]
+
+    r2_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "crashed_worker_user@test.com", "first_name": "Crashed"},
+    )
+    r2_id = r2_resp.json()["id"]
+
+    # Set campaign to RUNNING
+    camp = (await db_session.execute(select(Campaign).where(Campaign.id == camp_id))).scalar_one()
+    camp.status = CampaignStatus.RUNNING.value
+
+    # Recipient 1 has a completed SENT delivery
+    rec1 = (await db_session.execute(select(CampaignRecipient).where(CampaignRecipient.id == r1_id))).scalar_one()
+    rec1.status = CampaignRecipientStatus.SENT.value
+    deliv1 = CampaignDelivery(
+        campaign_id=camp_id,
+        recipient_id=r1_id,
+        status=CampaignDeliveryStatus.SENT.value,
+        attempt_count=1,
+        last_attempt_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+        sent_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+    )
+    db_session.add(deliv1)
+
+    # Recipient 2 has a stale SENDING delivery stuck for 15 minutes (worker died)
+    rec2 = (await db_session.execute(select(CampaignRecipient).where(CampaignRecipient.id == r2_id))).scalar_one()
+    rec2.status = CampaignRecipientStatus.PENDING.value
+    stale_time = datetime.now(timezone.utc) - timedelta(minutes=15)
+    deliv2 = CampaignDelivery(
+        campaign_id=camp_id,
+        recipient_id=r2_id,
+        status=CampaignDeliveryStatus.SENDING.value,
+        attempt_count=1,
+        last_attempt_at=stale_time,
+    )
+    db_session.add(deliv2)
+    await db_session.commit()
+
+    # 1. Test CampaignSchedulingService.recover_stale_sending_deliveries recovers deliv2
+    recovered = await CampaignSchedulingService.recover_stale_sending_deliveries(
+        db_factory=TestAsyncSessionLocal,
+        stale_minutes=10,
+    )
+    assert any(d["delivery_id"] == deliv2.id for d in recovered)
+
+    await db_session.refresh(deliv2)
+    assert deliv2.status == CampaignDeliveryStatus.FAILED.value
+    assert "timed out or worker interrupted" in deliv2.error_message
+
+    await db_session.refresh(rec2)
+    assert rec2.status == CampaignRecipientStatus.FAILED.value
+
+    # 2. Test execute_campaign now completes cleanly without active_sending deadlock
+    result = await CampaignDeliveryService.execute_campaign(
+        campaign_id=camp_id,
+        company_id=comp_id,
+        db_factory=TestAsyncSessionLocal,
+    )
+    assert result["status"] == CampaignStatus.COMPLETED.value
+    await db_session.refresh(camp)
+    assert camp.status == CampaignStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_execute_campaign_in_line_self_heals_stale_sending_deliveries(
+    async_client: AsyncClient, db_session: AsyncSession
+):
+    """Test that CampaignDeliveryService.execute_campaign automatically recovers stale SENDING
+    deliveries (>10m) in-line during Phase 2 and Phase 4 without requiring a scheduler tick."""
+    from datetime import timedelta
+
+    token = await register_and_login(async_client, "inline_heal_owner@example.com")
+    comp_id = await create_company_helper(async_client, token, "Inline Heal Org")
+    camp_id, acc_id = await setup_test_campaign(async_client, db_session, token, comp_id)
+
+    r_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "stale_in_flight@test.com", "first_name": "StaleInFlight"},
+    )
+    r_id = r_resp.json()["id"]
+
+    camp = (await db_session.execute(select(Campaign).where(Campaign.id == camp_id))).scalar_one()
+    camp.status = CampaignStatus.RUNNING.value
+
+    # Delivery left in SENDING from 12 minutes ago
+    deliv = CampaignDelivery(
+        campaign_id=camp_id,
+        recipient_id=r_id,
+        status=CampaignDeliveryStatus.SENDING.value,
+        attempt_count=1,
+        last_attempt_at=datetime.now(timezone.utc) - timedelta(minutes=12),
+    )
+    db_session.add(deliv)
+    await db_session.commit()
+
+    # execute_campaign recovers it in Phase 2 and completes in Phase 4
+    result = await CampaignDeliveryService.execute_campaign(
+        campaign_id=camp_id,
+        company_id=comp_id,
+        db_factory=TestAsyncSessionLocal,
+    )
+    assert result["status"] == CampaignStatus.COMPLETED.value
+    await db_session.refresh(camp)
+    assert camp.status == CampaignStatus.COMPLETED.value
+
+    await db_session.refresh(deliv)
+    assert deliv.status == CampaignDeliveryStatus.FAILED.value
+    assert "timed out or worker interrupted" in deliv.error_message

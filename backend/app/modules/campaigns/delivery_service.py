@@ -338,6 +338,14 @@ class CampaignDeliveryService:
                 emails=recipient_emails,
             )
 
+            # Phase 2a: Recover any stale SENDING deliveries for this campaign older than 10 minutes
+            await cls.recover_stale_deliveries_for_campaign(
+                db=db,
+                campaign_id=campaign_id,
+                now_utc=now_utc,
+                stale_minutes=10,
+            )
+
             # Discover all existing deliveries for this campaign to prevent duplicating
             # already SENT, BOUNCED, FAILED, or in-flight SENDING deliveries on resume
             deliv_stmt = select(CampaignDelivery.recipient_id, CampaignDelivery.status).where(
@@ -702,6 +710,14 @@ class CampaignDeliveryService:
                     "skipped_count": skipped_count,
                     "remaining_pending": remaining_pending,
                 }
+
+            # Phase 4a: Recover any stale SENDING deliveries older than 10 minutes before checking active_sending
+            await cls.recover_stale_deliveries_for_campaign(
+                db=db,
+                campaign_id=campaign_id,
+                now_utc=now_utc,
+                stale_minutes=10,
+            )
 
             # If there are active deliveries in SENDING status (concurrent send or in-flight),
             # preserve status and do not mark terminal yet.
@@ -1119,5 +1135,62 @@ class CampaignDeliveryService:
                 email=recipient.email,
             )
         return delivery
+
+    @classmethod
+    async def recover_stale_deliveries_for_campaign(
+        cls,
+        db: AsyncSession,
+        campaign_id: int,
+        now_utc: Optional[datetime] = None,
+        stale_minutes: int = 10,
+    ) -> int:
+        """Recover stale SENDING deliveries for a specific campaign.
+        
+        Transitions deliveries older than stale_minutes from SENDING to FAILED,
+        and transitions linked PENDING recipients to FAILED.
+        """
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        elif now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+        stale_cutoff = now_utc - timedelta(minutes=stale_minutes)
+        stale_stmt = (
+            select(CampaignDelivery)
+            .where(
+                CampaignDelivery.campaign_id == campaign_id,
+                CampaignDelivery.status == CampaignDeliveryStatus.SENDING.value,
+                CampaignDelivery.last_attempt_at.is_not(None),
+                CampaignDelivery.last_attempt_at <= stale_cutoff,
+            )
+            .with_for_update(skip_locked=True)
+        )
+        stale_res = await db.execute(stale_stmt)
+        stale_deliveries = list(stale_res.scalars().all())
+
+        for deliv in stale_deliveries:
+            deliv.status = CampaignDeliveryStatus.FAILED.value
+            deliv.error_message = "Delivery timed out or worker interrupted while sending."
+            if deliv.recipient_id:
+                recip_res = await db.execute(
+                    select(CampaignRecipient).where(
+                        CampaignRecipient.id == deliv.recipient_id,
+                        CampaignRecipient.status == CampaignRecipientStatus.PENDING.value,
+                    )
+                )
+                recip = recip_res.scalar_one_or_none()
+                if recip:
+                    recip.status = CampaignRecipientStatus.FAILED.value
+
+        if stale_deliveries:
+            await db.commit()
+            logger.info(
+                "Recovered %d stale SENDING deliveries for campaign %d (cutoff: %s)",
+                len(stale_deliveries),
+                campaign_id,
+                stale_cutoff.isoformat(),
+            )
+
+        return len(stale_deliveries)
 
 
