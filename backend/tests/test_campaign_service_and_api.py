@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.campaigns.models import Campaign, CampaignStatus
+from app.modules.campaigns.models import Campaign, CampaignRecipient, CampaignRecipientStatus, CampaignStatus
 from app.modules.campaigns.schemas import CampaignCreate, CampaignUpdate
 from app.modules.campaigns.service import CampaignService
 from app.modules.companies.models import Company, CompanyRole, CompanyUser
@@ -257,6 +257,63 @@ async def test_get_campaign_detail(async_client: AsyncClient):
     assert detail["email_account_name"] == "Sender Box"
     assert detail["email_account_address"] == "send@detail.com"
     assert detail["recipient_count"] == 0
+    assert detail["pending_count"] == 0
+    assert detail["sent_count"] == 0
+    assert detail["failed_count"] == 0
+    assert detail["bounced_count"] == 0
+    assert detail["suppressed_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_campaign_detail_status_breakdown(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Test that CampaignDetailRead correctly aggregates recipient status counts."""
+    token = await register_and_login(async_client, "breakdown_owner@co.com", "Breakdown Owner")
+    company_id = await create_company_helper(async_client, token, "Breakdown Co")
+    account_id = await create_email_account_helper(async_client, token, company_id, "breakdown@detail.com", "Breakdown Box")
+
+    create_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Breakdown Campaign", "email_account_id": account_id, "subject": "Telemetry Test"},
+    )
+    camp_id = create_resp.json()["id"]
+
+    # Insert recipients directly with diverse statuses: 2 PENDING, 3 SENT, 1 FAILED, 2 BOUNCED, 1 SUPPRESSED
+    recipients_data = [
+        ("p1@test.com", CampaignRecipientStatus.PENDING.value),
+        ("p2@test.com", CampaignRecipientStatus.PENDING.value),
+        ("s1@test.com", CampaignRecipientStatus.SENT.value),
+        ("s2@test.com", CampaignRecipientStatus.SENT.value),
+        ("s3@test.com", CampaignRecipientStatus.SENT.value),
+        ("f1@test.com", CampaignRecipientStatus.FAILED.value),
+        ("b1@test.com", CampaignRecipientStatus.BOUNCED.value),
+        ("b2@test.com", CampaignRecipientStatus.BOUNCED.value),
+        ("x1@test.com", CampaignRecipientStatus.SUPPRESSED.value),
+    ]
+    for email_addr, stat in recipients_data:
+        recip = CampaignRecipient(
+            campaign_id=camp_id,
+            email=email_addr,
+            status=stat,
+        )
+        db_session.add(recip)
+    await db_session.commit()
+
+    resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    detail = resp.json()
+    assert detail["recipient_count"] == 9
+    assert detail["pending_count"] == 2
+    assert detail["sent_count"] == 3
+    assert detail["failed_count"] == 1
+    assert detail["bounced_count"] == 2
+    assert detail["suppressed_count"] == 1
 
 
 @pytest.mark.asyncio

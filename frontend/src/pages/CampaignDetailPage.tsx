@@ -938,7 +938,107 @@ export const CampaignDetailPage: React.FC = () => {
         </div>
       </div>
 
-      {/* 4. Campaign Message Preview Section */}
+      {/* 4. Campaign Delivery Breakdown & Telemetry */}
+      <div className="bg-white rounded-xl p-5 md:p-6 border border-slate-200/80 shadow-2xs space-y-4 min-w-0">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base sm:text-lg font-bold text-slate-900">
+                Delivery Breakdown & Telemetry
+              </h2>
+              <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
+                {(campaign.recipient_count || 0).toLocaleString()} Total Target
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Live recipient status counts aggregated across this campaign's audience.
+            </p>
+          </div>
+
+          <Link
+            to={`/campaigns/${campaign.id}/recipients`}
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:underline self-start sm:self-auto"
+          >
+            <span>Inspect Recipients List</span>
+            <ArrowRight className="h-3.5 w-3.5" />
+          </Link>
+        </div>
+
+        {/* 5-Card Status Grid */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
+          {/* 1. Pending */}
+          <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-slate-500 mb-2">
+              <span className="text-xs font-medium">Pending</span>
+              <Clock className="h-4 w-4 text-amber-500" />
+            </div>
+            <div>
+              <span className="text-2xl font-bold text-slate-900 tracking-tight" data-testid="telemetry-pending">
+                {(campaign.pending_count ?? 0).toLocaleString()}
+              </span>
+              <p className="text-[11px] text-slate-500 mt-0.5">Queued for send</p>
+            </div>
+          </div>
+
+          {/* 2. Sent */}
+          <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-slate-500 mb-2">
+              <span className="text-xs font-medium">Sent</span>
+              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+            </div>
+            <div>
+              <span className="text-2xl font-bold text-slate-900 tracking-tight" data-testid="telemetry-sent">
+                {(campaign.sent_count ?? 0).toLocaleString()}
+              </span>
+              <p className="text-[11px] text-slate-500 mt-0.5">Dispatched successfully</p>
+            </div>
+          </div>
+
+          {/* 3. Bounced */}
+          <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-slate-500 mb-2">
+              <span className="text-xs font-medium">Bounced</span>
+              <AlertTriangle className="h-4 w-4 text-rose-500" />
+            </div>
+            <div>
+              <span className="text-2xl font-bold text-slate-900 tracking-tight" data-testid="telemetry-bounced">
+                {(campaign.bounced_count ?? 0).toLocaleString()}
+              </span>
+              <p className="text-[11px] text-slate-500 mt-0.5">Hard / soft bounces</p>
+            </div>
+          </div>
+
+          {/* 4. Suppressed */}
+          <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-slate-500 mb-2">
+              <span className="text-xs font-medium">Suppressed</span>
+              <XCircle className="h-4 w-4 text-slate-400" />
+            </div>
+            <div>
+              <span className="text-2xl font-bold text-slate-900 tracking-tight" data-testid="telemetry-suppressed">
+                {(campaign.suppressed_count ?? 0).toLocaleString()}
+              </span>
+              <p className="text-[11px] text-slate-500 mt-0.5">Opted out / blocked</p>
+            </div>
+          </div>
+
+          {/* 5. Failed */}
+          <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-slate-500 mb-2">
+              <span className="text-xs font-medium">Failed</span>
+              <AlertCircle className="h-4 w-4 text-amber-600" />
+            </div>
+            <div>
+              <span className="text-2xl font-bold text-slate-900 tracking-tight" data-testid="telemetry-failed">
+                {(campaign.failed_count ?? 0).toLocaleString()}
+              </span>
+              <p className="text-[11px] text-slate-500 mt-0.5">Exceeded max retries</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 5. Campaign Message Preview Section */}
       <div className="w-full bg-white rounded-xl p-5 md:p-6 lg:p-7 border border-slate-200/80 shadow-2xs space-y-5 min-w-0">
         {/* Content View Mode Toolbar */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">

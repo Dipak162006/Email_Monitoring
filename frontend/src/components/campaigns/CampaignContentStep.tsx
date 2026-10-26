@@ -38,6 +38,24 @@ export const DISALLOWED_EXTENSIONS = [
   ".ps1",
 ];
 
+export interface MergeTagItem {
+  tag: string;
+  label: string;
+  description: string;
+  category: "Recipient" | "Sender & Workspace" | "Compliance";
+}
+
+export const CAMPAIGN_MERGE_TAGS: MergeTagItem[] = [
+  { tag: "{{first_name}}", label: "First Name", description: "Recipient's first name", category: "Recipient" },
+  { tag: "{{last_name}}", label: "Last Name", description: "Recipient's last name", category: "Recipient" },
+  { tag: "{{customer_name}}", label: "Full Customer Name", description: "Recipient's full display name", category: "Recipient" },
+  { tag: "{{customer_email}}", label: "Customer Email", description: "Recipient's email address", category: "Recipient" },
+  { tag: "{{company_name}}", label: "Company / Workspace Name", description: "Current workspace or company name", category: "Sender & Workspace" },
+  { tag: "{{sender_name}}", label: "Sender Display Name", description: "Name of the sending email account", category: "Sender & Workspace" },
+  { tag: "{{sender_email}}", label: "Sender Email Address", description: "Email address sending this campaign", category: "Sender & Workspace" },
+  { tag: "{{unsubscribe_url}}", label: "Unsubscribe Opt-Out Link", description: "RFC 8058 compliant unsubscribe link", category: "Compliance" },
+];
+
 export interface CampaignContentStepProps {
   subject: string;
   bodyHtml: string;
@@ -211,7 +229,7 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
 
     if (!isAlreadyInHtml && !isAlreadyInText) {
       if (richEditorRef.current) {
-        richEditorRef.current.insertHtml(cleanSigHtml);
+        richEditorRef.current.insertBlockHtml(cleanSigHtml);
       } else {
         const updatedHtml = bodyHtml ? `${bodyHtml}<br/><br/>${cleanSigHtml}` : cleanSigHtml;
         const updatedText = bodyText ? `${bodyText}\n\n${cleanSigText}` : cleanSigText;
@@ -234,12 +252,24 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
 
   // Preview data rendering
   const previewSampleName = "Jane";
+  const replaceAllMergeTags = (content: string) => {
+    return content
+      .replace(/\{\{first_name\}\}/g, previewSampleName)
+      .replace(/\{\{last_name\}\}/g, "Doe")
+      .replace(/\{\{customer_name\}\}/g, "Jane Doe")
+      .replace(/\{\{customer_email\}\}/g, "jane.doe@example.com")
+      .replace(/\{\{company_name\}\}/g, "Acme Corp")
+      .replace(/\{\{sender_name\}\}/g, selectedSender?.name || "Sender")
+      .replace(/\{\{sender_email\}\}/g, selectedSender?.email_address || "sender@example.com")
+      .replace(/\{\{unsubscribe_url\}\}/g, "#unsubscribe");
+  };
+
   const resolvedSubject = subject
-    ? subject.replace(/\{\{first_name\}\}/g, previewSampleName)
+    ? replaceAllMergeTags(subject)
     : "(No Subject)";
 
   const rawHtmlForPreview = bodyHtml && bodyHtml.trim()
-    ? bodyHtml.replace(/\{\{first_name\}\}/g, previewSampleName)
+    ? replaceAllMergeTags(bodyHtml)
     : "<p class='text-slate-400 italic'>No message content provided.</p>";
 
   const sanitizedPreviewHtml = DOMPurify.sanitize(rawHtmlForPreview, {
@@ -300,7 +330,7 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
               </button>
             </div>
 
-            {/* Merge Tag Dropdown: ONLY {{first_name}} */}
+            {/* Merge Tag Dropdown: {{first_name}} */}
             <div className="relative" ref={dropdownRef}>
               <button
                 type="button"

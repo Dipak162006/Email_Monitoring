@@ -488,19 +488,53 @@ class CampaignService:
         return result.scalar() or 0
 
     @staticmethod
+    async def get_recipient_status_counts(db: AsyncSession, campaign_id: int) -> dict[str, int]:
+        """Execute a single indexed GROUP BY query on CampaignRecipient.status for campaign_id.
+        
+        Returns a dictionary containing total recipient count and breakdown by status:
+        total, pending_count, sent_count, failed_count, bounced_count, suppressed_count.
+        """
+        stmt = (
+            select(CampaignRecipient.status, func.count(CampaignRecipient.id))
+            .where(CampaignRecipient.campaign_id == campaign_id)
+            .group_by(CampaignRecipient.status)
+        )
+        res = await db.execute(stmt)
+        rows = res.all()
+        counts: dict[str, int] = {
+            "total": 0,
+            "pending_count": 0,
+            "sent_count": 0,
+            "failed_count": 0,
+            "bounced_count": 0,
+            "suppressed_count": 0,
+        }
+        for status_val, count_val in rows:
+            c = count_val or 0
+            counts["total"] += c
+            status_key = f"{str(status_val).lower()}_count"
+            if status_key in counts:
+                counts[status_key] = c
+        return counts
+
+    @staticmethod
     def to_detail_schema(
         campaign: Campaign,
         recipient_count: Optional[int] = None,
+        status_counts: Optional[dict[str, int]] = None,
     ) -> CampaignDetailRead:
         """Convert a Campaign model instance into a CampaignDetailRead schema."""
         email_account = campaign.__dict__.get("email_account")
         recipients = campaign.__dict__.get("recipients")
         attachments = campaign.__dict__.get("attachments") or []
+
+        counts = status_counts or {}
         final_count = (
             recipient_count
             if recipient_count is not None
-            else (len(recipients) if recipients is not None else 0)
+            else counts.get("total", len(recipients) if recipients is not None else 0)
         )
+
         return CampaignDetailRead(
             id=campaign.id,
             company_id=campaign.company_id,
@@ -521,6 +555,11 @@ class CampaignService:
             email_account_name=email_account.name if email_account else None,
             email_account_address=email_account.email_address if email_account else None,
             recipient_count=final_count,
+            pending_count=counts.get("pending_count", 0),
+            sent_count=counts.get("sent_count", 0),
+            failed_count=counts.get("failed_count", 0),
+            bounced_count=counts.get("bounced_count", 0),
+            suppressed_count=counts.get("suppressed_count", 0),
             attachments=[CampaignAttachmentRead.model_validate(a) for a in attachments],
         )
 

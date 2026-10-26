@@ -208,6 +208,11 @@ class CampaignDetailRead(CampaignRead):
     """Extended response schema for single-campaign retrieval."""
     email_account_name: Optional[str] = None
     email_account_address: Optional[str] = None
+    pending_count: int = 0
+    sent_count: int = 0
+    failed_count: int = 0
+    bounced_count: int = 0
+    suppressed_count: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 

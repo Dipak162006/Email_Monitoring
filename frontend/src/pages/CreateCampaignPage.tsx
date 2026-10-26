@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useContext } from "react";
+import DOMPurify from "dompurify";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, AlertCircle, Info, ArrowLeft, RefreshCw } from "lucide-react";
@@ -536,7 +537,32 @@ export function CreateCampaignPage({
     showToast("Template applied.", "info");
   };
 
-  const handleSelectSignature = (_signature: EmailSignatureItem) => {
+  const handleSelectSignature = (signature: EmailSignatureItem) => {
+    const rawSigHtml =
+      signature.body_html ||
+      (signature.body_text ? `<p>${signature.body_text.replace(/\n/g, "<br/>")}</p>` : "");
+    const cleanSigHtml = rawSigHtml
+      ? DOMPurify.sanitize(rawSigHtml, { ADD_ATTR: ["target"] })
+      : "";
+    const cleanSigText = (
+      signature.body_text ||
+      cleanSigHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ")
+    ).trim();
+
+    const isAlreadyInHtml = Boolean(cleanSigHtml && bodyHtml.includes(cleanSigHtml));
+    const isAlreadyInText = Boolean(cleanSigText && bodyText && bodyText.includes(cleanSigText));
+
+    if (!isAlreadyInHtml && !isAlreadyInText && (cleanSigHtml || cleanSigText)) {
+      const updatedHtml = bodyHtml
+        ? `${bodyHtml}<br/><br/>${cleanSigHtml}`
+        : cleanSigHtml;
+      const updatedText = bodyText
+        ? `${bodyText}\n\n${cleanSigText}`
+        : cleanSigText;
+      setBodyHtml(updatedHtml);
+      setBodyText(updatedText);
+    }
+
     setIsDirty(true);
     showToast("Signature inserted.", "info");
   };

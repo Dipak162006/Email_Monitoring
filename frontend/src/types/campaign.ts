@@ -45,6 +45,11 @@ export interface CampaignAttachment {
 
 export interface CampaignDetail extends Campaign {
   recipient_count: number;
+  pending_count?: number;
+  sent_count?: number;
+  failed_count?: number;
+  bounced_count?: number;
+  suppressed_count?: number;
 }
 
 export interface CampaignCreatePayload {

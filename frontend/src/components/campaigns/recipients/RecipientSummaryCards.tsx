@@ -1,9 +1,9 @@
 import React from "react";
 import { Users, Clock, CheckCircle2, ShieldAlert } from "lucide-react";
-import type { Campaign, CampaignRecipient } from "../../../types/campaign";
+import type { Campaign, CampaignDetail, CampaignRecipient } from "../../../types/campaign";
 
 interface RecipientSummaryCardsProps {
-  campaign: Campaign | null;
+  campaign: (Campaign | CampaignDetail) | null;
   recipients: CampaignRecipient[];
   isLoading?: boolean;
 }
@@ -33,12 +33,21 @@ export const RecipientSummaryCards: React.FC<RecipientSummaryCardsProps> = ({
     );
   }
 
+  const detailCampaign = campaign as CampaignDetail | null;
+  const hasServerMetrics = detailCampaign && typeof detailCampaign.pending_count === "number";
+
   const totalCount = campaign?.recipient_count ?? recipients.length;
-  const pendingCount = recipients.filter((r) => r.status === "PENDING").length;
-  const sentCount = recipients.filter((r) => r.status === "SENT").length;
-  const excludedCount = recipients.filter(
-    (r) => r.status === "SUPPRESSED" || r.status === "BOUNCED" || r.status === "FAILED"
-  ).length;
+  const pendingCount = hasServerMetrics
+    ? (detailCampaign.pending_count ?? 0)
+    : recipients.filter((r) => r.status === "PENDING").length;
+  const sentCount = hasServerMetrics
+    ? (detailCampaign.sent_count ?? 0)
+    : recipients.filter((r) => r.status === "SENT").length;
+  const excludedCount = hasServerMetrics
+    ? ((detailCampaign.suppressed_count ?? 0) + (detailCampaign.bounced_count ?? 0) + (detailCampaign.failed_count ?? 0))
+    : recipients.filter(
+        (r) => r.status === "SUPPRESSED" || r.status === "BOUNCED" || r.status === "FAILED"
+      ).length;
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 w-full min-w-0">

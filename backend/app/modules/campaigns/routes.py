@@ -125,8 +125,8 @@ async def get_campaign(
         company_id=company_id,
         campaign_id=campaign_id,
     )
-    recipient_count = await CampaignService.get_recipient_count(db, campaign_id)
-    return CampaignService.to_detail_schema(campaign, recipient_count=recipient_count)
+    status_counts = await CampaignService.get_recipient_status_counts(db, campaign_id)
+    return CampaignService.to_detail_schema(campaign, status_counts=status_counts)
 
 
 @router.patch(
@@ -691,7 +691,7 @@ async def import_draft_into_campaign(
         campaign_id=campaign_id,
         draft_id=payload.draft_id,
     )
-    recipient_count = await CampaignService.get_recipient_count(db, campaign_id)
-    return CampaignService.to_detail_schema(campaign, recipient_count=recipient_count)
+    status_counts = await CampaignService.get_recipient_status_counts(db, campaign_id)
+    return CampaignService.to_detail_schema(campaign, status_counts=status_counts)
 
 
