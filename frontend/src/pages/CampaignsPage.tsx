@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, AlertCircle, Info } from "lucide-react";
+import { CheckCircle2, AlertCircle, Info, Mail, ShieldAlert } from "lucide-react";
 
 import { useWorkspace } from "../hooks/useWorkspace";
 import { usePermissions } from "../hooks/usePermissions";
@@ -21,6 +21,7 @@ import {
   type CampaignModalMode,
 } from "../components/campaigns/CancelCampaignModal";
 import { CampaignPagination } from "../components/campaigns/CampaignPagination";
+import { SuppressionListPanel } from "../components/campaigns/suppressions/SuppressionListPanel";
 
 export function CampaignsPage() {
   const navigate = useNavigate();
@@ -32,6 +33,9 @@ export function CampaignsPage() {
     (currentRole === "OWNER" ||
       currentRole === "ADMIN" ||
       Boolean(permissionsIsAdminOrOwner));
+
+  // Active page view tab: campaigns outreach vs company suppression list
+  const [activeTab, setActiveTab] = useState<"campaigns" | "suppressions">("campaigns");
 
   // Toolbar & filter state
   const [searchQuery, setSearchQuery] = useState("");
@@ -305,71 +309,122 @@ export function CampaignsPage() {
       {/* 1. Page Header */}
       <CampaignPageHeader
         totalCount={loadedCampaigns.length}
-        showViewOptions={showSummaryCards}
-        onToggleViewOptions={() => setShowSummaryCards((prev) => !prev)}
+        showViewOptions={activeTab === "campaigns" ? showSummaryCards : false}
+        onToggleViewOptions={
+          activeTab === "campaigns"
+            ? () => setShowSummaryCards((prev) => !prev)
+            : undefined
+        }
         onCreateCampaign={handleCreateCampaign}
       />
 
-      {/* 2. KPI / Summary Cards Area */}
-      {showSummaryCards && (
-        <CampaignSummaryCards campaigns={loadedCampaigns} isLoading={isLoading} />
-      )}
+      {/* 2. View Switcher Tabs */}
+      <div
+        role="tablist"
+        aria-label="Campaign sections"
+        className="flex items-center gap-1.5 p-1 bg-slate-100/90 rounded-xl w-fit border border-slate-200/70 shadow-2xs"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "campaigns"}
+          onClick={() => setActiveTab("campaigns")}
+          className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+            activeTab === "campaigns"
+              ? "bg-white text-slate-900 shadow-2xs"
+              : "text-slate-600 hover:text-slate-900"
+          }`}
+        >
+          <Mail className="h-3.5 w-3.5" />
+          <span>Campaigns</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "suppressions"}
+          onClick={() => setActiveTab("suppressions")}
+          className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+            activeTab === "suppressions"
+              ? "bg-white text-slate-900 shadow-2xs"
+              : "text-slate-600 hover:text-slate-900"
+          }`}
+        >
+          <ShieldAlert className="h-3.5 w-3.5" />
+          <span>Suppression List</span>
+        </button>
+      </div>
 
-      {/* 3. Toolbar (Search & Filters) */}
-      <CampaignToolbar
-        searchQuery={searchQuery}
-        onSearchChange={handleSearchChange}
-        statusFilter={statusFilter}
-        onStatusFilterChange={handleStatusFilterChange}
-        senderFilter={senderFilter}
-        onSenderFilterChange={handleSenderFilterChange}
-        emailAccounts={emailAccounts}
-        onClearFilters={handleClearFilters}
-        hasActiveFilters={hasActiveFilters}
-      />
-
-      {/* 4. Main Content Area */}
-      {isLoading ? (
-        <CampaignSkeleton />
-      ) : isError ? (
-        <CampaignErrorState
-          message={error?.message || "Unable to reach the campaign dispatch cluster."}
-          onRetry={() => refetch()}
-        />
-      ) : loadedCampaigns.length === 0 && !hasActiveFilters ? (
-        <CampaignEmptyState onCreateCampaign={handleCreateCampaign} />
-      ) : filteredCampaigns.length === 0 ? (
-        <CampaignSearchEmptyState onClearFilters={handleClearFilters} />
+      {/* 3. Tab Content */}
+      {activeTab === "suppressions" ? (
+        <SuppressionListPanel onShowToast={showToast} />
       ) : (
-        <div className="w-full min-w-0 flex flex-col rounded-xl border border-slate-200/80 bg-white shadow-2xs overflow-hidden">
-          <CampaignTable
-            campaigns={filteredCampaigns}
+        <>
+          {/* KPI / Summary Cards Area */}
+          {showSummaryCards && (
+            <CampaignSummaryCards campaigns={loadedCampaigns} isLoading={isLoading} />
+          )}
+
+          {/* Toolbar (Search & Filters) */}
+          <CampaignToolbar
+            searchQuery={searchQuery}
+            onSearchChange={handleSearchChange}
+            statusFilter={statusFilter}
+            onStatusFilterChange={handleStatusFilterChange}
+            senderFilter={senderFilter}
+            onSenderFilterChange={handleSenderFilterChange}
             emailAccounts={emailAccounts}
-            onViewCampaign={handleViewCampaign}
-            onEditCampaign={isAdminOrOwner ? handleEditCampaign : undefined}
-            onManageRecipients={handleManageRecipients}
-            onSendNowCampaign={isAdminOrOwner ? handleSendNowCampaign : undefined}
-            onPauseCampaign={
-              isAdminOrOwner ? (c) => pauseMutation.mutate(c) : undefined
-            }
-            onResumeCampaign={
-              isAdminOrOwner ? (c) => resumeMutation.mutate(c) : undefined
-            }
-            onCancelCampaign={isAdminOrOwner ? handleOpenCancelModal : undefined}
-            onDeleteCampaign={isAdminOrOwner ? handleOpenDeleteModal : undefined}
-            mutatingCampaignId={mutatingCampaignId}
+            onClearFilters={handleClearFilters}
+            hasActiveFilters={hasActiveFilters}
           />
 
-          {/* Pagination Footer */}
-          <CampaignPagination
-            currentPage={currentPage}
-            pageSize={pageSize}
-            itemCountOnPage={filteredCampaigns.length}
-            hasNextPage={loadedCampaigns.length === pageSize}
-            totalItems={currentPage === 1 && loadedCampaigns.length < pageSize ? loadedCampaigns.length : undefined}
-            onPageChange={(page) => setCurrentPage(page)}
-          />
-        </div>
+          {/* Main Content Area */}
+          {isLoading ? (
+            <CampaignSkeleton />
+          ) : isError ? (
+            <CampaignErrorState
+              message={error?.message || "Unable to reach the campaign dispatch cluster."}
+              onRetry={() => refetch()}
+            />
+          ) : loadedCampaigns.length === 0 && !hasActiveFilters ? (
+            <CampaignEmptyState onCreateCampaign={handleCreateCampaign} />
+          ) : filteredCampaigns.length === 0 ? (
+            <CampaignSearchEmptyState onClearFilters={handleClearFilters} />
+          ) : (
+            <div className="w-full min-w-0 flex flex-col rounded-xl border border-slate-200/80 bg-white shadow-2xs overflow-hidden">
+              <CampaignTable
+                campaigns={filteredCampaigns}
+                emailAccounts={emailAccounts}
+                onViewCampaign={handleViewCampaign}
+                onEditCampaign={isAdminOrOwner ? handleEditCampaign : undefined}
+                onManageRecipients={handleManageRecipients}
+                onSendNowCampaign={isAdminOrOwner ? handleSendNowCampaign : undefined}
+                onPauseCampaign={
+                  isAdminOrOwner ? (c) => pauseMutation.mutate(c) : undefined
+                }
+                onResumeCampaign={
+                  isAdminOrOwner ? (c) => resumeMutation.mutate(c) : undefined
+                }
+                onCancelCampaign={isAdminOrOwner ? handleOpenCancelModal : undefined}
+                onDeleteCampaign={isAdminOrOwner ? handleOpenDeleteModal : undefined}
+                mutatingCampaignId={mutatingCampaignId}
+              />
+
+              {/* Pagination Footer */}
+              <CampaignPagination
+                currentPage={currentPage}
+                pageSize={pageSize}
+                itemCountOnPage={filteredCampaigns.length}
+                hasNextPage={loadedCampaigns.length === pageSize}
+                totalItems={
+                  currentPage === 1 && loadedCampaigns.length < pageSize
+                    ? loadedCampaigns.length
+                    : undefined
+                }
+                onPageChange={(page) => setCurrentPage(page)}
+              />
+            </div>
+          )}
+        </>
       )}
 
       {/* 5. Cancel / Delete Confirmation Modal */}

@@ -171,3 +171,41 @@ export interface CampaignDispatchResponse {
   total_recipient_count: number;
 }
 
+export type SuppressionReason =
+  | "BOUNCE"
+  | "UNSUBSCRIBE"
+  | "MANUAL"
+  | "COMPLAINT";
+
+export interface SuppressionEntry {
+  id: number;
+  company_id: number;
+  email: string;
+  reason: SuppressionReason;
+  created_at: string;
+}
+
+export interface SuppressionCreatePayload {
+  email: string;
+  reason?: SuppressionReason;
+}
+
+export interface SuppressionBulkCreatePayload {
+  emails: string[];
+  reason?: SuppressionReason;
+}
+
+export interface SuppressionBulkCreateResponse {
+  total_submitted: number;
+  inserted_count: number;
+  skipped_count: number;
+  entries: SuppressionEntry[];
+  skipped_emails: string[];
+}
+
+export interface SuppressionListParams {
+  reason?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}

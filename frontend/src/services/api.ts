@@ -66,6 +66,18 @@ import type {
   CampaignPreflightResponse,
   CampaignDispatchResponse,
   CampaignAttachment,
+  SuppressionEntry,
+  SuppressionCreatePayload,
+  SuppressionBulkCreatePayload,
+  SuppressionBulkCreateResponse,
+} from "../types/campaign";
+export type {
+  SuppressionReason,
+  SuppressionEntry,
+  SuppressionCreatePayload,
+  SuppressionBulkCreatePayload,
+  SuppressionBulkCreateResponse,
+  SuppressionListParams,
 } from "../types/campaign";
 export type { ApiError } from "../types/api";
 
@@ -1032,6 +1044,87 @@ export const campaignsApi = {
     return apiClient.post<Campaign>(
       `/api/v1/companies/${companyId}/campaigns/${campaignId}/import-draft`,
       { draft_id: draftId }
+    );
+  },
+
+  // Suppression aliases on campaignsApi
+  listSuppressions: (
+    companyId: number,
+    params?: { reason?: string; search?: string; limit?: number; offset?: number }
+  ) => suppressionsApi.listSuppressions(companyId, params),
+
+  createSuppression: (
+    companyId: number,
+    payload: SuppressionCreatePayload
+  ) => suppressionsApi.createSuppression(companyId, payload),
+
+  bulkCreateSuppressions: (
+    companyId: number,
+    payload: SuppressionBulkCreatePayload
+  ) => suppressionsApi.bulkCreateSuppressions(companyId, payload),
+
+  deleteSuppression: (
+    companyId: number,
+    suppressionId: number
+  ) => suppressionsApi.deleteSuppression(companyId, suppressionId),
+
+  getSuppression: (
+    companyId: number,
+    suppressionId: number
+  ) => suppressionsApi.getSuppression(companyId, suppressionId),
+};
+
+export const suppressionsApi = {
+  listSuppressions: async (
+    companyId: number,
+    params?: { reason?: string; search?: string; limit?: number; offset?: number }
+  ): Promise<SuppressionEntry[]> => {
+    const query = new URLSearchParams();
+    if (params?.reason && params.reason !== "ALL") query.append("reason", params.reason);
+    if (params?.search) query.append("search", params.search);
+    if (params?.limit !== undefined) query.append("limit", String(params.limit));
+    if (params?.offset !== undefined) query.append("offset", String(params.offset));
+    const qs = query.toString();
+    return apiClient.get<SuppressionEntry[]>(
+      `/api/v1/companies/${companyId}/suppressions${qs ? `?${qs}` : ""}`
+    );
+  },
+
+  getSuppression: async (
+    companyId: number,
+    suppressionId: number
+  ): Promise<SuppressionEntry> => {
+    return apiClient.get<SuppressionEntry>(
+      `/api/v1/companies/${companyId}/suppressions/${suppressionId}`
+    );
+  },
+
+  createSuppression: async (
+    companyId: number,
+    payload: SuppressionCreatePayload
+  ): Promise<SuppressionEntry> => {
+    return apiClient.post<SuppressionEntry>(
+      `/api/v1/companies/${companyId}/suppressions`,
+      payload
+    );
+  },
+
+  bulkCreateSuppressions: async (
+    companyId: number,
+    payload: SuppressionBulkCreatePayload
+  ): Promise<SuppressionBulkCreateResponse> => {
+    return apiClient.post<SuppressionBulkCreateResponse>(
+      `/api/v1/companies/${companyId}/suppressions/bulk`,
+      payload
+    );
+  },
+
+  deleteSuppression: async (
+    companyId: number,
+    suppressionId: number
+  ): Promise<void> => {
+    return apiClient.delete<void>(
+      `/api/v1/companies/${companyId}/suppressions/${suppressionId}`
     );
   },
 };
