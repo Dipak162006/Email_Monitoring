@@ -182,6 +182,33 @@ describe("Campaign Recipient Management (C12.3)", () => {
       // BOUNCED count = 1
       expect(screen.getByTestId("metric-excluded").textContent).toBe("1");
     });
+
+    it("prefers authoritative campaign-wide server metrics over current page array", () => {
+      const serverDetailedCampaign = {
+        ...mockDraftCampaign,
+        recipient_count: 500,
+        pending_count: 350,
+        sent_count: 120,
+        bounced_count: 15,
+        suppressed_count: 10,
+        failed_count: 5,
+      };
+
+      // Passed recipients array has only 2 items from the current pagination page
+      render(
+        <RecipientSummaryCards
+          campaign={serverDetailedCampaign}
+          recipients={mockRecipients.slice(0, 2)}
+          isLoading={false}
+        />
+      );
+
+      expect(screen.getByTestId("metric-total").textContent).toBe("500");
+      expect(screen.getByTestId("metric-pending").textContent).toBe("350");
+      expect(screen.getByTestId("metric-sent").textContent).toBe("120");
+      // Excluded = bounced (15) + suppressed (10) + failed (5) = 30
+      expect(screen.getByTestId("metric-excluded").textContent).toBe("30");
+    });
   });
 
   describe("RecipientManualForm Component", () => {

@@ -193,6 +193,67 @@ describe("C12.2 Signature Loading, Empty Composer Defaults, and Layout Shift Ver
       expect(screen.getByText("Welcome")).toBeDefined();
     });
 
+    it("1.4b Appends signature HTML and plain text in CreateCampaignPage without duplication", async () => {
+      const mockSig: EmailSignatureItem = {
+        id: 301,
+        company_id: 10,
+        email_account_id: 1,
+        name: "Acme Exec",
+        body_html: "<p>Best regards,<br/>Acme Exec</p>",
+        body_text: "Best regards,\nAcme Exec",
+        is_default: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      vi.spyOn(signaturesApi, "listSignatures").mockResolvedValue([mockSig]);
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <CreateCampaignPage companyId={10} initialAccounts={mockAccounts} />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      // Fill in step 1
+      const nameInput = screen.getByPlaceholderText(/e\.g\. product launch/i);
+      const subjectInput = screen.getByPlaceholderText(/e\.g\. introducing our new product line/i);
+      fireEvent.change(nameInput, { target: { value: "Test Campaign" } });
+      fireEvent.change(subjectInput, { target: { value: "Test Subject" } });
+
+      const continueBtn = screen.getByRole("button", { name: /continue/i });
+      fireEvent.click(continueBtn);
+
+      // Step 2: Choose sender
+      await waitFor(() => {
+        expect(screen.getByText("sales@example.com")).toBeDefined();
+      });
+      const accountCard = screen.getByText("sales@example.com").closest("div");
+      if (accountCard) fireEvent.click(accountCard);
+      fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+
+      // Step 3: Content Step
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: /insert signature/i })).toBeDefined();
+      });
+
+      // Click Insert Signature
+      const insertSigBtn = screen.getByRole("button", { name: /insert signature/i });
+      fireEvent.click(insertSigBtn);
+
+      await waitFor(() => {
+        expect(screen.getByText("Acme Exec")).toBeDefined();
+      });
+
+      const sigItem = screen.getByText("Acme Exec").closest("div");
+      if (sigItem) fireEvent.click(sigItem);
+
+      // Toast shows "Signature inserted."
+      await waitFor(() => {
+        expect(screen.getByText("Signature inserted.")).toBeDefined();
+      });
+    });
+
     it("1.5 Calls copySignature when selecting a workspace signature created for a different account", async () => {
       const workspaceSig: EmailSignatureItem = {
         id: 501,

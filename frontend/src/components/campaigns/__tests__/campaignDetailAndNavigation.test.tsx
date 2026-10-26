@@ -210,6 +210,36 @@ describe("Campaign Detail & Navigation (C12.3 Integration)", () => {
       fireEvent.click(desktopBtn);
     });
 
+    it("renders live delivery breakdown telemetry metrics and visual progress bar", async () => {
+      const telemetryCampaign: CampaignDetail = {
+        ...mockDraftCampaign,
+        recipient_count: 100,
+        pending_count: 40,
+        sent_count: 50,
+        bounced_count: 5,
+        suppressed_count: 3,
+        failed_count: 2,
+      };
+
+      vi.spyOn(campaignsApi, "getCampaign").mockResolvedValue(telemetryCampaign);
+
+      renderDetailPage(42);
+
+      await waitFor(() => {
+        expect(screen.getByText("Delivery Breakdown & Telemetry")).toBeDefined();
+      });
+
+      expect(screen.getByTestId("telemetry-pending").textContent).toBe("40");
+      expect(screen.getByTestId("telemetry-sent").textContent).toBe("50");
+      expect(screen.getByTestId("telemetry-bounced").textContent).toBe("5");
+      expect(screen.getByTestId("telemetry-suppressed").textContent).toBe("3");
+      expect(screen.getByTestId("telemetry-failed").textContent).toBe("2");
+
+      const progressBar = screen.getByTestId("delivery-progress-bar");
+      expect(progressBar).toBeDefined();
+      expect(progressBar.getAttribute("aria-valuenow")).toBe("60");
+    });
+
     it("displays not-found state when campaign does not exist (404)", async () => {
       vi.spyOn(campaignsApi, "getCampaign").mockRejectedValue(
         new RequestError(404, "Campaign not found", "NOT_FOUND")

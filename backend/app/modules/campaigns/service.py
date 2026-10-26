@@ -512,7 +512,8 @@ class CampaignService:
         for status_val, count_val in rows:
             c = count_val or 0
             counts["total"] += c
-            status_key = f"{str(status_val).lower()}_count"
+            val_str = status_val.value if hasattr(status_val, "value") else str(status_val)
+            status_key = f"{val_str.lower()}_count"
             if status_key in counts:
                 counts[status_key] = c
         return counts

@@ -378,7 +378,7 @@ describe("C12.2 Create Campaign Wizard Components", () => {
       ).toBeDefined();
     });
 
-    it("strictly provides ONLY {{first_name}} merge tag in personalize dropdown", () => {
+    it("provides all standard categorized merge tags in personalize dropdown", () => {
       render(
         <CampaignContentStep
           subject="Test Subject"
@@ -393,11 +393,22 @@ describe("C12.2 Create Campaign Wizard Components", () => {
       });
       fireEvent.click(personalizeBtn);
 
-      expect(screen.getByText("{{first_name}}")).toBeDefined();
-      expect(screen.getByText("Recipient first name")).toBeDefined();
+      // Verify category headers
+      expect(screen.getByText("Recipient")).toBeDefined();
+      expect(screen.getByText("Sender & Workspace")).toBeDefined();
+      expect(screen.getByText("Compliance")).toBeDefined();
 
-      // Explicit invariant: no invented merge tags allowed
-      expect(screen.queryByText("{{last_name}}")).toBeNull();
+      // Verify all 8 standard merge tags
+      expect(screen.getByText("{{first_name}}")).toBeDefined();
+      expect(screen.getByText("{{last_name}}")).toBeDefined();
+      expect(screen.getByText("{{customer_name}}")).toBeDefined();
+      expect(screen.getByText("{{customer_email}}")).toBeDefined();
+      expect(screen.getByText("{{company_name}}")).toBeDefined();
+      expect(screen.getByText("{{sender_name}}")).toBeDefined();
+      expect(screen.getByText("{{sender_email}}")).toBeDefined();
+      expect(screen.getByText("{{unsubscribe_url}}")).toBeDefined();
+
+      // Explicit invariant: no invented non-standard merge tags allowed
       expect(screen.queryByText("{{company}}")).toBeNull();
       expect(screen.queryByText("{{email}}")).toBeNull();
       expect(screen.queryByText("{{phone}}")).toBeNull();

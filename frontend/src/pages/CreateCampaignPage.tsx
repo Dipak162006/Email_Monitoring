@@ -549,19 +549,19 @@ export function CreateCampaignPage({
       cleanSigHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ")
     ).trim();
 
-    const isAlreadyInHtml = Boolean(cleanSigHtml && bodyHtml.includes(cleanSigHtml));
-    const isAlreadyInText = Boolean(cleanSigText && bodyText && bodyText.includes(cleanSigText));
+    setBodyHtml((prevHtml) => {
+      if (cleanSigHtml && prevHtml.includes(cleanSigHtml)) {
+        return prevHtml;
+      }
+      return prevHtml ? `${prevHtml}<br/><br/>${cleanSigHtml}` : cleanSigHtml;
+    });
 
-    if (!isAlreadyInHtml && !isAlreadyInText && (cleanSigHtml || cleanSigText)) {
-      const updatedHtml = bodyHtml
-        ? `${bodyHtml}<br/><br/>${cleanSigHtml}`
-        : cleanSigHtml;
-      const updatedText = bodyText
-        ? `${bodyText}\n\n${cleanSigText}`
-        : cleanSigText;
-      setBodyHtml(updatedHtml);
-      setBodyText(updatedText);
-    }
+    setBodyText((prevText) => {
+      if (cleanSigText && prevText && prevText.includes(cleanSigText)) {
+        return prevText;
+      }
+      return prevText ? `${prevText}\n\n${cleanSigText}` : cleanSigText;
+    });
 
     setIsDirty(true);
     showToast("Signature inserted.", "info");

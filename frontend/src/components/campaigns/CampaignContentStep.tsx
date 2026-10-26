@@ -187,6 +187,12 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
   };
 
   const handleSelectTemplate = (template: EmailTemplateItem) => {
+    if (template.body_html) {
+      richEditorRef.current?.setHtml(template.body_html);
+    } else if (template.body_text) {
+      const html = `<p>${template.body_text.replace(/\n/g, "<br/>")}</p>`;
+      richEditorRef.current?.setHtml(html);
+    }
     if (onSelectTemplate) {
       onSelectTemplate(template);
     } else {
@@ -201,11 +207,9 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
           template.body_text ||
           cleanHtmlForText.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
         onBodyHtmlChange(template.body_html, textFallback);
-        richEditorRef.current?.setHtml(template.body_html);
       } else if (template.body_text) {
         const html = `<p>${template.body_text.replace(/\n/g, "<br/>")}</p>`;
         onBodyHtmlChange(html, template.body_text);
-        richEditorRef.current?.setHtml(html);
       }
     }
     setIsTemplateModalOpen(false);
@@ -227,14 +231,11 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
     const isAlreadyInHtml = Boolean(cleanSigHtml && bodyHtml.includes(cleanSigHtml));
     const isAlreadyInText = Boolean(cleanSigText && bodyText && bodyText.includes(cleanSigText));
 
-    if (!isAlreadyInHtml && !isAlreadyInText) {
-      if (richEditorRef.current) {
-        richEditorRef.current.insertBlockHtml(cleanSigHtml);
-      } else {
-        const updatedHtml = bodyHtml ? `${bodyHtml}<br/><br/>${cleanSigHtml}` : cleanSigHtml;
-        const updatedText = bodyText ? `${bodyText}\n\n${cleanSigText}` : cleanSigText;
-        onBodyHtmlChange(updatedHtml, updatedText);
-      }
+    if (!isAlreadyInHtml && !isAlreadyInText && (cleanSigHtml || cleanSigText)) {
+      const updatedHtml = bodyHtml ? `${bodyHtml}<br/><br/>${cleanSigHtml}` : cleanSigHtml;
+      const updatedText = bodyText ? `${bodyText}\n\n${cleanSigText}` : cleanSigText;
+      onBodyHtmlChange(updatedHtml, updatedText);
+      richEditorRef.current?.setHtml(updatedHtml);
     }
 
     if (onSelectSignature) {
@@ -346,31 +347,47 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
               {isPersonalizeOpen && (
                 <div
                   id="personalize-menu"
-                  className="absolute right-0 mt-2 w-72 rounded-xl bg-white border border-slate-200 p-2 shadow-xl z-30 animate-in fade-in zoom-in-95 duration-100"
+                  className="absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto rounded-xl bg-white border border-slate-200 p-2.5 shadow-xl z-30 animate-in fade-in zoom-in-95 duration-100 space-y-2.5"
                 >
-                  <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                    Merge Tags
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => handleInsertMergeTag("{{first_name}}")}
-                    className="w-full text-left p-2 rounded-lg hover:bg-indigo-50/50 transition-colors flex items-center justify-between group focus:outline-none focus:bg-indigo-50/50 cursor-pointer"
-                  >
-                    <div>
-                      <p className="text-xs font-bold text-indigo-600 font-mono">
-                        {"{{first_name}}"}
-                      </p>
-                      <p className="text-[11px] text-slate-500">
-                        Recipient first name
-                      </p>
-                    </div>
-                    <span className="text-xs text-indigo-500 font-semibold opacity-0 group-hover:opacity-100 transition-opacity">
-                      Insert
-                    </span>
-                  </button>
+                  {(["Recipient", "Sender & Workspace", "Compliance"] as const).map((category) => {
+                    const tagsInCategory = CAMPAIGN_MERGE_TAGS.filter((t) => t.category === category);
+                    if (tagsInCategory.length === 0) return null;
+                    return (
+                      <div key={category} className="space-y-1">
+                        <p className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                          {category}
+                        </p>
+                        {tagsInCategory.map((item) => (
+                          <button
+                            key={item.tag}
+                            type="button"
+                            onClick={() => handleInsertMergeTag(item.tag)}
+                            className="w-full text-left p-2 rounded-lg hover:bg-indigo-50/60 transition-colors flex items-center justify-between group focus:outline-none focus:bg-indigo-50/60 cursor-pointer"
+                          >
+                            <div className="min-w-0 pr-2">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-xs font-bold text-indigo-600 font-mono">
+                                  {item.tag}
+                                </span>
+                                <span className="text-[11px] font-medium text-slate-700">
+                                  — {item.label}
+                                </span>
+                              </div>
+                              <p className="text-[10px] text-slate-400 truncate mt-0.5">
+                                {item.description}
+                              </p>
+                            </div>
+                            <span className="text-[11px] text-indigo-600 font-semibold opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                              Insert
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })}
                   <div className="px-2 py-1.5 mt-1 bg-slate-50 rounded-lg border border-slate-100">
-                    <p className="text-[11px] text-slate-500">
-                      Inserts recipient first name into current email body at cursor position.
+                    <p className="text-[10px] text-slate-500">
+                      Inserts personalized merge tag at the cursor position.
                     </p>
                   </div>
                 </div>

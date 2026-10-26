@@ -1036,6 +1036,67 @@ export const CampaignDetailPage: React.FC = () => {
             </div>
           </div>
         </div>
+
+        {/* Visual Progress Bar */}
+        {(() => {
+          const totalTarget = campaign.recipient_count || 0;
+          const sentCount = campaign.sent_count ?? 0;
+          const bouncedCount = campaign.bounced_count ?? 0;
+          const suppressedCount = campaign.suppressed_count ?? 0;
+          const failedCount = campaign.failed_count ?? 0;
+
+          const processedCount = sentCount + bouncedCount + suppressedCount + failedCount;
+          const completionPercent = totalTarget > 0 ? Math.min(100, Math.round((processedCount / totalTarget) * 100)) : 0;
+          const sentPercent = totalTarget > 0 ? (sentCount / totalTarget) * 100 : 0;
+          const bouncedPercent = totalTarget > 0 ? (bouncedCount / totalTarget) * 100 : 0;
+          const suppressedPercent = totalTarget > 0 ? (suppressedCount / totalTarget) * 100 : 0;
+          const failedPercent = totalTarget > 0 ? (failedCount / totalTarget) * 100 : 0;
+
+          return (
+            <div className="pt-2 space-y-2 border-t border-slate-100">
+              <div className="flex items-center justify-between text-xs text-slate-600">
+                <span className="font-semibold text-slate-700 flex items-center gap-1.5">
+                  <span>Dispatch Progress</span>
+                  <span className="text-[11px] font-normal text-slate-400">
+                    ({processedCount.toLocaleString()} of {totalTarget.toLocaleString()} processed)
+                  </span>
+                </span>
+                <span className="font-semibold text-indigo-600">
+                  {completionPercent}%
+                </span>
+              </div>
+              <div
+                className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden flex"
+                data-testid="delivery-progress-bar"
+                role="progressbar"
+                aria-valuenow={completionPercent}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              >
+                <div
+                  className="bg-emerald-500 h-full transition-all duration-500"
+                  style={{ width: `${sentPercent}%` }}
+                  title={`Sent: ${sentCount}`}
+                />
+                <div
+                  className="bg-rose-500 h-full transition-all duration-500"
+                  style={{ width: `${bouncedPercent}%` }}
+                  title={`Bounced: ${bouncedCount}`}
+                />
+                <div
+                  className="bg-slate-400 h-full transition-all duration-500"
+                  style={{ width: `${suppressedPercent}%` }}
+                  title={`Suppressed: ${suppressedCount}`}
+                />
+                <div
+                  className="bg-amber-600 h-full transition-all duration-500"
+                  style={{ width: `${failedPercent}%` }}
+                  title={`Failed: ${failedCount}`}
+                />
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {/* 5. Campaign Message Preview Section */}
