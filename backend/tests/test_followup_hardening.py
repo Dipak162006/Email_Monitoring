@@ -18,7 +18,9 @@ from app.modules.auth.models import User
 from app.modules.companies.models import Company
 from app.modules.domains.models import Domain, DomainVerificationStatus
 from app.modules.email_accounts.models import EmailAccount
-from app.modules.emails.models import Email, EmailDirection, EmailStatus
+from app.modules.emails.models import Email, EmailDirection, EmailStatus, EmailThread
+from app.modules.emails.monitoring_service import EmailMonitoringService
+from app.services.imap.parser import ParsedEmail
 from app.modules.campaigns.models import (
     Campaign,
     CampaignDelivery,
@@ -34,7 +36,17 @@ from app.modules.campaigns.models import (
 from app.modules.campaigns.delivery_service import CampaignDeliveryService
 from app.modules.campaigns.scheduling_service import CampaignSchedulingService
 from app.modules.campaigns.service import CampaignService
+from app.workers import tasks
 from tests.conftest import TestAsyncSessionLocal
+
+
+@pytest.fixture(autouse=True)
+def configure_worker_db():
+    """Ensure delivery engine worker tasks use the test database."""
+    orig_session_maker = tasks.WorkerAsyncSessionLocal
+    tasks.WorkerAsyncSessionLocal = TestAsyncSessionLocal
+    yield
+    tasks.WorkerAsyncSessionLocal = orig_session_maker
 
 
 async def register_and_login(async_client: AsyncClient, email: str, full_name: str = "Test Owner") -> str:
@@ -410,3 +422,493 @@ async def test_delivery_unique_constraint_on_campaign_recipient_and_step(
         await db_session.commit()
 
     await db_session.rollback()
+
+
+# =============================================================================
+# Milestone C13 — Multi-Step Follow-Up Sequence & Reply Auto-Stop Tests
+# =============================================================================
+
+@pytest.mark.anyio
+async def test_followup_steps_create_and_update_sync(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Verify that creating and updating a DRAFT campaign with followup_steps persists
+    and sequentially normalizes CampaignStep rows (step_number >= 2), defaulting empty
+    subjects to 'Re: <Campaign Subject>'.
+    """
+    token = await register_and_login(async_client, "owner_multistep_crud@test.com")
+    comp_id = await create_company_helper(async_client, token, "MultiStep Org")
+
+    domain = Domain(
+        company_id=comp_id,
+        domain_name="multistep.com",
+        verification_status=DomainVerificationStatus.VERIFIED.value,
+    )
+    db_session.add(domain)
+    await db_session.flush()
+
+    account = EmailAccount(
+        company_id=comp_id,
+        domain_id=domain.id,
+        name="Outreach Sender",
+        email_address="outreach@multistep.com",
+        provider="CUSTOM",
+        smtp_host="smtp.multistep.com",
+        smtp_port=587,
+        smtp_security="STARTTLS",
+        smtp_username="outreach@multistep.com",
+        smtp_password_encrypted="enc_password",
+        is_active=True,
+    )
+    db_session.add(account)
+    await db_session.commit()
+    await db_session.refresh(account)
+
+    # 1. Create DRAFT campaign with 1 follow-up step (step_number=2, delay_hours=48, empty subject)
+    create_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Multi-Step Outreach",
+            "email_account_id": account.id,
+            "subject": "Initial Proposition {{first_name}}",
+            "body_text": "Hey {{first_name}}, check this out.",
+            "body_html": "<p>Hey {{first_name}}, check this out.</p>",
+            "followup_steps": [
+                {
+                    "step_number": 2,
+                    "delay_hours": 48,
+                    "subject": "",
+                    "body_text": "Following up on my last email {{first_name}}.",
+                    "body_html": "<p>Following up on my last email {{first_name}}.</p>",
+                }
+            ],
+        },
+    )
+    assert create_resp.status_code == 201
+    camp_id = create_resp.json()["id"]
+
+    # Verify Step 1 and Step 2 in database
+    steps_stmt = select(CampaignStep).where(CampaignStep.campaign_id == camp_id).order_by(CampaignStep.step_number.asc())
+    steps = (await db_session.execute(steps_stmt)).scalars().all()
+    assert len(steps) == 2
+    assert steps[0].step_number == 1
+    assert steps[0].delay_hours == 0
+    assert steps[0].subject == "Initial Proposition {{first_name}}"
+
+    assert steps[1].step_number == 2
+    assert steps[1].delay_hours == 48
+    # Empty subject defaulted to Re: <Campaign Subject>
+    assert steps[1].subject == "Re: Initial Proposition {{first_name}}"
+    assert steps[1].body_text == "Following up on my last email {{first_name}}."
+
+    # 2. Update DRAFT campaign: update Step 2 delay to 72 hours, add Step 3
+    update_resp = await async_client.patch(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "followup_steps": [
+                {
+                    "step_number": 2,
+                    "delay_hours": 72,
+                    "subject": "Quick Bump {{first_name}}",
+                    "body_text": "Updated step 2 body",
+                },
+                {
+                    "step_number": 3,
+                    "delay_hours": 120,
+                    "subject": "",
+                    "body_text": "Final follow-up attempt",
+                },
+            ],
+        },
+    )
+    assert update_resp.status_code == 200
+
+    # Verify steps updated
+    steps = (await db_session.execute(steps_stmt)).scalars().all()
+    assert len(steps) == 3
+    assert steps[1].step_number == 2
+    assert steps[1].delay_hours == 72
+    assert steps[1].subject == "Quick Bump {{first_name}}"
+
+    assert steps[2].step_number == 3
+    assert steps[2].delay_hours == 120
+    assert steps[2].subject == "Re: Initial Proposition {{first_name}}"
+
+
+@pytest.mark.anyio
+async def test_followup_scheduling_and_threaded_dispatch(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Verify:
+    1. Executing Step 1 sets recipient.current_step_number = 1 and recipient.next_step_due_at = sent_at + 48h.
+    2. process_due_followup_steps before 48h dispatches nothing.
+    3. process_due_followup_steps after 48h dispatches Step 2 in the same thread_id with In-Reply-To matching Step 1,
+       creates a second CampaignDelivery (step_id == step_2.id), and advances current_step_number to 2.
+    """
+    token = await register_and_login(async_client, "owner_multistep_sched@test.com")
+    comp_id = await create_company_helper(async_client, token, "Sched Org")
+
+    domain = Domain(
+        company_id=comp_id,
+        domain_name="sched-test.com",
+        verification_status=DomainVerificationStatus.VERIFIED.value,
+    )
+    db_session.add(domain)
+    await db_session.flush()
+
+    account = EmailAccount(
+        company_id=comp_id,
+        domain_id=domain.id,
+        name="Sched Sender",
+        email_address="sender@sched-test.com",
+        provider="CUSTOM",
+        smtp_host="smtp.sched-test.com",
+        smtp_port=587,
+        smtp_security="STARTTLS",
+        smtp_username="sender@sched-test.com",
+        smtp_password_encrypted="enc_password",
+        is_active=True,
+    )
+    db_session.add(account)
+    await db_session.commit()
+    await db_session.refresh(account)
+
+    create_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Threaded Followup Campaign",
+            "email_account_id": account.id,
+            "subject": "Initial Intro",
+            "body_text": "Hello there!",
+            "followup_steps": [
+                {
+                    "step_number": 2,
+                    "delay_hours": 48,
+                    "subject": "Re: Initial Intro",
+                    "body_text": "Did you get my note?",
+                }
+            ],
+        },
+    )
+    assert create_resp.status_code == 201
+    camp_id = create_resp.json()["id"]
+
+    recip_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "alice@customer.com", "first_name": "Alice"},
+    )
+    assert recip_resp.status_code == 201
+    recip_id = recip_resp.json()["id"]
+
+    # Queue campaign for execution
+    camp_res = await db_session.execute(select(Campaign).where(Campaign.id == camp_id))
+    camp = camp_res.scalar_one()
+    camp.status = CampaignStatus.QUEUED.value
+    await db_session.commit()
+
+    # Execute Step 1
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync"):
+        result = await CampaignDeliveryService.execute_campaign(
+            campaign_id=camp_id,
+            company_id=comp_id,
+            db_factory=TestAsyncSessionLocal,
+        )
+    assert result["sent_count"] == 1
+
+    # Verify recipient after Step 1 execution
+    recip_res = await db_session.execute(select(CampaignRecipient).where(CampaignRecipient.id == recip_id))
+    recip = recip_res.scalar_one()
+    assert recip.status == CampaignRecipientStatus.SENT.value
+    assert recip.current_step_number == 1
+    assert recip.next_step_due_at is not None
+
+    # Verify Step 1 delivery
+    deliv_stmt = select(CampaignDelivery).where(
+        CampaignDelivery.campaign_id == camp_id,
+        CampaignDelivery.recipient_id == recip_id,
+    )
+    delivs = (await db_session.execute(deliv_stmt)).scalars().all()
+    assert len(delivs) == 1
+    step1_deliv = delivs[0]
+    assert step1_deliv.status == CampaignDeliveryStatus.SENT.value
+    assert step1_deliv.message_id is not None
+    assert step1_deliv.thread_id is not None
+    assert recip.next_step_due_at == step1_deliv.sent_at + timedelta(hours=48)
+
+    # Calling process_due_followup_steps BEFORE 48 hours (e.g. at 24 hours) dispatches nothing
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync"):
+        early_res = await CampaignDeliveryService.process_due_followup_steps(
+            db_factory=TestAsyncSessionLocal,
+            now_utc=step1_deliv.sent_at + timedelta(hours=24),
+        )
+    assert len(early_res) == 0
+
+    # Calling process_due_followup_steps AFTER 48 hours (e.g. at 49 hours) dispatches Step 2!
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync"):
+        due_res = await CampaignDeliveryService.process_due_followup_steps(
+            db_factory=TestAsyncSessionLocal,
+            now_utc=step1_deliv.sent_at + timedelta(hours=49),
+        )
+    assert len(due_res) == 1
+    assert due_res[0]["status"] == "SENT"
+    assert due_res[0]["step_number"] == 2
+
+    # Refresh and verify recipient state and deliveries
+    await db_session.refresh(recip)
+    assert recip.current_step_number == 2
+    assert recip.next_step_due_at is None  # No Step 3 configured!
+
+    delivs = (await db_session.execute(deliv_stmt.order_by(CampaignDelivery.id.asc()))).scalars().all()
+    assert len(delivs) == 2
+    step2_deliv = delivs[1]
+    assert step2_deliv.status == CampaignDeliveryStatus.SENT.value
+    assert step2_deliv.thread_id == step1_deliv.thread_id  # Threaded in same conversation!
+    assert step2_deliv.step_id is not None
+    assert step2_deliv.step_id != step1_deliv.step_id
+
+
+@pytest.mark.anyio
+async def test_followup_auto_stop_on_genuine_reply(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Verify that when a genuine reply arrives via match_and_process_campaign_reply:
+    1. stopped_reason becomes REPLIED, replied_at is populated, and next_step_due_at is cancelled.
+    2. Subsequent process_due_followup_steps execution skips this recipient and dispatches NO follow-up.
+    """
+    token = await register_and_login(async_client, "owner_multistep_reply@test.com")
+    comp_id = await create_company_helper(async_client, token, "Reply Org")
+
+    domain = Domain(
+        company_id=comp_id,
+        domain_name="reply-test.com",
+        verification_status=DomainVerificationStatus.VERIFIED.value,
+    )
+    db_session.add(domain)
+    await db_session.flush()
+
+    account = EmailAccount(
+        company_id=comp_id,
+        domain_id=domain.id,
+        name="Reply Sender",
+        email_address="sender@reply-test.com",
+        provider="CUSTOM",
+        smtp_host="smtp.reply-test.com",
+        smtp_port=587,
+        smtp_security="STARTTLS",
+        smtp_username="sender@reply-test.com",
+        smtp_password_encrypted="enc_password",
+        is_active=True,
+    )
+    db_session.add(account)
+    await db_session.commit()
+    await db_session.refresh(account)
+
+    create_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Reply Auto-Stop Campaign",
+            "email_account_id": account.id,
+            "subject": "Initial Note",
+            "body_text": "Hey Bob!",
+            "followup_steps": [
+                {
+                    "step_number": 2,
+                    "delay_hours": 48,
+                    "body_text": "Follow-up note",
+                }
+            ],
+        },
+    )
+    assert create_resp.status_code == 201
+    camp_id = create_resp.json()["id"]
+
+    recip_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "bob@client.com", "first_name": "Bob"},
+    )
+    assert recip_resp.status_code == 201
+    recip_id = recip_resp.json()["id"]
+
+    camp_res = await db_session.execute(select(Campaign).where(Campaign.id == camp_id))
+    camp = camp_res.scalar_one()
+    camp.status = CampaignStatus.QUEUED.value
+    await db_session.commit()
+
+    # Execute Step 1
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync"):
+        await CampaignDeliveryService.execute_campaign(
+            campaign_id=camp_id,
+            company_id=comp_id,
+            db_factory=TestAsyncSessionLocal,
+        )
+
+    # Get Step 1 delivery
+    deliv_stmt = select(CampaignDelivery).where(CampaignDelivery.recipient_id == recip_id)
+    step1_deliv = (await db_session.execute(deliv_stmt)).scalar_one()
+
+    # Recipient has next_step_due_at active
+    recip_res = await db_session.execute(select(CampaignRecipient).where(CampaignRecipient.id == recip_id))
+    recip = recip_res.scalar_one()
+    assert recip.next_step_due_at is not None
+    assert recip.stopped_reason is None
+
+    # Simulate genuine incoming reply matching step1_deliv.message_id
+    parsed_reply = ParsedEmail(
+        message_id="incoming_reply_msg@client.com",
+        sender="bob@client.com",
+        recipients=[account.email_address],
+        subject="Re: Initial Note",
+        date=datetime.now(timezone.utc),
+        in_reply_to=step1_deliv.message_id,
+        references_header=step1_deliv.message_id,
+        body_text="Hi, thanks for reaching out! Let's talk.",
+        body_html=None,
+        cc=None,
+        bcc=None,
+        reply_to=None,
+    )
+
+    matched = await EmailMonitoringService.match_and_process_campaign_reply(
+        db=db_session,
+        account=account,
+        parsed=parsed_reply,
+        thread_id=step1_deliv.thread_id,
+        is_reply_to_outgoing=True,
+    )
+    assert matched == 1
+    await db_session.commit()
+
+    # Verify recipient state was halted
+    await db_session.refresh(recip)
+    assert recip.stopped_reason == CampaignRecipientStopReason.REPLIED.value
+    assert recip.replied_at is not None
+    assert recip.next_step_due_at is None
+
+    # Running process_due_followup_steps 50 hours later must NOT dispatch Step 2
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync"):
+        due_res = await CampaignDeliveryService.process_due_followup_steps(
+            db_factory=TestAsyncSessionLocal,
+            now_utc=step1_deliv.sent_at + timedelta(hours=50),
+        )
+    assert len(due_res) == 0
+
+    # Verify no second delivery was created
+    delivs = (await db_session.execute(deliv_stmt)).scalars().all()
+    assert len(delivs) == 1
+    assert recip.current_step_number == 1
+
+
+@pytest.mark.anyio
+async def test_followup_skip_on_unsubscribe_or_bounce(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Verify that when a recipient unsubscribes or bounces, next_step_due_at is cleared
+    and process_due_followup_steps skips follow-up execution.
+    """
+    token = await register_and_login(async_client, "owner_multistep_unsub@test.com")
+    comp_id = await create_company_helper(async_client, token, "Unsub Org")
+
+    domain = Domain(
+        company_id=comp_id,
+        domain_name="unsub-test.com",
+        verification_status=DomainVerificationStatus.VERIFIED.value,
+    )
+    db_session.add(domain)
+    await db_session.flush()
+
+    account = EmailAccount(
+        company_id=comp_id,
+        domain_id=domain.id,
+        name="Unsub Sender",
+        email_address="sender@unsub-test.com",
+        provider="CUSTOM",
+        smtp_host="smtp.unsub-test.com",
+        smtp_port=587,
+        smtp_security="STARTTLS",
+        smtp_username="sender@unsub-test.com",
+        smtp_password_encrypted="enc_password",
+        is_active=True,
+    )
+    db_session.add(account)
+    await db_session.commit()
+    await db_session.refresh(account)
+
+    create_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Bounce & Unsub Campaign",
+            "email_account_id": account.id,
+            "subject": "Initial Pitch",
+            "body_text": "Hey Charlie!",
+            "followup_steps": [
+                {
+                    "step_number": 2,
+                    "delay_hours": 48,
+                    "body_text": "Step 2 follow-up",
+                }
+            ],
+        },
+    )
+    assert create_resp.status_code == 201
+    camp_id = create_resp.json()["id"]
+
+    recip_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "charlie@client.com", "first_name": "Charlie"},
+    )
+    assert recip_resp.status_code == 201
+    recip_id = recip_resp.json()["id"]
+
+    camp_res = await db_session.execute(select(Campaign).where(Campaign.id == camp_id))
+    camp = camp_res.scalar_one()
+    camp.status = CampaignStatus.QUEUED.value
+    await db_session.commit()
+
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync"):
+        await CampaignDeliveryService.execute_campaign(
+            campaign_id=camp_id,
+            company_id=comp_id,
+            db_factory=TestAsyncSessionLocal,
+        )
+
+    recip_res = await db_session.execute(select(CampaignRecipient).where(CampaignRecipient.id == recip_id))
+    recip = recip_res.scalar_one()
+    assert recip.next_step_due_at is not None
+
+    deliv_stmt = select(CampaignDelivery).where(CampaignDelivery.recipient_id == recip_id)
+    step1_deliv = (await db_session.execute(deliv_stmt)).scalar_one()
+
+    # Record a bounce event for this delivery
+    await CampaignDeliveryService.record_bounce_event(
+        db=db_session,
+        company_id=comp_id,
+        delivery_id=step1_deliv.id,
+        diagnostic_text="550 User unknown",
+    )
+    await db_session.commit()
+
+    # Verify recipient next_step_due_at is cleared and status is BOUNCED
+    await db_session.refresh(recip)
+    assert recip.status == CampaignRecipientStatus.BOUNCED.value
+    assert recip.next_step_due_at is None
+
+    # Advance time and call process_due_followup_steps -> 0 sent
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync"):
+        due_res = await CampaignDeliveryService.process_due_followup_steps(
+            db_factory=TestAsyncSessionLocal,
+            now_utc=step1_deliv.sent_at + timedelta(hours=50),
+        )
+    assert len(due_res) == 0
+

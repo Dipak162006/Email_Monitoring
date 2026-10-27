@@ -26,6 +26,7 @@ import {
   Monitor,
   Smartphone,
   Eye,
+  Reply,
 } from "lucide-react";
 
 import { useWorkspace } from "../hooks/useWorkspace";
@@ -1098,6 +1099,144 @@ export const CampaignDetailPage: React.FC = () => {
           );
         })()}
       </div>
+
+      {/* Follow-Up Sequence & Telemetry Card */}
+      {(() => {
+        const followupSteps =
+          campaign.followup_steps && campaign.followup_steps.length > 0
+            ? campaign.followup_steps
+            : campaign.steps && campaign.steps.length > 1
+            ? campaign.steps.filter((s) => s.step_number >= 2 && s.is_active !== false)
+            : [];
+
+        if (followupSteps.length === 0) return null;
+
+        return (
+          <div
+            className="bg-white rounded-xl p-5 md:p-6 border border-slate-200/80 shadow-2xs space-y-5 min-w-0"
+            data-testid="followup-telemetry-card"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                  <Reply className="h-4 w-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-base sm:text-lg font-bold text-slate-900">
+                      Automated Follow-Up Sequence
+                    </h2>
+                    <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/60">
+                      Auto-stops on Reply
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Threaded sequential follow-ups dispatched if no customer reply is detected.
+                  </p>
+                </div>
+              </div>
+              <span className="text-xs font-medium text-slate-500 bg-slate-50 px-2.5 py-1 rounded-md border border-slate-200 self-start sm:self-auto">
+                {followupSteps.length} Follow-Up {followupSteps.length === 1 ? "Step" : "Steps"} Configured
+              </span>
+            </div>
+
+            {/* Follow-up Telemetry Counters */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+              <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
+                <div className="flex items-center justify-between text-slate-500 mb-2">
+                  <span className="text-xs font-medium">Follow-Ups Sent</span>
+                  <Send className="h-4 w-4 text-emerald-500" />
+                </div>
+                <div>
+                  <span
+                    className="text-2xl font-bold text-slate-900 tracking-tight"
+                    data-testid="telemetry-followup-sent"
+                  >
+                    {(campaign.followup_sent_count ?? 0).toLocaleString()}
+                  </span>
+                  <p className="text-[11px] text-slate-500 mt-0.5">Dispatched across sequence steps</p>
+                </div>
+              </div>
+
+              <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
+                <div className="flex items-center justify-between text-slate-500 mb-2">
+                  <span className="text-xs font-medium">Awaiting Next Follow-Up</span>
+                  <Clock className="h-4 w-4 text-indigo-500" />
+                </div>
+                <div>
+                  <span
+                    className="text-2xl font-bold text-slate-900 tracking-tight"
+                    data-testid="telemetry-followup-scheduled"
+                  >
+                    {(campaign.followup_scheduled_count ?? 0).toLocaleString()}
+                  </span>
+                  <p className="text-[11px] text-slate-500 mt-0.5">Recipients with due timers active</p>
+                </div>
+              </div>
+
+              <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
+                <div className="flex items-center justify-between text-slate-500 mb-2">
+                  <span className="text-xs font-medium">Auto-Stopped on Reply</span>
+                  <CheckCircle2 className="h-4 w-4 text-indigo-600" />
+                </div>
+                <div>
+                  <span
+                    className="text-2xl font-bold text-slate-900 tracking-tight"
+                    data-testid="telemetry-followup-replied"
+                  >
+                    {(campaign.replied_count ?? 0).toLocaleString()}
+                  </span>
+                  <p className="text-[11px] text-slate-500 mt-0.5">Sequences halted by genuine reply</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Sequence Steps List */}
+            <div className="space-y-3 pt-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                Sequence Steps Timeline
+              </h3>
+              <div className="space-y-3">
+                {followupSteps.map((step, idx) => {
+                  const delayLabel =
+                    step.delay_hours >= 24 && step.delay_hours % 24 === 0
+                      ? `${step.delay_hours / 24} day(s)`
+                      : `${step.delay_hours} hour(s)`;
+                  const stepSubject = step.subject || `Re: ${campaign.subject}`;
+
+                  return (
+                    <div
+                      key={step.id || step.step_number || idx}
+                      className="border border-slate-200 rounded-lg p-3.5 bg-slate-50/40 space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded text-xs font-bold bg-indigo-100 text-indigo-700">
+                            Step {step.step_number}
+                          </span>
+                          <span className="text-xs font-medium text-slate-600">
+                            Wait: <strong className="text-slate-800">{delayLabel}</strong> after previous step if no reply
+                          </span>
+                        </div>
+                        <span className="text-xs text-slate-400">Threaded in same conversation</span>
+                      </div>
+                      <div className="text-xs text-slate-700">
+                        <span className="font-semibold text-slate-500">Subject: </span>
+                        <span className="font-medium text-slate-900">{stepSubject}</span>
+                      </div>
+                      {step.body_text && (
+                        <div className="text-xs text-slate-600 bg-white p-2.5 rounded border border-slate-100 line-clamp-3">
+                          {step.body_text}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* 5. Campaign Message Preview Section */}
       <div className="w-full bg-white rounded-xl p-5 md:p-6 lg:p-7 border border-slate-200/80 shadow-2xs space-y-5 min-w-0">

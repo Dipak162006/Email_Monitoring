@@ -11,9 +11,14 @@ import {
   FileText,
   AlertCircle,
   Loader2,
+  Plus,
+  Trash2,
+  Clock,
+  CornerDownRight,
+  ShieldCheck,
 } from "lucide-react";
 import type { AuthorizedEmailAccount, EmailTemplateItem, EmailSignatureItem, EmailItem } from "../../types/emails";
-import type { CampaignAttachment } from "../../types/campaign";
+import type { CampaignAttachment, CampaignStepWritePayload } from "../../types/campaign";
 import { RichTextEditor, type RichTextEditorRef } from "../compose/RichTextEditor";
 import { AttachmentUploadList, type ComposeAttachment } from "../compose/AttachmentUploadList";
 import { TemplateModal } from "../compose/TemplateModal";
@@ -73,6 +78,8 @@ export interface CampaignContentStepProps {
   onImportDraft?: (draftId: number) => Promise<void>;
   onSelectTemplate?: (template: EmailTemplateItem) => void;
   onSelectSignature?: (signature: EmailSignatureItem) => void;
+  followupSteps?: CampaignStepWritePayload[];
+  onFollowupStepsChange?: (steps: CampaignStepWritePayload[]) => void;
 }
 
 export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
@@ -92,6 +99,8 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
   onImportDraft,
   onSelectTemplate,
   onSelectSignature,
+  followupSteps = [],
+  onFollowupStepsChange,
 }) => {
   const [activeTab, setActiveTab] = useState<"edit" | "preview">("edit");
   const [isPersonalizeOpen, setIsPersonalizeOpen] = useState(false);
@@ -287,6 +296,46 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
   const hasExistingContent = Boolean(
     subject.trim() || bodyHtml.replace(/<[^>]*>/g, "").trim()
   );
+
+  const handleAddFollowupStep = () => {
+    if (followupSteps.length >= 3) return;
+    const newStepNumber = followupSteps.length + 2;
+    const updated = [
+      ...followupSteps,
+      {
+        step_number: newStepNumber,
+        delay_hours: 72,
+        subject: "",
+        body_text: "",
+        body_html: "",
+        is_active: true,
+      },
+    ];
+    onFollowupStepsChange?.(updated);
+  };
+
+  const handleRemoveFollowupStep = (indexToRemove: number) => {
+    const filtered = followupSteps.filter((_, idx) => idx !== indexToRemove);
+    const reindexed = filtered.map((s, idx) => ({
+      ...s,
+      step_number: idx + 2,
+    }));
+    onFollowupStepsChange?.(reindexed);
+  };
+
+  const handleUpdateFollowupStep = (
+    index: number,
+    field: keyof CampaignStepWritePayload,
+    value: any
+  ) => {
+    const updated = followupSteps.map((s, idx) => {
+      if (idx === index) {
+        return { ...s, [field]: value };
+      }
+      return s;
+    });
+    onFollowupStepsChange?.(updated);
+  };
 
   return (
     <section className="space-y-4 sm:space-y-5">
@@ -575,6 +624,183 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
           <div className="px-6 py-2.5 bg-red-50/50 border-t border-red-200 text-xs text-red-600 flex items-center gap-1.5 font-medium">
             <AlertCircle className="h-4 w-4 shrink-0" />
             <span>{contentError}</span>
+          </div>
+        )}
+      </div>
+
+      {/* ===================================================================== */}
+      {/* Automated Follow-Up Sequence Section (C13)                            */}
+      {/* ===================================================================== */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden">
+        <div className="p-5 sm:p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                <CornerDownRight className="h-4 w-4" />
+              </div>
+              <h3 className="text-base font-bold text-slate-900">
+                Automated Follow-Ups
+              </h3>
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/70 inline-flex items-center gap-1">
+                <ShieldCheck className="h-3 w-3" />
+                <span>Auto-stops on Reply, Bounce, or Unsubscribe</span>
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 pl-10">
+              Send automated follow-up emails in the same conversation thread if the recipient hasn't replied.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleAddFollowupStep}
+            disabled={followupSteps.length >= 3}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-lg shadow-2xs transition-colors self-start sm:self-auto cursor-pointer"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            <span>+ Add Follow-Up Step</span>
+            {followupSteps.length > 0 && (
+              <span className="ml-1 text-[11px] px-1.5 py-0.2 rounded bg-indigo-500 text-white font-mono">
+                {followupSteps.length}/3
+              </span>
+            )}
+          </button>
+        </div>
+
+        {followupSteps.length === 0 ? (
+          <div className="p-8 text-center space-y-2 bg-slate-50/50">
+            <Clock className="h-8 w-8 text-slate-300 mx-auto" />
+            <p className="text-xs font-medium text-slate-600">
+              No follow-up steps configured yet.
+            </p>
+            <p className="text-[11px] text-slate-400 max-w-md mx-auto">
+              Add up to 3 automated follow-ups to increase response rates. Each follow-up is automatically cancelled as soon as the recipient replies.
+            </p>
+          </div>
+        ) : (
+          <div className="p-5 sm:p-6 space-y-5 bg-slate-50/30">
+            {followupSteps.map((fStep, idx) => {
+              const isDays = fStep.delay_hours >= 24 && fStep.delay_hours % 24 === 0;
+              const waitVal = isDays ? fStep.delay_hours / 24 : fStep.delay_hours;
+              const waitUnit = isDays ? "days" : "hours";
+
+              return (
+                <div
+                  key={idx}
+                  className="bg-white rounded-xl border border-slate-200 p-5 shadow-2xs space-y-4"
+                >
+                  {/* Step Card Header */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                    <div className="flex items-center gap-2.5">
+                      <span className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 font-bold text-xs flex items-center justify-center">
+                        {idx + 1}
+                      </span>
+                      <span className="font-bold text-sm text-slate-900">
+                        Follow-Up Step #{idx + 1} (Step {fStep.step_number})
+                      </span>
+                      <span className="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
+                        Waits {waitVal} {waitUnit} after previous step
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      {/* Wait Time Config */}
+                      <div className="flex items-center gap-1.5 text-xs text-slate-600">
+                        <Clock className="h-3.5 w-3.5 text-slate-400" />
+                        <span className="font-medium">Wait</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={waitUnit === "days" ? 30 : 720}
+                          value={waitVal}
+                          onChange={(e) => {
+                            const val = Math.max(1, parseInt(e.target.value, 10) || 1);
+                            const newHours = waitUnit === "days" ? val * 24 : val;
+                            handleUpdateFollowupStep(idx, "delay_hours", Math.min(720, Math.max(1, newHours)));
+                          }}
+                          className="w-16 px-2 py-1 border border-slate-200 rounded-md text-xs font-semibold text-center focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                        />
+                        <select
+                          value={waitUnit}
+                          onChange={(e) => {
+                            const unit = e.target.value;
+                            const newHours = unit === "days" ? waitVal * 24 : waitVal;
+                            handleUpdateFollowupStep(idx, "delay_hours", Math.min(720, Math.max(1, newHours)));
+                          }}
+                          className="px-2 py-1 border border-slate-200 rounded-md text-xs font-medium bg-white focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer"
+                        >
+                          <option value="days">Days</option>
+                          <option value="hours">Hours</option>
+                        </select>
+                        <span className="text-slate-400 text-[11px]">if no reply</span>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveFollowupStep(idx)}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                        title="Remove follow-up step"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Follow-up Subject */}
+                  <div className="space-y-1">
+                    <label className="block text-xs font-semibold text-slate-700">
+                      Follow-Up Subject (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={fStep.subject || ""}
+                      onChange={(e) => handleUpdateFollowupStep(idx, "subject", e.target.value)}
+                      placeholder={`Re: ${subject || "Campaign Subject"}`}
+                      className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 focus:outline-none"
+                    />
+                    <p className="text-[11px] text-slate-400">
+                      Sent as a threaded reply in the same email conversation. Defaults to "Re: {subject || "Subject"}" if left empty.
+                    </p>
+                  </div>
+
+                  {/* Follow-up Body */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        Follow-Up Message Body
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <span className="text-[10px] text-slate-400 font-medium mr-1">Insert Merge Tag:</span>
+                        {CAMPAIGN_MERGE_TAGS.slice(0, 4).map((m) => (
+                          <button
+                            key={m.tag}
+                            type="button"
+                            onClick={() => {
+                              const currentBody = fStep.body_html || fStep.body_text || "";
+                              handleUpdateFollowupStep(idx, "body_html", currentBody + (currentBody ? " " : "") + m.tag);
+                              handleUpdateFollowupStep(idx, "body_text", currentBody + (currentBody ? " " : "") + m.tag);
+                            }}
+                            className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-slate-100 hover:bg-indigo-50 text-slate-700 hover:text-indigo-600 border border-slate-200 cursor-pointer transition-colors"
+                          >
+                            {m.tag}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <textarea
+                      rows={4}
+                      value={fStep.body_html || fStep.body_text || ""}
+                      onChange={(e) => {
+                        handleUpdateFollowupStep(idx, "body_html", e.target.value);
+                        handleUpdateFollowupStep(idx, "body_text", e.target.value);
+                      }}
+                      placeholder="Hi {{first_name}}, just following up on my previous note..."
+                      className="w-full px-3.5 py-2.5 text-xs text-slate-900 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 focus:outline-none leading-relaxed font-sans"
+                    />
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

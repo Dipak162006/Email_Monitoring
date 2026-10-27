@@ -39,7 +39,13 @@ const scrollToTop = () => {
   }
 };
 
-import type { Campaign, CampaignCreatePayload, CampaignUpdatePayload, CampaignAttachment } from "../types/campaign";
+import type {
+  Campaign,
+  CampaignCreatePayload,
+  CampaignUpdatePayload,
+  CampaignAttachment,
+  CampaignStepWritePayload,
+} from "../types/campaign";
 import type { EmailTemplateItem, EmailSignatureItem } from "../types/emails";
 
 export interface CreateCampaignPageProps {
@@ -97,6 +103,7 @@ export function CreateCampaignPage({
   const [bodyHtml, setBodyHtml] = useState<string>("");
   const [bodyText, setBodyText] = useState<string>("");
   const [sendIntervalSeconds, setSendIntervalSeconds] = useState<number>(0);
+  const [followupSteps, setFollowupSteps] = useState<CampaignStepWritePayload[]>([]);
 
   // Persistence & Draft Tracking
   const [draftCampaignId, setDraftCampaignId] = useState<number | null>(() => {
@@ -183,6 +190,31 @@ export function CreateCampaignPage({
         }
         if (existingCampaign.send_interval_seconds !== undefined && existingCampaign.send_interval_seconds !== null) {
           setSendIntervalSeconds(existingCampaign.send_interval_seconds);
+        }
+        if (existingCampaign.followup_steps && existingCampaign.followup_steps.length > 0) {
+          setFollowupSteps(
+            existingCampaign.followup_steps.map((s) => ({
+              step_number: s.step_number,
+              delay_hours: s.delay_hours,
+              subject: s.subject,
+              body_text: s.body_text,
+              body_html: s.body_html,
+              is_active: s.is_active,
+            }))
+          );
+        } else if (existingCampaign.steps && existingCampaign.steps.length > 1) {
+          setFollowupSteps(
+            existingCampaign.steps
+              .filter((s) => s.step_number >= 2)
+              .map((s) => ({
+                step_number: s.step_number,
+                delay_hours: s.delay_hours,
+                subject: s.subject,
+                body_text: s.body_text,
+                body_html: s.body_html,
+                is_active: s.is_active,
+              }))
+          );
         }
         setDraftCampaignId(existingCampaign.id);
         setIsDirty(false);
@@ -397,6 +429,7 @@ export function CreateCampaignPage({
           body_text: bodyText,
           body_html: bodyHtml,
           send_interval_seconds: sendIntervalSeconds,
+          followup_steps: followupSteps,
         });
       } else {
         // Create new draft
@@ -407,6 +440,7 @@ export function CreateCampaignPage({
           body_text: bodyText,
           body_html: bodyHtml,
           send_interval_seconds: sendIntervalSeconds,
+          followup_steps: followupSteps,
         });
         savedId = created.id;
         setDraftCampaignId(created.id);
@@ -807,6 +841,11 @@ export function CreateCampaignPage({
             onImportDraft={handleImportDraft}
             onSelectTemplate={handleSelectTemplate}
             onSelectSignature={handleSelectSignature}
+            followupSteps={followupSteps}
+            onFollowupStepsChange={(steps) => {
+              setFollowupSteps(steps);
+              setIsDirty(true);
+            }}
           />
         )}
 
@@ -818,6 +857,7 @@ export function CreateCampaignPage({
             selectedSender={selectedSender}
             attachments={attachments}
             sendIntervalSeconds={sendIntervalSeconds}
+            followupSteps={followupSteps}
             onEditStep={(step) => {
               setCurrentStep(step);
               scrollToTop();

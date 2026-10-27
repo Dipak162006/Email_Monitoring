@@ -112,6 +112,22 @@ class CampaignPreflightService:
                 )
             )
 
+        # 3b. Follow-up step content validation (C13)
+        if campaign.steps:
+            for step in campaign.steps:
+                if step.step_number >= 2 and step.is_active:
+                    step_has_text = bool(step.body_text and step.body_text.strip())
+                    step_has_html = bool(step.body_html and step.body_html.strip())
+                    if not step_has_text and not step_has_html:
+                        issues.append(
+                            PreflightIssue(
+                                code="MISSING_FOLLOWUP_CONTENT",
+                                message=f"Follow-up Step {step.step_number} must have plain text or HTML body content.",
+                                severity="BLOCKING",
+                                blocking=True,
+                            )
+                        )
+
         # 4. Sender EmailAccount validation
         sender_account: Optional[EmailAccount] = None
         if not campaign.email_account_id:

@@ -25,6 +25,7 @@ from app.modules.campaigns.schemas import (
     CampaignAttachmentRead,
     CampaignCreate,
     CampaignDetailRead,
+    CampaignStepRead,
     CampaignUpdate,
 )
 from app.modules.email_accounts.models import EmailAccount
@@ -152,6 +153,23 @@ class CampaignService:
         )
         db.add(step_1)
 
+        # Synchronize follow-up steps (steps >= 2) if provided
+        if campaign_in.followup_steps:
+            for idx, f_step in enumerate(campaign_in.followup_steps, start=2):
+                subj = (f_step.subject or "").strip()
+                if not subj:
+                    subj = f"Re: {campaign.subject}"[:255] if campaign.subject else "Follow-up"
+                step_item = CampaignStep(
+                    campaign_id=campaign.id,
+                    step_number=idx,
+                    delay_hours=f_step.delay_hours,
+                    subject=subj,
+                    body_text=f_step.body_text,
+                    body_html=f_step.body_html,
+                    is_active=f_step.is_active,
+                )
+                db.add(step_item)
+
         await db.commit()
         return await CampaignService.get_campaign(db, company_id, campaign.id)
 
@@ -170,6 +188,7 @@ class CampaignService:
             .options(
                 selectinload(Campaign.email_account),
                 selectinload(Campaign.attachments),
+                selectinload(Campaign.steps),
             )
             .where(
                 Campaign.id == campaign_id,
@@ -205,7 +224,10 @@ class CampaignService:
 
         query = (
             select(Campaign, recipient_count_subq.label("recipient_count"))
-            .options(selectinload(Campaign.attachments))
+            .options(
+                selectinload(Campaign.attachments),
+                selectinload(Campaign.steps),
+            )
             .where(Campaign.company_id == company_id)
         )
 
@@ -244,6 +266,8 @@ class CampaignService:
             )
 
         update_data = campaign_update.model_dump(exclude_unset=True)
+        followup_steps_in = update_data.pop("followup_steps", None)
+        has_followup_update = "followup_steps" in campaign_update.model_fields_set
 
         if "email_account_id" in update_data and update_data["email_account_id"] is not None:
             await CampaignService.get_email_account_for_company(
@@ -280,6 +304,31 @@ class CampaignService:
                     is_active=True,
                 )
                 db.add(new_step_1)
+
+        # Synchronize follow-up steps (steps >= 2) if updated
+        if has_followup_update:
+            from sqlalchemy import delete
+            await db.execute(
+                delete(CampaignStep).where(
+                    CampaignStep.campaign_id == campaign.id,
+                    CampaignStep.step_number >= 2,
+                )
+            )
+            if followup_steps_in:
+                for idx, f_step in enumerate(followup_steps_in, start=2):
+                    subj = (f_step.get("subject") or "").strip()
+                    if not subj:
+                        subj = f"Re: {campaign.subject}"[:255] if campaign.subject else "Follow-up"
+                    step_item = CampaignStep(
+                        campaign_id=campaign.id,
+                        step_number=idx,
+                        delay_hours=f_step.get("delay_hours", 72),
+                        subject=subj,
+                        body_text=f_step.get("body_text"),
+                        body_html=f_step.get("body_html"),
+                        is_active=f_step.get("is_active", True),
+                    )
+                    db.add(step_item)
 
         await db.commit()
         return await CampaignService.get_campaign(db, company_id, campaign.id)
@@ -617,6 +666,32 @@ class CampaignService:
         uncertain_c = await db.scalar(deliv_uncertain_stmt) or 0
         counts["uncertain_count"] = uncertain_c
 
+        # Follow-up sequence telemetry counters
+        replied_count_stmt = select(func.count(CampaignRecipient.id)).where(
+            CampaignRecipient.campaign_id == campaign_id,
+            (CampaignRecipient.replied_at.is_not(None))
+            | (CampaignRecipient.stopped_reason == CampaignRecipientStopReason.REPLIED.value),
+        )
+        counts["replied_count"] = (await db.scalar(replied_count_stmt)) or 0
+
+        followup_sched_stmt = select(func.count(CampaignRecipient.id)).where(
+            CampaignRecipient.campaign_id == campaign_id,
+            CampaignRecipient.next_step_due_at.is_not(None),
+            CampaignRecipient.stopped_reason.is_(None),
+        )
+        counts["followup_scheduled_count"] = (await db.scalar(followup_sched_stmt)) or 0
+
+        followup_sent_stmt = (
+            select(func.count(CampaignDelivery.id))
+            .join(CampaignStep, CampaignDelivery.step_id == CampaignStep.id)
+            .where(
+                CampaignDelivery.campaign_id == campaign_id,
+                CampaignDelivery.status == CampaignDeliveryStatus.SENT.value,
+                CampaignStep.step_number >= 2,
+            )
+        )
+        counts["followup_sent_count"] = (await db.scalar(followup_sent_stmt)) or 0
+
         return counts
 
     @staticmethod
@@ -629,6 +704,7 @@ class CampaignService:
         email_account = campaign.__dict__.get("email_account")
         recipients = campaign.__dict__.get("recipients")
         attachments = campaign.__dict__.get("attachments") or []
+        steps_models = campaign.__dict__.get("steps") or []
 
         counts = status_counts or {}
         final_count = (
@@ -636,6 +712,10 @@ class CampaignService:
             if recipient_count is not None
             else counts.get("total", len(recipients) if recipients is not None else 0)
         )
+
+        sorted_steps = sorted(steps_models, key=lambda s: s.step_number)
+        steps_read = [CampaignStepRead.model_validate(s) for s in sorted_steps]
+        followup_steps_read = [s for s in steps_read if s.step_number >= 2 and s.is_active]
 
         return CampaignDetailRead(
             id=campaign.id,
@@ -662,7 +742,12 @@ class CampaignService:
             failed_count=counts.get("failed_count", 0),
             bounced_count=counts.get("bounced_count", 0),
             suppressed_count=counts.get("suppressed_count", 0),
+            replied_count=counts.get("replied_count", 0),
+            followup_scheduled_count=counts.get("followup_scheduled_count", 0),
+            followup_sent_count=counts.get("followup_sent_count", 0),
             attachments=[CampaignAttachmentRead.model_validate(a) for a in attachments],
+            steps=steps_read,
+            followup_steps=followup_steps_read,
         )
 
     @staticmethod

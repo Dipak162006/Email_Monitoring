@@ -83,6 +83,7 @@ async def _async_scheduled_campaign_dispatch_task() -> Dict[str, Any]:
         dispatched = await CampaignSchedulingService.dispatch_due_campaigns()
         recovered = await CampaignSchedulingService.recover_due_paced_campaigns()
         stale_deliveries = await CampaignSchedulingService.recover_stale_sending_deliveries()
+        followups_processed = await CampaignDeliveryService.process_due_followup_steps()
         return {
             "dispatched_count": len(dispatched),
             "dispatched": dispatched,
@@ -90,6 +91,8 @@ async def _async_scheduled_campaign_dispatch_task() -> Dict[str, Any]:
             "recovered": recovered,
             "stale_deliveries_count": len(stale_deliveries),
             "stale_deliveries": stale_deliveries,
+            "followups_processed_count": len(followups_processed),
+            "followups_processed": followups_processed,
         }
     except Exception as exc:
         logger.exception("Unhandled failure in periodic scheduled campaign dispatch task: %s", exc)

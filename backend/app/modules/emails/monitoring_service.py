@@ -141,3 +141,110 @@ class EmailMonitoringService:
         if parsed.is_auto_reply:
             return False
         return True
+
+    @classmethod
+    async def match_and_process_campaign_reply(
+        cls,
+        db: AsyncSession,
+        account: EmailAccount,
+        parsed: ParsedEmail,
+        thread_id: Optional[int],
+        is_reply_to_outgoing: bool,
+    ) -> int:
+        """Match an incoming genuine reply to an active campaign recipient and auto-stop follow-up sequence.
+
+        Tenant-isolated to account.company_id.
+        Only runs when cls.is_genuine_reply(parsed) is True.
+        
+        Matching criteria:
+        1. CampaignDelivery.message_id is in parsed in_reply_to or references headers, OR
+        2. is_reply_to_outgoing is True, thread_id == delivery.thread_id, and recipient.email == sender.
+        
+        Actions on match:
+        - recipient.replied_at = parsed.date or now_utc
+        - recipient.stopped_reason = 'REPLIED'
+        - recipient.next_step_due_at = None
+        - If recipient.status == 'ACTIVE', transition to 'STOPPED'
+        """
+        if not cls.is_genuine_reply(parsed):
+            return 0
+
+        from email.utils import parseaddr
+        from sqlalchemy import or_, func
+        from app.modules.campaigns.models import (
+            Campaign,
+            CampaignDelivery,
+            CampaignRecipient,
+            CampaignRecipientStatus,
+            CampaignRecipientStopReason,
+        )
+        from app.modules.emails.thread_service import EmailThreadService
+
+        candidate_ids = []
+        if parsed.in_reply_to:
+            candidate_ids.extend(EmailThreadService.extract_message_ids(parsed.in_reply_to))
+            clean_in_reply = parsed.in_reply_to.strip()
+            if clean_in_reply and clean_in_reply not in candidate_ids:
+                candidate_ids.append(clean_in_reply)
+        if parsed.references_header:
+            candidate_ids.extend(EmailThreadService.extract_message_ids(parsed.references_header))
+            clean_ref = parsed.references_header.strip()
+            if clean_ref and clean_ref not in candidate_ids:
+                candidate_ids.append(clean_ref)
+
+        sender_email = parseaddr(parsed.sender)[1].strip().lower() if parsed.sender else ""
+
+        conditions = []
+        if candidate_ids:
+            conditions.append(CampaignDelivery.message_id.in_(candidate_ids))
+        if is_reply_to_outgoing and thread_id is not None and sender_email:
+            conditions.append(
+                (CampaignDelivery.thread_id == thread_id)
+                & (func.lower(CampaignRecipient.email) == sender_email)
+            )
+
+        if not conditions:
+            return 0
+
+        stmt = (
+            select(CampaignRecipient, CampaignDelivery)
+            .join(CampaignRecipient, CampaignDelivery.recipient_id == CampaignRecipient.id)
+            .join(Campaign, CampaignDelivery.campaign_id == Campaign.id)
+            .where(
+                Campaign.company_id == account.company_id,
+                or_(*conditions),
+            )
+        )
+        res = await db.execute(stmt)
+        rows = res.all()
+
+        matched_count = 0
+        processed_recipient_ids = set()
+        reply_ts = parsed.date or datetime.now(timezone.utc)
+        if reply_ts.tzinfo is None:
+            reply_ts = reply_ts.replace(tzinfo=timezone.utc)
+
+        for recipient, delivery in rows:
+            if recipient.id in processed_recipient_ids:
+                continue
+            processed_recipient_ids.add(recipient.id)
+
+            if not recipient.replied_at:
+                recipient.replied_at = reply_ts
+            recipient.stopped_reason = CampaignRecipientStopReason.REPLIED.value
+            recipient.next_step_due_at = None
+            if recipient.status == CampaignRecipientStatus.ACTIVE.value:
+                recipient.status = CampaignRecipientStatus.STOPPED.value
+            matched_count += 1
+            logger.info(
+                "Matched genuine campaign reply for recipient %d (%s) in campaign %d. Follow-ups auto-stopped.",
+                recipient.id,
+                recipient.email,
+                recipient.campaign_id,
+            )
+
+        if matched_count > 0:
+            await db.flush()
+
+        return matched_count
+

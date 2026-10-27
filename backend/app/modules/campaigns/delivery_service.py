@@ -625,7 +625,19 @@ class CampaignDeliveryService:
 
                         recipient.current_step_number = 1
                         recipient.status = CampaignRecipientStatus.SENT.value
-                        recipient.next_step_due_at = None
+
+                        # Check if the campaign has an active Step 2 follow-up
+                        step_2_stmt = select(CampaignStep).where(
+                            CampaignStep.campaign_id == campaign.id,
+                            CampaignStep.step_number == 2,
+                            CampaignStep.is_active == True,
+                        )
+                        step_2_res = await db.execute(step_2_stmt)
+                        step_2 = step_2_res.scalar_one_or_none()
+                        if step_2:
+                            recipient.next_step_due_at = delivery.sent_at + timedelta(hours=step_2.delay_hours)
+                        else:
+                            recipient.next_step_due_at = None
                         sent_count += 1
                     else:
                         delivery.status = CampaignDeliveryStatus.FAILED.value
@@ -1103,6 +1115,29 @@ class CampaignDeliveryService:
                 delivery.thread_id = sent_email_record.thread_id
                 delivery.message_id = sent_email_record.message_id
                 delivery.error_message = None
+
+                if delivery.recipient_id:
+                    recip_stmt = select(CampaignRecipient).where(CampaignRecipient.id == delivery.recipient_id)
+                    recip_res = await db.execute(recip_stmt)
+                    recip = recip_res.scalar_one_or_none()
+                    if recip:
+                        step_stmt = select(CampaignStep).where(CampaignStep.id == delivery.step_id)
+                        deliv_step = (await db.execute(step_stmt)).scalar_one_or_none()
+                        step_num = deliv_step.step_number if deliv_step else 1
+                        recip.current_step_number = step_num
+                        recip.status = CampaignRecipientStatus.SENT.value
+
+                        next_step_stmt = select(CampaignStep).where(
+                            CampaignStep.campaign_id == delivery.campaign_id,
+                            CampaignStep.step_number == step_num + 1,
+                            CampaignStep.is_active == True,
+                        )
+                        next_step = (await db.execute(next_step_stmt)).scalar_one_or_none()
+                        if next_step:
+                            recip.next_step_due_at = delivery.sent_at + timedelta(hours=next_step.delay_hours)
+                        else:
+                            recip.next_step_due_at = None
+
                 await db.commit()
 
                 logger.info("Successfully retried delivery %d (attempt %d).", delivery_id, attempt_number)
@@ -1177,6 +1212,7 @@ class CampaignDeliveryService:
         if recipient:
             recipient.status = CampaignRecipientStatus.BOUNCED.value
             recipient.stopped_reason = CampaignRecipientStopReason.BOUNCED.value
+            recipient.next_step_due_at = None
             await SuppressionService.record_bounce_suppression(
                 db=db,
                 company_id=company_id,
@@ -1399,5 +1435,319 @@ class CampaignDeliveryService:
             )
 
         return len(stale_deliveries)
+
+    @classmethod
+    async def process_due_followup_steps(
+        cls,
+        db_factory=None,
+        email_service: Optional[EmailService] = None,
+        now_utc: Optional[datetime] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Process and dispatch due automated campaign follow-up steps.
+
+        Identifies CampaignRecipient records where:
+        - Campaign is RUNNING or COMPLETED
+        - next_step_due_at <= now
+        - stopped_reason is None
+        - replied_at is None
+        - status in (SENT, ACTIVE)
+
+        Safety checks before each dispatch:
+        - Checks thread has_reply or recipient replied_at -> auto-stops sequence
+        - Checks recipient suppression -> auto-unsubscribes and stops sequence
+
+        Transmits follow-up threaded in the same conversation (same thread_id, in_reply_to).
+        Advances recipient.current_step_number and schedules next step if configured.
+        """
+        if db_factory is None:
+            from app.workers.tasks import get_worker_db
+            db_factory = get_worker_db
+        if email_service is None:
+            email_service = EmailService()
+
+        current_time = now_utc or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+
+        results: List[Dict[str, Any]] = []
+
+        # Step 1: Query due recipients with row locks to prevent duplicate execution across workers
+        due_recipients_data = []
+        async with db_factory() as db:
+            stmt = (
+                select(CampaignRecipient.id, CampaignRecipient.campaign_id)
+                .join(Campaign, CampaignRecipient.campaign_id == Campaign.id)
+                .where(
+                    Campaign.status.in_([
+                        CampaignStatus.RUNNING.value,
+                        CampaignStatus.COMPLETED.value,
+                    ]),
+                    CampaignRecipient.next_step_due_at.is_not(None),
+                    CampaignRecipient.next_step_due_at <= current_time,
+                    CampaignRecipient.stopped_reason.is_(None),
+                    CampaignRecipient.replied_at.is_(None),
+                    CampaignRecipient.status.in_([
+                        CampaignRecipientStatus.SENT.value,
+                        CampaignRecipientStatus.ACTIVE.value,
+                    ]),
+                )
+                .order_by(CampaignRecipient.next_step_due_at.asc(), CampaignRecipient.id.asc())
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            res = await db.execute(stmt)
+            due_recipients_data = res.all()
+
+        if not due_recipients_data:
+            return results
+
+        # Step 2: Process each due recipient individually under short transaction boundaries
+        for recip_id, camp_id in due_recipients_data:
+            delivery_id = None
+            next_step_number = 1
+            sender_account = None
+            send_req = None
+
+            async with db_factory() as db:
+                recip_stmt = (
+                    select(CampaignRecipient)
+                    .options(
+                        selectinload(CampaignRecipient.campaign).selectinload(Campaign.email_account),
+                        selectinload(CampaignRecipient.campaign).selectinload(Campaign.company),
+                    )
+                    .where(CampaignRecipient.id == recip_id)
+                    .with_for_update()
+                )
+                recip_res = await db.execute(recip_stmt)
+                recipient = recip_res.scalar_one_or_none()
+
+                if not recipient or not recipient.campaign:
+                    continue
+
+                campaign = recipient.campaign
+
+                # Re-verify eligibility under lock
+                if (
+                    recipient.stopped_reason is not None
+                    or recipient.replied_at is not None
+                    or recipient.next_step_due_at is None
+                    or recipient.next_step_due_at > current_time
+                ):
+                    continue
+
+                # a. Find next active step
+                target_step_number = recipient.current_step_number + 1
+                next_step_stmt = select(CampaignStep).where(
+                    CampaignStep.campaign_id == campaign.id,
+                    CampaignStep.step_number == target_step_number,
+                    CampaignStep.is_active == True,
+                )
+                next_step_res = await db.execute(next_step_stmt)
+                next_step = next_step_res.scalar_one_or_none()
+
+                if not next_step:
+                    logger.info("No active follow-up step %d for recipient %d in campaign %d. Clearing next_step_due_at.", target_step_number, recipient.id, campaign.id)
+                    recipient.next_step_due_at = None
+                    await db.commit()
+                    continue
+
+                next_step_number = next_step.step_number
+
+                # b. Find previous SENT delivery to obtain thread_id and message_id
+                prev_deliv_stmt = (
+                    select(CampaignDelivery)
+                    .where(
+                        CampaignDelivery.campaign_id == campaign.id,
+                        CampaignDelivery.recipient_id == recipient.id,
+                        CampaignDelivery.status == CampaignDeliveryStatus.SENT.value,
+                    )
+                    .order_by(CampaignDelivery.sent_at.desc(), CampaignDelivery.id.desc())
+                )
+                prev_deliv_res = await db.execute(prev_deliv_stmt)
+                prev_delivery = prev_deliv_res.scalars().first()
+
+                if not prev_delivery:
+                    logger.warning("No previous SENT delivery found for recipient %d in campaign %d. Cannot thread follow-up.", recipient.id, campaign.id)
+                    recipient.next_step_due_at = None
+                    await db.commit()
+                    continue
+
+                # c. Safety Auto-Stop Checks
+                # Check for replies on the thread
+                has_reply = False
+                if prev_delivery.thread_id:
+                    from app.modules.emails.models import EmailThread
+                    thread_obj = await db.get(EmailThread, prev_delivery.thread_id)
+                    if thread_obj and thread_obj.has_reply:
+                        has_reply = True
+
+                if has_reply or recipient.replied_at is not None:
+                    logger.info("Customer replied to campaign %d before follow-up step %d for recipient %d. Auto-stopping.", campaign.id, next_step.step_number, recipient.id)
+                    recipient.stopped_reason = CampaignRecipientStopReason.REPLIED.value
+                    if not recipient.replied_at:
+                        recipient.replied_at = current_time
+                    recipient.next_step_due_at = None
+                    if recipient.status == CampaignRecipientStatus.ACTIVE.value:
+                        recipient.status = CampaignRecipientStatus.STOPPED.value
+                    await db.commit()
+                    results.append({
+                        "recipient_id": recipient.id,
+                        "campaign_id": campaign.id,
+                        "status": "STOPPED",
+                        "reason": "REPLIED",
+                    })
+                    continue
+
+                # Check for suppression / bounce
+                if (
+                    recipient.status in (CampaignRecipientStatus.BOUNCED.value, CampaignRecipientStatus.SUPPRESSED.value)
+                    or await SuppressionService.is_suppressed(db, campaign.company_id, recipient.email)
+                ):
+                    logger.info("Recipient %s is suppressed/bounced in campaign %d. Cancelling follow-up step %d.", recipient.email, campaign.id, next_step.step_number)
+                    recipient.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
+                    recipient.next_step_due_at = None
+                    recipient.status = CampaignRecipientStatus.SUPPRESSED.value
+                    await db.commit()
+                    results.append({
+                        "recipient_id": recipient.id,
+                        "campaign_id": campaign.id,
+                        "status": "STOPPED",
+                        "reason": "SUPPRESSED",
+                    })
+                    continue
+
+                # Sender account validation
+                sender_account = campaign.email_account
+                if not sender_account or not sender_account.is_active:
+                    logger.error("Sender account for campaign %d is missing or inactive. Skipping follow-up.", campaign.id)
+                    continue
+
+                # Create follow-up CampaignDelivery in SENDING state
+                followup_delivery = CampaignDelivery(
+                    campaign_id=campaign.id,
+                    recipient_id=recipient.id,
+                    step_id=next_step.id,
+                    status=CampaignDeliveryStatus.SENDING.value,
+                    attempt_count=1,
+                    last_attempt_at=current_time,
+                )
+                db.add(followup_delivery)
+                await db.commit()
+                await db.refresh(followup_delivery)
+                delivery_id = followup_delivery.id
+
+                # Render content
+                sender_name = sender_account.name or sender_account.email_address
+                sender_email = sender_account.email_address
+                unsub_url = build_unsubscribe_url(company_id=campaign.company_id, email=recipient.email, campaign_id=campaign.id)
+                login_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
+                camp_company_name = (campaign.company.name if campaign.company and campaign.company.name else "") or sender_name
+
+                context_vars = {
+                    "company_name": camp_company_name,
+                    "sender_name": sender_name,
+                    "sender_email": sender_email,
+                    "unsubscribe_url": unsub_url,
+                    "login_url": login_url,
+                }
+
+                subj_to_render = next_step.subject or f"Re: {campaign.subject}"
+                rendered_subject = render_content_for_recipient(subj_to_render, recipient, context_vars=context_vars) or f"Re: {campaign.subject}"
+                rendered_text = render_content_for_recipient(next_step.body_text, recipient, context_vars=context_vars)
+                rendered_html = render_content_for_recipient(next_step.body_html, recipient, is_html=True, context_vars=context_vars)
+
+                send_req = EmailSendRequest(
+                    email_account_id=sender_account.id,
+                    to=[recipient.email],
+                    subject=rendered_subject,
+                    body_text=rendered_text,
+                    body_html=rendered_html,
+                    thread_id=prev_delivery.thread_id,
+                    in_reply_to=prev_delivery.message_id,
+                    unsubscribe_url=unsub_url,
+                )
+
+            if delivery_id is None or send_req is None or sender_account is None:
+                continue
+
+            # d. Transmit email outside of the DB lock
+            send_success = False
+            sent_email_record: Optional[Email] = None
+            caught_exc: Optional[Exception] = None
+            error_detail: Optional[str] = None
+
+            async with db_factory() as db:
+                try:
+                    sent_email_record = await email_service.send_email(
+                        db=db,
+                        account=sender_account,
+                        current_user=None,
+                        send_req=send_req,
+                    )
+                    send_success = True
+                except Exception as exc:
+                    send_success = False
+                    caught_exc = exc
+                    error_detail = getattr(exc, "detail", str(exc))
+                    logger.warning("Follow-up send failed for delivery %d: %s", delivery_id, error_detail)
+
+            # e. Update delivery and recipient status
+            async with db_factory() as db:
+                deliv_obj = await db.get(CampaignDelivery, delivery_id)
+                recip_obj = await db.get(CampaignRecipient, recip_id)
+
+                if deliv_obj:
+                    if send_success and sent_email_record:
+                        deliv_obj.status = CampaignDeliveryStatus.SENT.value
+                        deliv_obj.sent_at = datetime.now(timezone.utc)
+                        deliv_obj.email_id = sent_email_record.id
+                        deliv_obj.thread_id = sent_email_record.thread_id
+                        deliv_obj.message_id = sent_email_record.message_id
+                        deliv_obj.error_message = None
+
+                        if recip_obj:
+                            recip_obj.current_step_number = next_step_number
+                            recip_obj.status = CampaignRecipientStatus.SENT.value
+
+                            # Check for subsequent step
+                            subseq_stmt = select(CampaignStep).where(
+                                CampaignStep.campaign_id == camp_id,
+                                CampaignStep.step_number == next_step_number + 1,
+                                CampaignStep.is_active == True,
+                            )
+                            subseq_step = (await db.execute(subseq_stmt)).scalar_one_or_none()
+                            if subseq_step:
+                                recip_obj.next_step_due_at = deliv_obj.sent_at + timedelta(hours=subseq_step.delay_hours)
+                            else:
+                                recip_obj.next_step_due_at = None
+
+                        await db.commit()
+                        logger.info("Dispatched follow-up Step %d for recipient %d (delivery %d).", next_step_number, recip_id, delivery_id)
+                        results.append({
+                            "delivery_id": delivery_id,
+                            "recipient_id": recip_id,
+                            "campaign_id": camp_id,
+                            "step_number": next_step_number,
+                            "status": "SENT",
+                            "message_id": sent_email_record.message_id,
+                        })
+                    else:
+                        deliv_obj.status = CampaignDeliveryStatus.FAILED.value
+                        deliv_obj.error_message = str(error_detail or "Follow-up send failure")
+                        if recip_obj:
+                            recip_obj.next_step_due_at = None
+                        await db.commit()
+                        results.append({
+                            "delivery_id": delivery_id,
+                            "recipient_id": recip_id,
+                            "campaign_id": camp_id,
+                            "step_number": next_step_number,
+                            "status": "FAILED",
+                            "error": deliv_obj.error_message,
+                        })
+
+        return results
+
 
 

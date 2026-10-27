@@ -82,20 +82,17 @@ async def _handle_unsubscribe(token: str, db: AsyncSession) -> dict:
         )
         db.add(entry)
 
-    # 2. If campaign_id provided, mark any PENDING or ACTIVE recipient as STOPPED (UNSUBSCRIBED)
+    # 2. If campaign_id provided, mark any recipient for this campaign as SUPPRESSED (UNSUBSCRIBED) and cancel follow-ups
     if campaign_id:
         recip_stmt = select(CampaignRecipient).where(
             CampaignRecipient.campaign_id == campaign_id,
             CampaignRecipient.email == norm_email,
-            CampaignRecipient.status.in_([
-                CampaignRecipientStatus.PENDING.value,
-                CampaignRecipientStatus.ACTIVE.value,
-            ]),
         )
         recip_res = await db.execute(recip_stmt)
         for r in recip_res.scalars().all():
             r.status = CampaignRecipientStatus.SUPPRESSED.value
             r.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
+            r.next_step_due_at = None
 
     await db.commit()
     return {"status": "unsubscribed", "email": norm_email, "company_id": company_id}

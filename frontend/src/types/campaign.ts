@@ -30,6 +30,30 @@ export interface Campaign {
   email_account_address?: string | null;
   recipient_count?: number;
   attachments?: CampaignAttachment[];
+  steps?: CampaignStepItem[];
+  followup_steps?: CampaignStepItem[];
+}
+
+export interface CampaignStepItem {
+  id: number;
+  campaign_id: number;
+  step_number: number;
+  delay_hours: number;
+  subject: string;
+  body_text?: string | null;
+  body_html?: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CampaignStepWritePayload {
+  step_number: number;
+  delay_hours: number;
+  subject?: string;
+  body_text?: string | null;
+  body_html?: string | null;
+  is_active?: boolean;
 }
 
 export interface CampaignAttachment {
@@ -50,6 +74,9 @@ export interface CampaignDetail extends Campaign {
   failed_count?: number;
   bounced_count?: number;
   suppressed_count?: number;
+  replied_count?: number;
+  followup_scheduled_count?: number;
+  followup_sent_count?: number;
 }
 
 export interface CampaignCreatePayload {
@@ -59,6 +86,7 @@ export interface CampaignCreatePayload {
   body_text?: string | null;
   body_html?: string | null;
   send_interval_seconds?: number;
+  followup_steps?: CampaignStepWritePayload[];
 }
 
 export interface CampaignUpdatePayload {
@@ -69,6 +97,7 @@ export interface CampaignUpdatePayload {
   body_html?: string | null;
   scheduled_at?: string | null;
   send_interval_seconds?: number;
+  followup_steps?: CampaignStepWritePayload[];
 }
 
 export interface CampaignSchedulePayload {

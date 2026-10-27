@@ -74,7 +74,42 @@ class CampaignImportDraftRequest(BaseModel):
 
 
 # =============================================================================
-# Campaign Schemas (C2 & C12)
+# Campaign Step Schemas (C13)
+# =============================================================================
+
+class CampaignStepWrite(BaseModel):
+    step_number: int = Field(..., ge=2, le=10, description="Follow-up step number (2..10)")
+    delay_hours: int = Field(default=72, ge=1, le=720, description="Wait time in hours after previous step if no reply")
+    subject: Optional[str] = Field(default="", max_length=255, description="Follow-up subject (if empty, defaults to Re: <Campaign Subject>)")
+    body_text: Optional[str] = None
+    body_html: Optional[str] = None
+    is_active: bool = True
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("body_html")
+    @classmethod
+    def sanitize_step_html(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_html(v) if v is not None else None
+
+
+class CampaignStepRead(BaseModel):
+    id: int
+    campaign_id: int
+    step_number: int
+    delay_hours: int
+    subject: str
+    body_text: Optional[str] = None
+    body_html: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# =============================================================================
+# Campaign Schemas (C2 & C12 & C13)
 # =============================================================================
 
 class CampaignCreate(BaseModel):
@@ -89,6 +124,10 @@ class CampaignCreate(BaseModel):
         ge=0,
         le=86400,
         description="Delay in seconds between consecutive recipient sends (0 = immediate, max 86400)",
+    )
+    followup_steps: Optional[List[CampaignStepWrite]] = Field(
+        default=None,
+        description="Optional list of automated follow-up steps (steps 2..10)",
     )
 
     model_config = ConfigDict(extra="forbid")
@@ -136,6 +175,10 @@ class CampaignUpdate(BaseModel):
         ge=0,
         le=86400,
         description="Delay in seconds between consecutive recipient sends (0 = immediate, max 86400)",
+    )
+    followup_steps: Optional[List[CampaignStepWrite]] = Field(
+        default=None,
+        description="Optional list of automated follow-up steps (steps 2..10)",
     )
 
     model_config = ConfigDict(extra="forbid")
@@ -200,6 +243,8 @@ class CampaignRead(BaseModel):
     updated_at: datetime
     recipient_count: int = 0
     attachments: List[CampaignAttachmentRead] = Field(default_factory=list)
+    steps: List[CampaignStepRead] = Field(default_factory=list)
+    followup_steps: List[CampaignStepRead] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -213,6 +258,9 @@ class CampaignDetailRead(CampaignRead):
     failed_count: int = 0
     bounced_count: int = 0
     suppressed_count: int = 0
+    replied_count: int = 0
+    followup_scheduled_count: int = 0
+    followup_sent_count: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 

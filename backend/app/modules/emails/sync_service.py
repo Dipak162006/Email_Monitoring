@@ -194,6 +194,16 @@ class EmailSyncService:
                 # Attached to matched bounced email thread; bounce notifications never count as replies
                 is_reply_to_outgoing = False
 
+            # If genuine reply, match and auto-stop any corresponding campaign recipient follow-up sequences
+            if EmailMonitoringService.is_genuine_reply(parsed):
+                await EmailMonitoringService.match_and_process_campaign_reply(
+                    db=db,
+                    account=account,
+                    parsed=parsed,
+                    thread_id=thread.id if thread else None,
+                    is_reply_to_outgoing=is_reply_to_outgoing,
+                )
+
             # Determine incoming email status and diagnostic
             incoming_status = EmailStatus.BOUNCED.value if parsed.is_bounce else EmailStatus.RECEIVED.value
             incoming_error = None
