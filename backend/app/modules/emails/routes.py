@@ -2246,6 +2246,51 @@ async def upload_draft_attachment(
     return EmailAttachmentRead.model_validate(attachment)
 
 
+@router.post(
+    "/emails/drafts/{draft_id}/attachments/copy-from/{source_email_id}",
+    response_model=EmailAttachmentListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Copy attachments from a source email into an active draft",
+)
+@router.post(
+    "/drafts/{draft_id}/attachments/copy-from/{source_email_id}",
+    response_model=EmailAttachmentListResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+@router.post(
+    "/companies/{company_id}/emails/drafts/{draft_id}/attachments/copy-from/{source_email_id}",
+    response_model=EmailAttachmentListResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+@router.post(
+    "/companies/{company_id}/drafts/{draft_id}/attachments/copy-from/{source_email_id}",
+    response_model=EmailAttachmentListResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def copy_attachments_to_draft(
+    draft_id: int,
+    source_email_id: int,
+    company_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmailAttachmentListResponse:
+    """Copy attachments from a source email into an authorized draft for forwarding."""
+    items = await AttachmentService.copy_attachments_to_draft(
+        db=db,
+        current_user=current_user,
+        source_email_id=source_email_id,
+        draft_id=draft_id,
+        company_id=company_id,
+    )
+    return EmailAttachmentListResponse(
+        attachments=[EmailAttachmentRead.model_validate(i) for i in items],
+        total=len(items),
+    )
+
+
 @router.get(
     "/emails/drafts/{draft_id}/attachments",
     response_model=EmailAttachmentListResponse,

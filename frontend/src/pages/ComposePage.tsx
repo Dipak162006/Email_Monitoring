@@ -19,6 +19,7 @@ import {
   signaturesApi,
 } from "../services/api";
 import type {
+  EmailItem,
   AuthorizedEmailAccount,
   AttachmentItem,
   EmailTemplateItem,
@@ -31,6 +32,10 @@ import { RichTextEditor } from "../components/compose/RichTextEditor";
 import { AttachmentUploadList, type ComposeAttachment } from "../components/compose/AttachmentUploadList";
 import { TemplateModal } from "../components/compose/TemplateModal";
 import { SignatureModal } from "../components/compose/SignatureModal";
+import {
+  extractEmailAddress,
+  calculateReplyAllRecipients,
+} from "../utils/emailRecipients";
 
 /**
  * Authoritative maximum attachment file size matching the backend configuration
@@ -58,6 +63,16 @@ export function ComposePage() {
   const replyToId = searchParams.get("reply_to");
   const forwardId = searchParams.get("forward");
   const draftParamId = searchParams.get("draft_id") || searchParams.get("draft");
+  const isReplyAll = searchParams.get("reply_all") === "true";
+
+  // Ref to prevent duplicate attachment copies when rerendering or autosaving forward drafts
+  const hasLoadedForwardAttsRef = useRef<string | null>(null);
+  const forwardSourceRef = useRef<{
+    sourceEmail: EmailItem;
+    fwdSubject: string;
+    forwardedBody: string;
+  } | null>(null);
+  const [isRetryingForwardAtts, setIsRetryingForwardAtts] = useState(false);
 
   // Threading / Reply State
   const [replyThreadId, setReplyThreadId] = useState<number | undefined>(undefined);
@@ -275,7 +290,40 @@ export function ComposePage() {
             setReplyInReplyTo(sourceEmail.message_id);
           }
 
-          setToRecipients([sourceEmail.sender]);
+          if (isReplyAll) {
+            let currentAccEmail: string | undefined;
+            const allAccounts = accounts.length > 0 ? accounts : rawAccounts;
+            const acc = allAccounts.find(
+              (a) => a.id === (sourceEmail.email_account_id || selectedAccountId)
+            );
+            if (acc) {
+              currentAccEmail = acc.email_address;
+            } else {
+              try {
+                const fetchedAccs = await emailAccountsApi.getAuthorizedAccounts();
+                const found = fetchedAccs.find(
+                  (a) => a.id === (sourceEmail.email_account_id || selectedAccountId)
+                );
+                if (found) currentAccEmail = found.email_address;
+              } catch {
+                // Ignore fallback error
+              }
+            }
+
+            const { to, cc } = calculateReplyAllRecipients(
+              sourceEmail,
+              currentAccEmail || ""
+            );
+            setToRecipients(to);
+            setCcRecipients(cc);
+            if (cc.length > 0) {
+              setShowCc(true);
+            }
+          } else {
+            const bareSender = extractEmailAddress(sourceEmail.sender) || sourceEmail.sender;
+            setToRecipients([bareSender]);
+          }
+
           setSubject(
             sourceEmail.subject.toLowerCase().startsWith("re:")
               ? sourceEmail.subject
@@ -286,15 +334,67 @@ export function ComposePage() {
           ).toLocaleString()}, ${sourceEmail.sender} wrote:</p>${sourceEmail.body_html || sourceEmail.body_text || ""}</blockquote>`;
           setBodyHtml(quotedBody);
         } else if (forwardId) {
-          setSubject(
-            sourceEmail.subject.toLowerCase().startsWith("fwd:")
-              ? sourceEmail.subject
-              : `Fwd: ${sourceEmail.subject}`
-          );
+          // Preserve existing behavior where forwarding starts a new conversation rather than replying in original thread
+          setReplyThreadId(undefined);
+          setReplyInReplyTo(undefined);
+
+          const fwdSubject = sourceEmail.subject.toLowerCase().startsWith("fwd:")
+            ? sourceEmail.subject
+            : `Fwd: ${sourceEmail.subject}`;
+          setSubject(fwdSubject);
+
           const forwardedBody = `<p></p><br/><blockquote style="border-left: 2px solid #cbd5e1; padding-left: 12px; margin-left: 0; color: #64748b;"><p>---------- Forwarded message ---------<br/>From: ${sourceEmail.sender}<br/>Subject: ${sourceEmail.subject}<br/>Date: ${new Date(
             sourceEmail.sent_at || sourceEmail.received_at || sourceEmail.created_at
           ).toLocaleString()}</p>${sourceEmail.body_html || sourceEmail.body_text || ""}</blockquote>`;
           setBodyHtml(forwardedBody);
+
+          // Retain source reference for potential retry
+          forwardSourceRef.current = { sourceEmail, fwdSubject, forwardedBody };
+
+          // Avoid duplicate attachment copies when rerendering or autosaving the same forward
+          if (hasLoadedForwardAttsRef.current !== forwardId) {
+            hasLoadedForwardAttsRef.current = forwardId;
+            try {
+              const sourceAtts = await emailsApi.getAttachments(sourceEmail.id);
+              if (sourceAtts?.attachments && sourceAtts.attachments.length > 0) {
+                // Ensure the forward draft exists before requesting the backend attachment-copy endpoint
+                let activeDraftId = draftIdRef.current;
+                if (!activeDraftId) {
+                  const accId = sourceEmail.email_account_id || selectedAccountId;
+                  if (accId) {
+                    const draftPayload: EmailDraftPayload = {
+                      email_account_id: accId,
+                      to: [],
+                      subject: fwdSubject,
+                      body_html: forwardedBody,
+                    };
+                    const createdDraft = await emailsApi.createDraft(draftPayload);
+                    activeDraftId = createdDraft.id;
+                    draftIdRef.current = createdDraft.id;
+                    setDraftId(createdDraft.id);
+                  }
+                }
+
+                if (activeDraftId) {
+                  const copyResult = await emailsApi.copyAttachmentsToDraft(
+                    activeDraftId,
+                    sourceEmail.id
+                  );
+                  if (copyResult?.attachments) {
+                    setServerAttachments(copyResult.attachments);
+                  }
+                }
+              }
+              setErrorMessage(null);
+            } catch (err: unknown) {
+              // Reset guard ref on error so user can retry in current session
+              hasLoadedForwardAttsRef.current = null;
+              console.error("Failed to load/copy forwarded attachments:", err);
+              const msg =
+                err instanceof Error ? err.message : "Failed to copy original email attachments.";
+              setErrorMessage(`Forwarding attachments warning: ${msg}`);
+            }
+          }
         }
       } catch (err) {
         console.error("Failed to load referenced email:", err);
@@ -302,7 +402,55 @@ export function ComposePage() {
     };
 
     loadReferencedEmail();
-  }, [replyToId, forwardId, draftParamId]);
+  }, [replyToId, forwardId, draftParamId, isReplyAll]);
+
+  // Handler for retrying forward attachment copy after transient error
+  const handleRetryForwardAttachments = async () => {
+    if (!forwardSourceRef.current || !forwardId || isRetryingForwardAtts) return;
+    setIsRetryingForwardAtts(true);
+    hasLoadedForwardAttsRef.current = forwardId;
+    try {
+      const { sourceEmail, fwdSubject, forwardedBody } = forwardSourceRef.current;
+      const sourceAtts = await emailsApi.getAttachments(sourceEmail.id);
+      if (sourceAtts?.attachments && sourceAtts.attachments.length > 0) {
+        let activeDraftId = draftIdRef.current;
+        if (!activeDraftId) {
+          const accId = sourceEmail.email_account_id || selectedAccountId;
+          if (accId) {
+            const draftPayload: EmailDraftPayload = {
+              email_account_id: accId,
+              to: [],
+              subject: fwdSubject,
+              body_html: forwardedBody,
+            };
+            const createdDraft = await emailsApi.createDraft(draftPayload);
+            activeDraftId = createdDraft.id;
+            draftIdRef.current = createdDraft.id;
+            setDraftId(createdDraft.id);
+          }
+        }
+
+        if (activeDraftId) {
+          const copyResult = await emailsApi.copyAttachmentsToDraft(
+            activeDraftId,
+            sourceEmail.id
+          );
+          if (copyResult?.attachments) {
+            setServerAttachments(copyResult.attachments);
+          }
+        }
+      }
+      setErrorMessage(null);
+    } catch (err: unknown) {
+      hasLoadedForwardAttsRef.current = null;
+      console.error("Failed to retry copying forwarded attachments:", err);
+      const msg =
+        err instanceof Error ? err.message : "Failed to copy original email attachments.";
+      setErrorMessage(`Forwarding attachments warning: ${msg}`);
+    } finally {
+      setIsRetryingForwardAtts(false);
+    }
+  };
 
   // Core save routine with race-condition protection and serialization
   const performSave = useCallback(async (): Promise<number | null> => {
@@ -787,9 +935,19 @@ export function ComposePage() {
       {/* Error Notice */}
       {errorMessage && (
         <div className="bg-rose-50 border border-rose-200 text-rose-700 px-4 py-3 rounded-xl text-xs sm:text-sm flex items-start justify-between gap-3 shadow-2xs">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
             <span>{errorMessage}</span>
+            {Boolean(forwardId && errorMessage.startsWith("Forwarding attachments warning:")) && (
+              <button
+                type="button"
+                onClick={handleRetryForwardAttachments}
+                disabled={isRetryingForwardAtts}
+                className="ml-2 font-semibold underline hover:text-rose-900 disabled:opacity-50 cursor-pointer"
+              >
+                {isRetryingForwardAtts ? "Retrying..." : "Retry"}
+              </button>
+            )}
           </div>
           <button
             type="button"

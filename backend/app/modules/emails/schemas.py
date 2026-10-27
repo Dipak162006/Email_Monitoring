@@ -626,6 +626,7 @@ class EmailAttachmentRead(BaseModel):
     company_id: int
     email_account_id: int
     email_id: int
+    source_attachment_id: Optional[int] = None
     file_name: str
     content_type: str
     file_size: int

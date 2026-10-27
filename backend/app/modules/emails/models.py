@@ -323,6 +323,15 @@ class EmailAttachment(Base):
     and the secure relative storage path on disk.
     """
     __tablename__ = "email_attachments"
+    __table_args__ = (
+        Index(
+            "uq_email_attachments_draft_source",
+            "email_id",
+            "source_attachment_id",
+            unique=True,
+            postgresql_where=text("source_attachment_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
     company_id: Mapped[int] = mapped_column(
@@ -341,6 +350,12 @@ class EmailAttachment(Base):
         Integer,
         ForeignKey("emails.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
+    )
+    source_attachment_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("email_attachments.id", ondelete="SET NULL"),
+        nullable=True,
         index=True,
     )
 

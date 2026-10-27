@@ -407,6 +407,17 @@ export const emailsApi = {
     return apiClient.delete<void>(`/api/v1/emails/drafts/${draftId}/attachments/${attachmentId}`);
   },
 
+  copyAttachmentsToDraft: async (
+    draftId: number,
+    sourceEmailId: number,
+    companyId?: number
+  ): Promise<AttachmentListResponse> => {
+    const endpoint = companyId
+      ? `/api/v1/companies/${companyId}/emails/drafts/${draftId}/attachments/copy-from/${sourceEmailId}`
+      : `/api/v1/emails/drafts/${draftId}/attachments/copy-from/${sourceEmailId}`;
+    return apiClient.post<AttachmentListResponse>(endpoint);
+  },
+
   applyTemplateToDraft: async (
     draftId: number,
     templateId: number,

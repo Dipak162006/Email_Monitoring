@@ -6,7 +6,7 @@ import logging
 import re
 from typing import List, Optional, Tuple
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.sanitizer import sanitize_html
 from app.modules.auth.models import User
@@ -329,6 +329,10 @@ class EmailDraftService:
                 detail="You do not have access to this draft.",
             )
 
+        # Safely track attachment migration file paths across the update lifecycle
+        created_paths: List[str] = []
+        old_paths_to_check: List[str] = []
+
         # Handle account change if requested
         active_account = current_account
         if (
@@ -361,97 +365,156 @@ class EmailDraftService:
                 )
 
             active_account = new_account
+            old_account_id = draft.email_account_id
             draft.email_account_id = new_account.id
             draft.sender = formataddr((new_account.name, new_account.email_address)) if new_account.name else new_account.email_address
 
-        # Validate thread reference updates
-        target_thread_id = draft_update.thread_id if draft_update.thread_id is not None else draft.thread_id
-        target_in_reply_to = draft_update.in_reply_to if draft_update.in_reply_to is not None else draft.in_reply_to
+            # Safely migrate existing draft attachments to new account's storage directory and ownership
+            from app.modules.emails.models import EmailAttachment
+            from app.core.storage import AttachmentStorageService
 
-        if draft_update.thread_id is not None:
-            thread_stmt = select(EmailThread).where(EmailThread.id == draft_update.thread_id)
-            thread_res = await db.execute(thread_stmt)
-            thread = thread_res.scalars().first()
-            if not thread:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Conversation thread {draft_update.thread_id} not found.",
-                )
-            if thread.company_id != active_account.company_id or thread.email_account_id != active_account.id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Conversation thread does not belong to the selected email account.",
-                )
-            draft.thread_id = thread.id
+            att_stmt = (
+                select(EmailAttachment)
+                .where(EmailAttachment.email_id == draft.id)
+                .order_by(EmailAttachment.id.asc())
+                .with_for_update()
+            )
+            att_res = await db.execute(att_stmt)
+            existing_draft_atts = list(att_res.scalars().all())
 
-        if draft_update.in_reply_to is not None:
-            clean_ref = draft_update.in_reply_to.strip() if draft_update.in_reply_to else None
-            if clean_ref:
-                p_stmt = select(Email).where(
-                    Email.email_account_id == active_account.id,
-                    Email.message_id == clean_ref,
-                )
-                p_res = await db.execute(p_stmt)
-                parent_email = p_res.scalars().first()
-                if not parent_email:
+            if existing_draft_atts:
+                try:
+                    for att in existing_draft_atts:
+                        old_path = att.storage_path
+                        new_path = AttachmentStorageService.copy_attachment_file_to_account(
+                            source_rel_path=old_path,
+                            company_id=draft.company_id,
+                            target_account_id=new_account.id,
+                            original_filename=att.file_name,
+                        )
+                        created_paths.append(new_path)
+                        old_paths_to_check.append(old_path)
+                        att.email_account_id = new_account.id
+                        att.storage_path = new_path
+
+                    await db.flush()
+                except Exception as mig_err:
+                    for p in created_paths:
+                        try:
+                            await AttachmentStorageService.delete_file(p)
+                        except Exception:
+                            pass
+                    logger.error("Failed to migrate draft attachments during account switch: %s", mig_err)
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to migrate draft attachments to the new email account.",
+                    )
+
+        try:
+            # Validate thread reference updates
+            target_thread_id = draft_update.thread_id if draft_update.thread_id is not None else draft.thread_id
+            target_in_reply_to = draft_update.in_reply_to if draft_update.in_reply_to is not None else draft.in_reply_to
+
+            if draft_update.thread_id is not None:
+                thread_stmt = select(EmailThread).where(EmailThread.id == draft_update.thread_id)
+                thread_res = await db.execute(thread_stmt)
+                thread = thread_res.scalars().first()
+                if not thread:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Conversation thread {draft_update.thread_id} not found.",
+                    )
+                if thread.company_id != active_account.company_id or thread.email_account_id != active_account.id:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Referenced in_reply_to email '{clean_ref}' not found in this account.",
+                        detail="Conversation thread does not belong to the selected email account.",
                     )
-                draft.in_reply_to = clean_ref
-            else:
-                draft.in_reply_to = None
+                draft.thread_id = thread.id
 
-        # Apply content updates
-        if draft_update.to is not None:
-            draft.recipients = [str(r) for r in draft_update.to]
-        if draft_update.cc is not None:
-            draft.cc = [str(r) for r in draft_update.cc]
-        if draft_update.bcc is not None:
-            draft.bcc = [str(r) for r in draft_update.bcc]
-        if draft_update.subject is not None:
-            draft.subject = draft_update.subject
-        if draft_update.body_text is not None:
-            draft.body_text = draft_update.body_text
-        if draft_update.body_html is not None:
-            draft.body_html = sanitize_html(draft_update.body_html) if draft_update.body_html else None
-        if not draft.body_text and draft.body_html:
-            clean_txt = re.sub(r"<style[^>]*>[\s\S]*?<\/style>", " ", draft.body_html, flags=re.IGNORECASE)
-            clean_txt = re.sub(r"<script[^>]*>[\s\S]*?<\/script>", " ", clean_txt, flags=re.IGNORECASE)
-            clean_txt = re.sub(r"<[^>]+>", " ", clean_txt)
-            draft.body_text = re.sub(r"\s+", " ", clean_txt).strip() or None
-        if draft_update.reply_to is not None:
-            draft.reply_to = str(draft_update.reply_to) if draft_update.reply_to else None
+            if draft_update.in_reply_to is not None:
+                clean_ref = draft_update.in_reply_to.strip() if draft_update.in_reply_to else None
+                if clean_ref:
+                    p_stmt = select(Email).where(
+                        Email.email_account_id == active_account.id,
+                        Email.message_id == clean_ref,
+                    )
+                    p_res = await db.execute(p_stmt)
+                    parent_email = p_res.scalars().first()
+                    if not parent_email:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Referenced in_reply_to email '{clean_ref}' not found in this account.",
+                        )
+                    draft.in_reply_to = clean_ref
+                else:
+                    draft.in_reply_to = None
 
-        from app.modules.emails.signature_service import SignatureService
-        target_sig = None
-        if draft_update.signature_id is not None:
-            target_sig = await SignatureService.get_signature(
-                db=db,
-                current_user=current_user,
-                signature_id=draft_update.signature_id,
-                company_id=draft.company_id,
-            )
-            if target_sig.company_id != draft.company_id or target_sig.email_account_id != draft.email_account_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Signature does not belong to this draft's email account.",
+            # Apply content updates
+            if draft_update.to is not None:
+                draft.recipients = [str(r) for r in draft_update.to]
+            if draft_update.cc is not None:
+                draft.cc = [str(r) for r in draft_update.cc]
+            if draft_update.bcc is not None:
+                draft.bcc = [str(r) for r in draft_update.bcc]
+            if draft_update.subject is not None:
+                draft.subject = draft_update.subject
+            if draft_update.body_text is not None:
+                draft.body_text = draft_update.body_text
+            if draft_update.body_html is not None:
+                draft.body_html = sanitize_html(draft_update.body_html) if draft_update.body_html else None
+            if not draft.body_text and draft.body_html:
+                clean_txt = re.sub(r"<style[^>]*>[\s\S]*?<\/style>", " ", draft.body_html, flags=re.IGNORECASE)
+                clean_txt = re.sub(r"<script[^>]*>[\s\S]*?<\/script>", " ", clean_txt, flags=re.IGNORECASE)
+                clean_txt = re.sub(r"<[^>]+>", " ", clean_txt)
+                draft.body_text = re.sub(r"\s+", " ", clean_txt).strip() or None
+            if draft_update.reply_to is not None:
+                draft.reply_to = str(draft_update.reply_to) if draft_update.reply_to else None
+
+            from app.modules.emails.signature_service import SignatureService
+            target_sig = None
+            if draft_update.signature_id is not None:
+                target_sig = await SignatureService.get_signature(
+                    db=db,
+                    current_user=current_user,
+                    signature_id=draft_update.signature_id,
+                    company_id=draft.company_id,
                 )
-        else:
-            target_sig = await SignatureService.get_default_signature(
-                db=db,
-                current_user=current_user,
-                account_id=draft.email_account_id,
-                company_id=draft.company_id,
-            )
+                if target_sig.company_id != draft.company_id or target_sig.email_account_id != draft.email_account_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Signature does not belong to this draft's email account.",
+                    )
+            else:
+                target_sig = await SignatureService.get_default_signature(
+                    db=db,
+                    current_user=current_user,
+                    account_id=draft.email_account_id,
+                    company_id=draft.company_id,
+                )
 
-        if target_sig:
-            draft.body_text, draft.body_html = SignatureService.apply_signature_to_content(
-                draft.body_text, draft.body_html, target_sig
-            )
+            if target_sig:
+                draft.body_text, draft.body_html = SignatureService.apply_signature_to_content(
+                    draft.body_text, draft.body_html, target_sig
+                )
 
-        await db.commit()
-        await db.refresh(draft)
+            await db.commit()
+            await db.refresh(draft)
+
+        except Exception:
+            await db.rollback()
+            # Clean up newly copied replacement files on transaction failure
+            for p in created_paths:
+                try:
+                    await AttachmentStorageService.delete_file(p)
+                except Exception:
+                    pass
+            raise
+
+        # Post-commit cleanup: clean up old paths ONLY if no remaining EmailAttachment references them
+        if old_paths_to_check:
+            from app.modules.emails.attachment_service import AttachmentService
+            await AttachmentService.cleanup_unreferenced_storage_paths(db, old_paths_to_check)
+
         logger.info("Updated draft id=%d", draft.id)
         return draft
 

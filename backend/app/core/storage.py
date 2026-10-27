@@ -184,6 +184,39 @@ class AttachmentStorageService:
         return safe_original_name, clean_content_type, total_size, rel_storage_path
 
     @classmethod
+    def copy_attachment_file_to_account(
+        cls,
+        source_rel_path: str,
+        company_id: int,
+        target_account_id: int,
+        original_filename: Optional[str] = None,
+    ) -> str:
+        """Copy an existing attachment file to a target account directory.
+
+        Preserves account-level directory isolation while generating a fresh UUID
+        internal file name.
+
+        Returns:
+            New relative storage path.
+        """
+        source_path = cls.resolve_storage_path(source_rel_path)
+        if not source_path.is_file():
+            raise FileNotFoundError(f"Source attachment file not found at {source_rel_path}")
+
+        unique_id = uuid.uuid4().hex
+        ext = Path(original_filename).suffix if original_filename else source_path.suffix
+        internal_name = f"{unique_id}{ext}"
+
+        dest_dir = cls.get_company_account_dir(company_id, target_account_id)
+        dest_path = dest_dir / internal_name
+
+        import shutil
+        shutil.copyfile(source_path, dest_path)
+
+        base_dir = cls.get_base_upload_dir()
+        return str(dest_path.relative_to(base_dir)).replace("\\", "/")
+
+    @classmethod
     def resolve_storage_path(cls, relative_storage_path: str) -> Path:
         """Resolve a stored relative path safely, ensuring it remains within the upload base dir."""
         base_dir = cls.get_base_upload_dir()

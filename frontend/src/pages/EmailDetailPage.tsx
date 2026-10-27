@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   Reply,
+  ReplyAll,
   CornerUpRight,
   Trash2,
   Star,
@@ -266,6 +267,13 @@ export function EmailDetailPage() {
                 <Button variant="outline" size="sm" className="gap-1.5">
                   <Reply className="h-3.5 w-3.5" />
                   Reply
+                </Button>
+              </Link>
+
+              <Link to={`/compose?reply_to=${email.id}&reply_all=true`}>
+                <Button variant="outline" size="sm" className="gap-1.5" title="Reply to all recipients">
+                  <ReplyAll className="h-3.5 w-3.5" />
+                  Reply All
                 </Button>
               </Link>
 

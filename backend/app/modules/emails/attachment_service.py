@@ -287,9 +287,15 @@ class AttachmentService:
         attachment_id: int,
         email_id: Optional[int] = None,
         company_id: Optional[int] = None,
+        for_update: bool = False,
     ) -> EmailAttachment:
         """Retrieve attachment metadata and verify company/account authorization."""
-        attachment = await db.get(EmailAttachment, attachment_id)
+        if for_update:
+            stmt = select(EmailAttachment).where(EmailAttachment.id == attachment_id).with_for_update()
+            res = await db.execute(stmt)
+            attachment = res.scalars().first()
+        else:
+            attachment = await db.get(EmailAttachment, attachment_id)
         if not attachment:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -424,6 +430,7 @@ class AttachmentService:
             attachment_id=attachment_id,
             email_id=draft_id,
             company_id=company_id,
+            for_update=True,
         )
 
         storage_path = attachment.storage_path
@@ -641,4 +648,208 @@ class AttachmentService:
                 )
 
         return attachments
+
+    @classmethod
+    async def copy_attachments_to_draft(
+        cls,
+        db: AsyncSession,
+        current_user: User,
+        source_email_id: int,
+        draft_id: int,
+        company_id: Optional[int] = None,
+    ) -> List[EmailAttachment]:
+        """Authorized service to copy attachments from a source email into an active draft.
+        
+        Security & Isolation Guarantees:
+        - Rejects cross-company requests (strictly scoped to draft.company_id).
+        - Verifies user company membership and authorization on both source and draft accounts.
+        - For same-account copies: reuses existing storage_path (reference-counted on delete).
+        - For different accounts in same company: copies physical file to destination account directory
+          to preserve account-level directory isolation.
+        - Safe against duplicate calls: skips attachments with matching file_name and file_size on draft.
+        - Safe against partial failure: rolls back DB and deletes newly copied files if any step fails.
+        """
+        # 1. Fetch draft and verify authorization
+        draft = await db.get(Email, draft_id)
+        if not draft:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Draft not found.",
+            )
+
+        if company_id is not None and draft.company_id != company_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Draft not found.",
+            )
+
+        membership = await CompanyService.get_user_membership(
+            db=db,
+            company_id=draft.company_id,
+            user_id=current_user.id,
+        )
+        if not membership:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Draft not found.",
+            )
+
+        if draft.is_deleted:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot copy attachments to a deleted draft.",
+            )
+
+        if draft.status != EmailStatus.DRAFT.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Attachments can only be copied into an active DRAFT email.",
+            )
+
+        draft_account = await EmailAccountService.get_email_account(db, draft.email_account_id)
+        if not draft_account:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Draft email account not found.",
+            )
+
+        has_draft_access = await EmailAccountService.check_user_access(
+            db=db,
+            account=draft_account,
+            user_id=current_user.id,
+            user_role=membership.role,
+        )
+        if not has_draft_access:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to access the destination draft account.",
+            )
+
+        # 2. Fetch source email and verify authorization
+        source_email = await db.get(Email, source_email_id)
+        if not source_email or source_email.company_id != draft.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Source email not found.",
+            )
+
+        source_account = await EmailAccountService.get_email_account(db, source_email.email_account_id)
+        if not source_account:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Source email account not found.",
+            )
+
+        has_source_access = await EmailAccountService.check_user_access(
+            db=db,
+            account=source_account,
+            user_id=current_user.id,
+            user_role=membership.role,
+        )
+        if not has_source_access:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to access the source email account.",
+            )
+
+        # 3. Query source attachments with shared row lock to serialize against concurrent deletions
+        src_stmt = (
+            select(EmailAttachment)
+            .where(EmailAttachment.email_id == source_email_id)
+            .order_by(EmailAttachment.id.asc())
+            .with_for_update(read=True)
+        )
+        src_res = await db.execute(src_stmt)
+        source_attachments = list(src_res.scalars().all())
+
+        if not source_attachments:
+            # Query and return current draft attachments if source has none
+            cur_stmt = select(EmailAttachment).where(EmailAttachment.email_id == draft_id)
+            cur_res = await db.execute(cur_stmt)
+            return list(cur_res.scalars().all())
+
+        # 4. Check existing draft attachments by source_attachment_id to prevent duplicate copying
+        existing_stmt = select(EmailAttachment.source_attachment_id).where(
+            EmailAttachment.email_id == draft_id,
+            EmailAttachment.source_attachment_id.isnot(None),
+        )
+        existing_res = await db.execute(existing_stmt)
+        existing_source_ids = set(existing_res.scalars().all())
+
+        same_account = (draft.email_account_id == source_email.email_account_id)
+        created_files: List[str] = []
+        new_attachments: List[EmailAttachment] = []
+
+        from sqlalchemy.exc import IntegrityError
+
+        try:
+            for src_att in source_attachments:
+                if src_att.id in existing_source_ids:
+                    continue
+
+                if same_account:
+                    # Reuse storage_path; physical file reference is preserved by reference counting
+                    dest_storage_path = src_att.storage_path
+                else:
+                    # Copy physical file to destination account directory to preserve account isolation
+                    dest_storage_path = AttachmentStorageService.copy_attachment_file_to_account(
+                        source_rel_path=src_att.storage_path,
+                        company_id=draft.company_id,
+                        target_account_id=draft.email_account_id,
+                        original_filename=src_att.file_name,
+                    )
+                    created_files.append(dest_storage_path)
+
+                cloned_att = EmailAttachment(
+                    company_id=draft.company_id,
+                    email_account_id=draft.email_account_id,
+                    email_id=draft.id,
+                    source_attachment_id=src_att.id,
+                    file_name=src_att.file_name,
+                    content_type=src_att.content_type,
+                    file_size=src_att.file_size,
+                    storage_path=dest_storage_path,
+                )
+                db.add(cloned_att)
+                new_attachments.append(cloned_att)
+
+            if new_attachments:
+                try:
+                    await db.commit()
+                    for att in new_attachments:
+                        await db.refresh(att)
+
+                    logger.info(
+                        "Copied %d attachment(s) from email %d to draft %d (user_id=%d, company_id=%d)",
+                        len(new_attachments),
+                        source_email_id,
+                        draft_id,
+                        current_user.id,
+                        draft.company_id,
+                    )
+                except IntegrityError:
+                    # Concurrent request already cloned attachments; safely rollback and clean up newly created files
+                    await db.rollback()
+                    for path_str in created_files:
+                        try:
+                            await AttachmentStorageService.delete_file(path_str)
+                        except Exception:
+                            pass
+                    logger.info("Concurrent attachment copy detected on draft id=%d; safely skipped duplicate insertion.", draft_id)
+
+        except Exception as exc:
+            await db.rollback()
+            # Clean up any newly copied files on failure
+            for path_str in created_files:
+                try:
+                    await AttachmentStorageService.delete_file(path_str)
+                except Exception:
+                    pass
+            logger.error("Failed to copy attachments from email %d to draft %d: %s", source_email_id, draft_id, exc)
+            raise
+
+        # Return all attachments currently on the draft
+        full_stmt = select(EmailAttachment).where(EmailAttachment.email_id == draft_id).order_by(EmailAttachment.id.asc())
+        full_res = await db.execute(full_stmt)
+        return list(full_res.scalars().all())
 
