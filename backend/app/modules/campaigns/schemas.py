@@ -262,6 +262,10 @@ class CampaignRecipientRead(BaseModel):
     last_name: Optional[str] = None
     custom_variables: Optional[Dict[str, Any]] = None
     status: CampaignRecipientStatus
+    current_step_number: int = 0
+    next_step_due_at: Optional[datetime] = None
+    stopped_reason: Optional[str] = None
+    replied_at: Optional[datetime] = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

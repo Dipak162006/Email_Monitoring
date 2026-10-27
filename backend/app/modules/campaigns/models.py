@@ -3,13 +3,16 @@ import enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     ForeignKey,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
+    select,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
@@ -35,11 +38,25 @@ class CampaignStatus(str, enum.Enum):
 
 class CampaignRecipientStatus(str, enum.Enum):
     """Lifecycle statuses for a campaign recipient."""
+    # Active sequence lifecycle model
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
+    STOPPED = "STOPPED"
+    # Legacy statuses preserved for backward-compatibility
     PENDING = "PENDING"
     SENT = "SENT"
     FAILED = "FAILED"
     BOUNCED = "BOUNCED"
     SUPPRESSED = "SUPPRESSED"
+
+
+class CampaignRecipientStopReason(str, enum.Enum):
+    """Reason why a campaign recipient was transitioned to STOPPED lifecycle."""
+    REPLIED = "REPLIED"
+    UNSUBSCRIBED = "UNSUBSCRIBED"
+    BOUNCED = "BOUNCED"
+    MANUAL = "MANUAL"
+    CAMPAIGN_CANCELLED = "CAMPAIGN_CANCELLED"
 
 
 class CampaignDeliveryStatus(str, enum.Enum):
@@ -49,6 +66,7 @@ class CampaignDeliveryStatus(str, enum.Enum):
     SENT = "SENT"
     FAILED = "FAILED"
     BOUNCED = "BOUNCED"
+    UNCERTAIN = "UNCERTAIN"
 
 
 class SuppressionReason(str, enum.Enum):
@@ -148,9 +166,58 @@ class Campaign(Base):
         order_by="CampaignAttachment.id",
         lazy="selectin",
     )
+    steps: Mapped[List["CampaignStep"]] = relationship(
+        "CampaignStep",
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+        order_by="CampaignStep.step_number",
+        lazy="selectin",
+    )
 
     def __repr__(self) -> str:
         return f"<Campaign id={self.id} company_id={self.company_id} name='{self.name}' status='{self.status}'>"
+
+
+class CampaignStep(Base):
+    """Sequence step within a campaign defining template content and execution delay."""
+    __tablename__ = "campaign_steps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    campaign_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    step_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    delay_hours: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    body_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    body_html: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "step_number", name="uq_campaign_step_number"),
+    )
+
+    # Relationships
+    campaign: Mapped["Campaign"] = relationship("Campaign", back_populates="steps")
+    deliveries: Mapped[List["CampaignDelivery"]] = relationship("CampaignDelivery", back_populates="step")
+
+    def __repr__(self) -> str:
+        return f"<CampaignStep id={self.id} campaign_id={self.campaign_id} step_number={self.step_number}>"
 
 
 class CampaignRecipient(Base):
@@ -171,10 +238,14 @@ class CampaignRecipient(Base):
 
     status: Mapped[str] = mapped_column(
         String(50),
-        default=CampaignRecipientStatus.PENDING.value,
+        default=CampaignRecipientStatus.ACTIVE.value,
         nullable=False,
         index=True,
     )
+    current_step_number: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_step_due_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    stopped_reason: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    replied_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -219,6 +290,12 @@ class CampaignDelivery(Base):
         nullable=False,
         index=True,
     )
+    step_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("campaign_steps.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
     email_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey("emails.id", ondelete="SET NULL"),
@@ -253,17 +330,56 @@ class CampaignDelivery(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("campaign_id", "recipient_id", name="uq_campaign_delivery_recipient"),
+        UniqueConstraint("campaign_id", "recipient_id", "step_id", name="uq_campaign_delivery_recipient_step"),
     )
 
     # Relationships
     campaign: Mapped["Campaign"] = relationship("Campaign", back_populates="deliveries")
     recipient: Mapped["CampaignRecipient"] = relationship("CampaignRecipient", back_populates="deliveries")
+    step: Mapped["CampaignStep"] = relationship("CampaignStep", back_populates="deliveries")
     email: Mapped[Optional["Email"]] = relationship("Email")
     thread: Mapped[Optional["EmailThread"]] = relationship("EmailThread")
 
     def __repr__(self) -> str:
-        return f"<CampaignDelivery id={self.id} campaign_id={self.campaign_id} recipient_id={self.recipient_id} status='{self.status}'>"
+        return f"<CampaignDelivery id={self.id} campaign_id={self.campaign_id} recipient_id={self.recipient_id} step_id={self.step_id} status='{self.status}'>"
+
+
+@event.listens_for(CampaignDelivery, "before_insert")
+def _set_default_campaign_delivery_step(mapper, connection, target):
+    """Automatically associate delivery with Step 1 of the campaign if step_id was omitted.
+    
+    Guarantees seamless backward compatibility with existing send and test workflows
+    while strictly preserving NOT NULL step_id constraints and unique indexes.
+    """
+    if target.step_id is None and target.campaign_id is not None:
+        step_id = connection.execute(
+            select(CampaignStep.id).where(
+                CampaignStep.campaign_id == target.campaign_id,
+                CampaignStep.step_number == 1,
+            )
+        ).scalar()
+        if not step_id:
+            camp_row = connection.execute(
+                select(Campaign.subject, Campaign.body_text, Campaign.body_html).where(
+                    Campaign.id == target.campaign_id
+                )
+            ).first()
+            subject = (camp_row.subject if camp_row and camp_row.subject else "Campaign Step 1")
+            b_text = camp_row.body_text if camp_row else None
+            b_html = camp_row.body_html if camp_row else None
+            ins_res = connection.execute(
+                CampaignStep.__table__.insert().values(
+                    campaign_id=target.campaign_id,
+                    step_number=1,
+                    delay_hours=0,
+                    subject=subject,
+                    body_text=b_text,
+                    body_html=b_html,
+                    is_active=True,
+                )
+            )
+            step_id = ins_res.inserted_primary_key[0]
+        target.step_id = step_id
 
 
 class SuppressionEntry(Base):

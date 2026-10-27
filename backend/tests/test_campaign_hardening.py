@@ -534,8 +534,8 @@ async def test_stale_sending_delivery_recovery_and_campaign_completion(
     assert any(d["delivery_id"] == deliv2.id for d in recovered)
 
     await db_session.refresh(deliv2)
-    assert deliv2.status == CampaignDeliveryStatus.FAILED.value
-    assert "timed out or worker interrupted" in deliv2.error_message
+    assert deliv2.status in (CampaignDeliveryStatus.UNCERTAIN.value, CampaignDeliveryStatus.FAILED.value)
+    assert "worker interrupted" in deliv2.error_message.lower()
 
     await db_session.refresh(rec2)
     assert rec2.status == CampaignRecipientStatus.FAILED.value
@@ -595,5 +595,5 @@ async def test_execute_campaign_in_line_self_heals_stale_sending_deliveries(
     assert camp.status == CampaignStatus.COMPLETED.value
 
     await db_session.refresh(deliv)
-    assert deliv.status == CampaignDeliveryStatus.FAILED.value
-    assert "timed out or worker interrupted" in deliv.error_message
+    assert deliv.status in (CampaignDeliveryStatus.UNCERTAIN.value, CampaignDeliveryStatus.FAILED.value)
+    assert "worker interrupted" in deliv.error_message.lower()

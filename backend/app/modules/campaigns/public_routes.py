@@ -11,6 +11,7 @@ from app.core.security import decode_unsubscribe_token
 from app.modules.campaigns.models import (
     CampaignRecipient,
     CampaignRecipientStatus,
+    CampaignRecipientStopReason,
     SuppressionEntry,
     SuppressionReason,
 )
@@ -81,16 +82,20 @@ async def _handle_unsubscribe(token: str, db: AsyncSession) -> dict:
         )
         db.add(entry)
 
-    # 2. If campaign_id provided, mark any PENDING recipient as SUPPRESSED
+    # 2. If campaign_id provided, mark any PENDING or ACTIVE recipient as STOPPED (UNSUBSCRIBED)
     if campaign_id:
         recip_stmt = select(CampaignRecipient).where(
             CampaignRecipient.campaign_id == campaign_id,
             CampaignRecipient.email == norm_email,
-            CampaignRecipient.status == CampaignRecipientStatus.PENDING.value,
+            CampaignRecipient.status.in_([
+                CampaignRecipientStatus.PENDING.value,
+                CampaignRecipientStatus.ACTIVE.value,
+            ]),
         )
         recip_res = await db.execute(recip_stmt)
         for r in recip_res.scalars().all():
             r.status = CampaignRecipientStatus.SUPPRESSED.value
+            r.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
 
     await db.commit()
     return {"status": "unsubscribed", "email": norm_email, "company_id": company_id}

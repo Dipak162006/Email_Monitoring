@@ -16,6 +16,9 @@ from app.modules.campaigns.models import (
     CampaignDelivery,
     CampaignDeliveryStatus,
     CampaignRecipient,
+    CampaignRecipientStatus,
+    CampaignRecipientStopReason,
+    CampaignStep,
     CampaignStatus,
 )
 from app.modules.campaigns.schemas import (
@@ -114,6 +117,7 @@ class CampaignService:
         
         Requires OWNER or ADMIN privileges.
         Validates company ownership and active state of the sender EmailAccount.
+        Automatically instantiates Step 1 for the campaign sequence.
         """
         # Validate sender email account
         await CampaignService.get_email_account_for_company(
@@ -134,6 +138,20 @@ class CampaignService:
             created_by_user_id=creator_user_id,
         )
         db.add(campaign)
+        await db.flush()
+
+        # Create authoritative Step 1 for the campaign sequence
+        step_1 = CampaignStep(
+            campaign_id=campaign.id,
+            step_number=1,
+            delay_hours=0,
+            subject=campaign.subject or "Campaign Step 1",
+            body_text=campaign.body_text,
+            body_html=campaign.body_html,
+            is_active=True,
+        )
+        db.add(step_1)
+
         await db.commit()
         return await CampaignService.get_campaign(db, company_id, campaign.id)
 
@@ -236,6 +254,32 @@ class CampaignService:
 
         for field, value in update_data.items():
             setattr(campaign, field, value)
+
+        # Synchronize authoritative Step 1 if content fields are updated
+        if any(k in update_data for k in ("subject", "body_text", "body_html")):
+            step_stmt = select(CampaignStep).where(
+                CampaignStep.campaign_id == campaign.id,
+                CampaignStep.step_number == 1,
+            )
+            step_1 = (await db.execute(step_stmt)).scalar_one_or_none()
+            if step_1:
+                if "subject" in update_data and update_data["subject"] is not None:
+                    step_1.subject = update_data["subject"]
+                if "body_text" in update_data:
+                    step_1.body_text = update_data["body_text"]
+                if "body_html" in update_data:
+                    step_1.body_html = update_data["body_html"]
+            else:
+                new_step_1 = CampaignStep(
+                    campaign_id=campaign.id,
+                    step_number=1,
+                    delay_hours=0,
+                    subject=campaign.subject or "Campaign Step 1",
+                    body_text=campaign.body_text,
+                    body_html=campaign.body_html,
+                    is_active=True,
+                )
+                db.add(new_step_1)
 
         await db.commit()
         return await CampaignService.get_campaign(db, company_id, campaign.id)
@@ -475,7 +519,23 @@ class CampaignService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Cannot cancel campaign with status '{campaign.status}'. Only SCHEDULED, QUEUED, RUNNING, or PAUSED campaigns can be cancelled.",
             )
-        return await CampaignService.transition_state(db, company_id, campaign_id, CampaignStatus.CANCELLED)
+        campaign = await CampaignService.transition_state(db, company_id, campaign_id, CampaignStatus.CANCELLED)
+        
+        # Safely transition any pending/active recipients to STOPPED without touching already stopped or completed recipients
+        recip_stmt = select(CampaignRecipient).where(
+            CampaignRecipient.campaign_id == campaign_id,
+            CampaignRecipient.status.in_([
+                CampaignRecipientStatus.ACTIVE.value,
+                CampaignRecipientStatus.PENDING.value,
+            ]),
+        )
+        recips_res = await db.execute(recip_stmt)
+        for recip in recips_res.scalars().all():
+            recip.status = CampaignRecipientStatus.STOPPED.value
+            recip.stopped_reason = CampaignRecipientStopReason.CAMPAIGN_CANCELLED.value
+
+        await db.commit()
+        return campaign
 
     @staticmethod
     async def get_recipient_count(db: AsyncSession, campaign_id: int) -> int:
@@ -489,15 +549,25 @@ class CampaignService:
 
     @staticmethod
     async def get_recipient_status_counts(db: AsyncSession, campaign_id: int) -> dict[str, int]:
-        """Execute a single indexed GROUP BY query on CampaignRecipient.status for campaign_id.
+        """Execute a single indexed query on CampaignRecipient for campaign_id.
         
         Returns a dictionary containing total recipient count and breakdown by status:
-        total, pending_count, sent_count, failed_count, bounced_count, suppressed_count.
+        total, pending_count, sent_count, failed_count, bounced_count, suppressed_count,
+        active_count, completed_count, stopped_count, uncertain_count.
         """
         stmt = (
-            select(CampaignRecipient.status, func.count(CampaignRecipient.id))
+            select(
+                CampaignRecipient.status,
+                CampaignRecipient.stopped_reason,
+                CampaignRecipient.current_step_number,
+                func.count(CampaignRecipient.id),
+            )
             .where(CampaignRecipient.campaign_id == campaign_id)
-            .group_by(CampaignRecipient.status)
+            .group_by(
+                CampaignRecipient.status,
+                CampaignRecipient.stopped_reason,
+                CampaignRecipient.current_step_number,
+            )
         )
         res = await db.execute(stmt)
         rows = res.all()
@@ -508,14 +578,45 @@ class CampaignService:
             "failed_count": 0,
             "bounced_count": 0,
             "suppressed_count": 0,
+            "active_count": 0,
+            "completed_count": 0,
+            "stopped_count": 0,
+            "uncertain_count": 0,
         }
-        for status_val, count_val in rows:
+        for status_val, stopped_reason, step_num, count_val in rows:
             c = count_val or 0
             counts["total"] += c
             val_str = status_val.value if hasattr(status_val, "value") else str(status_val)
-            status_key = f"{val_str.lower()}_count"
-            if status_key in counts:
-                counts[status_key] = c
+
+            if val_str == "ACTIVE":
+                counts["active_count"] += c
+                if step_num == 0:
+                    counts["pending_count"] += c
+            elif val_str == "COMPLETED":
+                counts["completed_count"] += c
+                counts["sent_count"] += c
+            elif val_str == "STOPPED":
+                counts["stopped_count"] += c
+                if stopped_reason == "BOUNCED":
+                    counts["bounced_count"] += c
+                elif stopped_reason in ("UNSUBSCRIBED", "MANUAL"):
+                    counts["suppressed_count"] += c
+                elif stopped_reason == "CAMPAIGN_CANCELLED":
+                    counts["failed_count"] += c
+            else:
+                # Legacy fallback
+                status_key = f"{val_str.lower()}_count"
+                if status_key in counts:
+                    counts[status_key] += c
+
+        # Also tally uncertain deliveries if any exist
+        deliv_uncertain_stmt = select(func.count(CampaignDelivery.id)).where(
+            CampaignDelivery.campaign_id == campaign_id,
+            CampaignDelivery.status == CampaignDeliveryStatus.UNCERTAIN.value,
+        )
+        uncertain_c = await db.scalar(deliv_uncertain_stmt) or 0
+        counts["uncertain_count"] = uncertain_c
+
         return counts
 
     @staticmethod
@@ -831,6 +932,28 @@ class CampaignService:
                 storage_path=d_att.storage_path,
             )
             db.add(camp_att)
+
+        # Synchronize Step 1 with imported draft content
+        step_stmt = select(CampaignStep).where(
+            CampaignStep.campaign_id == campaign.id,
+            CampaignStep.step_number == 1,
+        )
+        step_1 = (await db.execute(step_stmt)).scalar_one_or_none()
+        if step_1:
+            step_1.subject = campaign.subject or "Campaign Step 1"
+            step_1.body_html = campaign.body_html
+            step_1.body_text = campaign.body_text
+        else:
+            new_step_1 = CampaignStep(
+                campaign_id=campaign.id,
+                step_number=1,
+                delay_hours=0,
+                subject=campaign.subject or "Campaign Step 1",
+                body_text=campaign.body_text,
+                body_html=campaign.body_html,
+                is_active=True,
+            )
+            db.add(new_step_1)
 
         await db.commit()
         await db.refresh(campaign)

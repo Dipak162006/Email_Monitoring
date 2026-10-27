@@ -15,6 +15,8 @@ from app.modules.campaigns.models import (
     CampaignDeliveryStatus,
     CampaignRecipient,
     CampaignRecipientStatus,
+    CampaignRecipientStopReason,
+    CampaignStep,
     CampaignStatus,
 )
 from app.core.config import settings
@@ -320,11 +322,35 @@ class CampaignDeliveryService:
         # Phase 2: Identify Eligible Recipients & Suppressions
         # ---------------------------------------------------------------------
         async with db_factory() as db:
+            # Ensure authoritative Step 1 exists for this campaign
+            step_stmt = select(CampaignStep).where(
+                CampaignStep.campaign_id == campaign_id,
+                CampaignStep.step_number == 1,
+            )
+            step_1 = (await db.execute(step_stmt)).scalar_one_or_none()
+            if not step_1:
+                camp_obj = await db.get(Campaign, campaign_id)
+                step_1 = CampaignStep(
+                    campaign_id=campaign_id,
+                    step_number=1,
+                    delay_hours=0,
+                    subject=camp_obj.subject if camp_obj else "Campaign Step 1",
+                    body_text=camp_obj.body_text if camp_obj else None,
+                    body_html=camp_obj.body_html if camp_obj else None,
+                    is_active=True,
+                )
+                db.add(step_1)
+                await db.flush()
+
             recip_stmt = (
                 select(CampaignRecipient)
                 .where(
                     CampaignRecipient.campaign_id == campaign_id,
-                    CampaignRecipient.status == CampaignRecipientStatus.PENDING.value,
+                    CampaignRecipient.status.in_([
+                        CampaignRecipientStatus.ACTIVE.value,
+                        CampaignRecipientStatus.PENDING.value,
+                    ]),
+                    CampaignRecipient.current_step_number == 0,
                 )
                 .order_by(CampaignRecipient.id.asc())
             )
@@ -346,10 +372,11 @@ class CampaignDeliveryService:
                 stale_minutes=10,
             )
 
-            # Discover all existing deliveries for this campaign to prevent duplicating
-            # already SENT, BOUNCED, FAILED, or in-flight SENDING deliveries on resume
+            # Discover all existing deliveries for this campaign and step to prevent duplicating
+            # already SENT, BOUNCED, FAILED, UNCERTAIN, or in-flight SENDING deliveries on resume
             deliv_stmt = select(CampaignDelivery.recipient_id, CampaignDelivery.status).where(
                 CampaignDelivery.campaign_id == campaign_id,
+                CampaignDelivery.step_id == step_1.id,
             )
             deliv_res = await db.execute(deliv_stmt)
             existing_deliveries = {row[0]: row[1] for row in deliv_res.all()}
@@ -361,21 +388,32 @@ class CampaignDeliveryService:
                 if norm_email in suppressed_emails:
                     logger.info("Recipient %d (%s) is suppressed. Skipping delivery.", r.id, norm_email)
                     r.status = CampaignRecipientStatus.SUPPRESSED.value
+                    r.stopped_reason = "UNSUBSCRIBED"
+                    r.next_step_due_at = None
                     suppressed_count += 1
                     continue
 
                 existing_status = existing_deliveries.get(r.id)
                 if existing_status == CampaignDeliveryStatus.SENT.value:
                     logger.info("Recipient %d (%s) already has a SENT delivery. Skipping.", r.id, norm_email)
-                    if r.status != CampaignRecipientStatus.SENT.value:
-                        r.status = CampaignRecipientStatus.SENT.value
-                        suppressed_count += 1
+                    r.status = CampaignRecipientStatus.SENT.value
+                    r.current_step_number = 1
+                    r.next_step_due_at = None
+                    suppressed_count += 1
                     continue
                 if existing_status == CampaignDeliveryStatus.BOUNCED.value:
                     logger.info("Recipient %d (%s) already has a BOUNCED delivery. Skipping.", r.id, norm_email)
-                    if r.status != CampaignRecipientStatus.BOUNCED.value:
-                        r.status = CampaignRecipientStatus.BOUNCED.value
-                        suppressed_count += 1
+                    r.status = CampaignRecipientStatus.BOUNCED.value
+                    r.stopped_reason = "BOUNCED"
+                    r.next_step_due_at = None
+                    suppressed_count += 1
+                    continue
+                if existing_status == CampaignDeliveryStatus.UNCERTAIN.value:
+                    logger.info("Recipient %d (%s) delivery outcome is UNCERTAIN. Skipping automatic resend.", r.id, norm_email)
+                    r.status = CampaignRecipientStatus.FAILED.value
+                    r.stopped_reason = "MANUAL"
+                    r.next_step_due_at = None
+                    suppressed_count += 1
                     continue
                 if existing_status == CampaignDeliveryStatus.FAILED.value:
                     logger.info("Recipient %d (%s) already has a FAILED delivery. Retries handled by retry worker. Skipping.", r.id, norm_email)
@@ -461,6 +499,7 @@ class CampaignDeliveryService:
                 deliv_stmt = select(CampaignDelivery).where(
                     CampaignDelivery.campaign_id == campaign_id,
                     CampaignDelivery.recipient_id == recipient.id,
+                    CampaignDelivery.step_id == step_1.id,
                 ).with_for_update()
                 deliv_res = await db.execute(deliv_stmt)
                 delivery = deliv_res.scalar_one_or_none()
@@ -476,6 +515,7 @@ class CampaignDeliveryService:
                     delivery = CampaignDelivery(
                         campaign_id=campaign.id,
                         recipient_id=recipient.id,
+                        step_id=step_1.id,
                         status=CampaignDeliveryStatus.SENDING.value,
                         attempt_count=1,
                         last_attempt_at=current_attempt_time,
@@ -487,6 +527,7 @@ class CampaignDeliveryService:
                         CampaignDeliveryStatus.BOUNCED.value,
                         CampaignDeliveryStatus.FAILED.value,
                         CampaignDeliveryStatus.SENDING.value,
+                        CampaignDeliveryStatus.UNCERTAIN.value,
                     ):
                         skipped_count += 1
                         continue
@@ -582,7 +623,9 @@ class CampaignDeliveryService:
                         delivery.message_id = sent_email_record.message_id
                         delivery.error_message = None
 
+                        recipient.current_step_number = 1
                         recipient.status = CampaignRecipientStatus.SENT.value
+                        recipient.next_step_due_at = None
                         sent_count += 1
                     else:
                         delivery.status = CampaignDeliveryStatus.FAILED.value
@@ -926,6 +969,10 @@ class CampaignDeliveryService:
                 logger.info("Delivery %d is already BOUNCED. Skipping retry.", delivery_id)
                 return {"status": "SKIPPED", "delivery_id": delivery_id, "reason": "Delivery already BOUNCED"}
 
+            if delivery.status == CampaignDeliveryStatus.UNCERTAIN.value:
+                logger.warning("Delivery %d has UNCERTAIN status. Automatic retry is suspended to prevent duplicate messages.", delivery_id)
+                return {"status": "SKIPPED", "delivery_id": delivery_id, "reason": "Delivery outcome is UNCERTAIN; automatic retry suspended"}
+
             if delivery.status != CampaignDeliveryStatus.FAILED.value:
                 logger.info("Delivery %d has non-retryable status '%s'. Skipping retry.", delivery_id, delivery.status)
                 return {"status": "SKIPPED", "delivery_id": delivery_id, "reason": f"Delivery in non-retryable state '{delivery.status}'"}
@@ -1129,12 +1176,184 @@ class CampaignDeliveryService:
         recipient = recip_res.scalar_one_or_none()
         if recipient:
             recipient.status = CampaignRecipientStatus.BOUNCED.value
+            recipient.stopped_reason = CampaignRecipientStopReason.BOUNCED.value
             await SuppressionService.record_bounce_suppression(
                 db=db,
                 company_id=company_id,
                 email=recipient.email,
             )
         return delivery
+
+    @classmethod
+    async def reconcile_stale_delivery(
+        cls,
+        db: AsyncSession,
+        delivery: CampaignDelivery,
+        stale_minutes: int = 10,
+    ) -> Dict[str, Any]:
+        """Reconcile a single stale SENDING delivery against persisted Email records.
+        
+        Evaluates strong identifiers:
+        1. Direct delivery.email_id match
+        2. Direct delivery.message_id match
+        3. Scoped candidate query (Campaign account + company + OUTGOING + attempt time-window + recipient)
+        
+        Outcomes:
+        - Confirmed SENT: delivery reconciled to SENT with audit identifiers. Recipient marked COMPLETED.
+        - Confirmed FAILED: delivery reconciled to FAILED with error message. Safe to retry if error transient.
+        - UNCERTAIN: No audit record found, or multiple ambiguous candidate matches found.
+          Delivery marked UNCERTAIN. Automatic retry is suspended to prevent duplicate sends.
+        """
+        from app.modules.emails.models import Email, EmailStatus, EmailDirection
+        from app.modules.campaigns.models import (
+            Campaign,
+            CampaignRecipient,
+            CampaignRecipientStatus,
+            CampaignDeliveryStatus,
+        )
+
+        campaign = await db.get(Campaign, delivery.campaign_id)
+        recipient = await db.get(CampaignRecipient, delivery.recipient_id) if delivery.recipient_id else None
+
+        matched_email: Optional[Email] = None
+        reconciliation_reason = ""
+
+        # 1. Direct email_id match
+        if delivery.email_id:
+            matched_email = await db.get(Email, delivery.email_id)
+            if matched_email:
+                reconciliation_reason = f"Direct email_id={delivery.email_id} audit match"
+
+        # 2. Direct message_id match
+        if not matched_email and delivery.message_id and campaign:
+            msg_stmt = select(Email).where(
+                Email.message_id == delivery.message_id,
+                Email.company_id == campaign.company_id,
+            )
+            matched_email = (await db.execute(msg_stmt)).scalars().first()
+            if matched_email:
+                reconciliation_reason = f"Message-ID={delivery.message_id} audit match"
+
+        # 3. Scoped candidate query (Account + Company + Direction + Time-window + Recipient)
+        if not matched_email and campaign and recipient and delivery.last_attempt_at:
+            time_min = delivery.last_attempt_at - timedelta(minutes=2)
+            time_max = delivery.last_attempt_at + timedelta(minutes=stale_minutes + 5)
+
+            cand_stmt = select(Email).where(
+                Email.company_id == campaign.company_id,
+                Email.email_account_id == campaign.email_account_id,
+                Email.direction == EmailDirection.OUTGOING.value,
+                Email.created_at >= time_min,
+                Email.created_at <= time_max,
+            )
+            if delivery.thread_id:
+                cand_stmt = cand_stmt.where(Email.thread_id == delivery.thread_id)
+
+            cand_res = await db.execute(cand_stmt)
+            all_cands = cand_res.scalars().all()
+
+            norm_recip = recipient.email.strip().lower()
+            matching_cands = []
+            for em in all_cands:
+                recip_list = [str(r).strip().lower() for r in (em.recipients or [])]
+                if norm_recip in recip_list:
+                    matching_cands.append(em)
+
+            if len(matching_cands) == 1:
+                matched_email = matching_cands[0]
+                reconciliation_reason = f"Single candidate email id={matched_email.id} matched recipient and attempt window"
+            elif len(matching_cands) > 1:
+                delivery.status = CampaignDeliveryStatus.UNCERTAIN.value
+                delivery.error_message = (
+                    f"Ambiguous reconciliation: {len(matching_cands)} matching Email audit records "
+                    f"({[e.id for e in matching_cands]}) found within attempt window. Automatic retry suspended."
+                )
+                if recipient and recipient.status in (
+                    CampaignRecipientStatus.PENDING.value,
+                    CampaignRecipientStatus.ACTIVE.value,
+                ):
+                    recipient.status = CampaignRecipientStatus.FAILED.value
+
+                logger.warning(
+                    "Stale delivery %d marked UNCERTAIN: multiple candidate emails matched (%s)",
+                    delivery.id,
+                    delivery.error_message,
+                )
+                return {
+                    "delivery_id": delivery.id,
+                    "status": CampaignDeliveryStatus.UNCERTAIN.value,
+                    "reason": delivery.error_message,
+                }
+
+        # Handle Reconciliation Outcome
+        if matched_email:
+            if matched_email.status == EmailStatus.SENT.value:
+                delivery.status = CampaignDeliveryStatus.SENT.value
+                delivery.email_id = matched_email.id
+                delivery.thread_id = matched_email.thread_id
+                delivery.message_id = matched_email.message_id
+                delivery.sent_at = matched_email.sent_at or matched_email.created_at
+                delivery.error_message = None
+
+                if recipient:
+                    recipient.status = CampaignRecipientStatus.SENT.value
+                    recipient.current_step_number = 1
+
+                logger.info(
+                    "Stale delivery %d reconciled to SENT via %s",
+                    delivery.id,
+                    reconciliation_reason,
+                )
+                return {
+                    "delivery_id": delivery.id,
+                    "status": CampaignDeliveryStatus.SENT.value,
+                    "email_id": matched_email.id,
+                    "reason": reconciliation_reason,
+                }
+            else:
+                delivery.status = CampaignDeliveryStatus.FAILED.value
+                delivery.email_id = matched_email.id
+                delivery.thread_id = matched_email.thread_id
+                delivery.message_id = matched_email.message_id
+                delivery.error_message = matched_email.error_message or "Email transmission failed before SMTP completion"
+
+                if recipient:
+                    recipient.status = CampaignRecipientStatus.FAILED.value
+
+                logger.info(
+                    "Stale delivery %d reconciled to FAILED via %s (error: %s)",
+                    delivery.id,
+                    reconciliation_reason,
+                    delivery.error_message,
+                )
+                return {
+                    "delivery_id": delivery.id,
+                    "status": CampaignDeliveryStatus.FAILED.value,
+                    "email_id": matched_email.id,
+                    "reason": reconciliation_reason,
+                }
+        else:
+            # No Email record found at all: worker interrupted during transport/MTA boundary
+            delivery.status = CampaignDeliveryStatus.UNCERTAIN.value
+            delivery.error_message = (
+                f"Worker interrupted while sending (> {stale_minutes}m in SENDING). "
+                "No persisted Email audit record found. SMTP outcome uncertain; automatic retry suspended."
+            )
+            if recipient and recipient.status in (
+                CampaignRecipientStatus.PENDING.value,
+                CampaignRecipientStatus.ACTIVE.value,
+            ):
+                recipient.status = CampaignRecipientStatus.FAILED.value
+
+            logger.warning(
+                "Stale delivery %d marked UNCERTAIN: no audit record found in database",
+                delivery.id,
+            )
+            return {
+                "delivery_id": delivery.id,
+                "status": CampaignDeliveryStatus.UNCERTAIN.value,
+                "reason": delivery.error_message,
+            }
 
     @classmethod
     async def recover_stale_deliveries_for_campaign(
@@ -1144,10 +1363,9 @@ class CampaignDeliveryService:
         now_utc: Optional[datetime] = None,
         stale_minutes: int = 10,
     ) -> int:
-        """Recover stale SENDING deliveries for a specific campaign.
+        """Recover stale SENDING deliveries for a specific campaign using evidence-based reconciliation.
         
-        Transitions deliveries older than stale_minutes from SENDING to FAILED,
-        and transitions linked PENDING recipients to FAILED.
+        Evaluates audit records and transitions to SENT, FAILED, or UNCERTAIN.
         """
         if now_utc is None:
             now_utc = datetime.now(timezone.utc)
@@ -1169,23 +1387,12 @@ class CampaignDeliveryService:
         stale_deliveries = list(stale_res.scalars().all())
 
         for deliv in stale_deliveries:
-            deliv.status = CampaignDeliveryStatus.FAILED.value
-            deliv.error_message = "Delivery timed out or worker interrupted while sending."
-            if deliv.recipient_id:
-                recip_res = await db.execute(
-                    select(CampaignRecipient).where(
-                        CampaignRecipient.id == deliv.recipient_id,
-                        CampaignRecipient.status == CampaignRecipientStatus.PENDING.value,
-                    )
-                )
-                recip = recip_res.scalar_one_or_none()
-                if recip:
-                    recip.status = CampaignRecipientStatus.FAILED.value
+            await cls.reconcile_stale_delivery(db=db, delivery=deliv, stale_minutes=stale_minutes)
 
         if stale_deliveries:
             await db.commit()
             logger.info(
-                "Recovered %d stale SENDING deliveries for campaign %d (cutoff: %s)",
+                "Processed %d stale SENDING deliveries for campaign %d (cutoff: %s)",
                 len(stale_deliveries),
                 campaign_id,
                 stale_cutoff.isoformat(),

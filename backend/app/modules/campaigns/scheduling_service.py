@@ -314,25 +314,20 @@ class CampaignSchedulingService:
             res = await db.execute(stmt)
             stale_deliveries = list(res.scalars().all())
 
+            from app.modules.campaigns.delivery_service import CampaignDeliveryService
+
             for deliv in stale_deliveries:
-                deliv.status = CampaignDeliveryStatus.FAILED.value
-                deliv.error_message = "Delivery timed out or worker interrupted while sending."
-
-                # Update associated CampaignRecipient if still in PENDING
-                if deliv.recipient_id:
-                    recip_stmt = select(CampaignRecipient).where(
-                        CampaignRecipient.id == deliv.recipient_id,
-                        CampaignRecipient.status == CampaignRecipientStatus.PENDING.value,
-                    )
-                    recip_res = await db.execute(recip_stmt)
-                    recip = recip_res.scalar_one_or_none()
-                    if recip:
-                        recip.status = CampaignRecipientStatus.FAILED.value
-
+                outcome = await CampaignDeliveryService.reconcile_stale_delivery(
+                    db=db,
+                    delivery=deliv,
+                    stale_minutes=stale_minutes,
+                )
                 recovered.append({
                     "delivery_id": deliv.id,
                     "campaign_id": deliv.campaign_id,
                     "recipient_id": deliv.recipient_id,
+                    "status": outcome.get("status", deliv.status),
+                    "reason": outcome.get("reason"),
                     "last_attempt_at": deliv.last_attempt_at.isoformat() if deliv.last_attempt_at else None,
                 })
 
