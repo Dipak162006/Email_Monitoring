@@ -52,6 +52,7 @@ import type {
 import type {
   Campaign,
   CampaignDetail,
+  CampaignAnalyticsResponse,
   CampaignCreatePayload,
   CampaignUpdatePayload,
   CampaignSchedulePayload,
@@ -63,6 +64,8 @@ import type {
   CampaignRecipientBulkCreateResponse,
   CampaignRecipientImportResponse,
   CampaignRecipientListParams,
+  CampaignRecipientReschedulePayload,
+  CampaignRecipientStopPayload,
   CampaignPreflightResponse,
   CampaignDispatchResponse,
   CampaignAttachment,
@@ -129,7 +132,17 @@ export class RequestError extends Error {
     super(message);
     this.name = "RequestError";
     this.status = status;
-    this.detail = detail;
+    if (typeof detail === "string" && detail.trim() && detail !== "[object Object]") {
+      this.detail = detail;
+    } else if (Array.isArray(detail)) {
+      this.detail = detail
+        .map((e) => (typeof e === "object" && e?.msg ? e.msg : typeof e === "string" ? e : JSON.stringify(e)))
+        .join(", ");
+    } else if (detail && typeof detail === "object") {
+      this.detail = (detail as Record<string, unknown>).message || (detail as Record<string, unknown>).msg || message;
+    } else {
+      this.detail = message;
+    }
   }
 }
 
@@ -836,6 +849,15 @@ export const campaignsApi = {
     );
   },
 
+  getCampaignAnalytics: async (
+    companyId: number,
+    campaignId: number
+  ): Promise<CampaignAnalyticsResponse> => {
+    return apiClient.get<CampaignAnalyticsResponse>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/analytics`
+    );
+  },
+
   createCampaign: async (
     companyId: number,
     payload: CampaignCreatePayload
@@ -922,6 +944,24 @@ export const campaignsApi = {
     );
   },
 
+  archiveCampaign: async (
+    companyId: number,
+    campaignId: number
+  ): Promise<Campaign> => {
+    return apiClient.post<Campaign>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/archive`
+    );
+  },
+
+  restoreCampaign: async (
+    companyId: number,
+    campaignId: number
+  ): Promise<Campaign> => {
+    return apiClient.post<Campaign>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/restore`
+    );
+  },
+
   listRecipients: async (
     companyId: number,
     campaignId: number,
@@ -989,6 +1029,84 @@ export const campaignsApi = {
   ): Promise<void> => {
     return apiClient.delete<void>(
       `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/${recipientId}`
+    );
+  },
+
+  stopRecipient: async (
+    companyId: number,
+    campaignId: number,
+    recipientId: number,
+    payload?: CampaignRecipientStopPayload
+  ): Promise<CampaignRecipient> => {
+    return apiClient.post<CampaignRecipient>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/${recipientId}/stop`,
+      payload || {}
+    );
+  },
+
+  skipRecipientNextStep: async (
+    companyId: number,
+    campaignId: number,
+    recipientId: number
+  ): Promise<CampaignRecipient> => {
+    return apiClient.post<CampaignRecipient>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/${recipientId}/skip`
+    );
+  },
+
+  rescheduleRecipient: async (
+    companyId: number,
+    campaignId: number,
+    recipientId: number,
+    payload: CampaignRecipientReschedulePayload
+  ): Promise<CampaignRecipient> => {
+    return apiClient.post<CampaignRecipient>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/${recipientId}/reschedule`,
+      payload
+    );
+  },
+
+  getCampaignTags: async (
+    companyId: number,
+    campaignId: number
+  ): Promise<string[]> => {
+    return apiClient.get<string[]>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/tags`
+    );
+  },
+
+  updateRecipientTags: async (
+    companyId: number,
+    campaignId: number,
+    recipientId: number,
+    tags: string[]
+  ): Promise<CampaignRecipient> => {
+    return apiClient.put<CampaignRecipient>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/${recipientId}/tags`,
+      { tags }
+    );
+  },
+
+  addRecipientTag: async (
+    companyId: number,
+    campaignId: number,
+    recipientId: number,
+    tag: string
+  ): Promise<CampaignRecipient> => {
+    return apiClient.post<CampaignRecipient>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/${recipientId}/tags/add`,
+      { tag }
+    );
+  },
+
+  removeRecipientTag: async (
+    companyId: number,
+    campaignId: number,
+    recipientId: number,
+    tag: string
+  ): Promise<CampaignRecipient> => {
+    return apiClient.delete<CampaignRecipient>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/${recipientId}/tags/${encodeURIComponent(tag)}`
     );
   },
 

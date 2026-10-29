@@ -1,3 +1,11 @@
+export interface SendingWindowConfig {
+  enabled: boolean;
+  timezone: string;
+  days: number[];
+  start_time: string;
+  end_time: string;
+}
+
 export type CampaignStatus =
   | "DRAFT"
   | "SCHEDULED"
@@ -6,7 +14,8 @@ export type CampaignStatus =
   | "PAUSED"
   | "COMPLETED"
   | "CANCELLED"
-  | "FAILED";
+  | "FAILED"
+  | "ARCHIVED";
 
 export interface Campaign {
   id: number;
@@ -32,6 +41,7 @@ export interface Campaign {
   attachments?: CampaignAttachment[];
   steps?: CampaignStepItem[];
   followup_steps?: CampaignStepItem[];
+  sending_window?: SendingWindowConfig | null;
 }
 
 export interface CampaignStepItem {
@@ -42,6 +52,7 @@ export interface CampaignStepItem {
   subject: string;
   body_text?: string | null;
   body_html?: string | null;
+  target_tags?: string[];
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -53,6 +64,7 @@ export interface CampaignStepWritePayload {
   subject?: string;
   body_text?: string | null;
   body_html?: string | null;
+  target_tags?: string[];
   is_active?: boolean;
 }
 
@@ -87,6 +99,7 @@ export interface CampaignCreatePayload {
   body_html?: string | null;
   send_interval_seconds?: number;
   followup_steps?: CampaignStepWritePayload[];
+  sending_window?: SendingWindowConfig | null;
 }
 
 export interface CampaignUpdatePayload {
@@ -98,6 +111,7 @@ export interface CampaignUpdatePayload {
   scheduled_at?: string | null;
   send_interval_seconds?: number;
   followup_steps?: CampaignStepWritePayload[];
+  sending_window?: SendingWindowConfig | null;
 }
 
 export interface CampaignSchedulePayload {
@@ -115,7 +129,17 @@ export type CampaignRecipientStatus =
   | "SENT"
   | "FAILED"
   | "BOUNCED"
-  | "SUPPRESSED";
+  | "SUPPRESSED"
+  | "ACTIVE"
+  | "COMPLETED"
+  | "STOPPED";
+
+export type CampaignRecipientStopReason =
+  | "REPLIED"
+  | "UNSUBSCRIBED"
+  | "BOUNCED"
+  | "MANUAL"
+  | "CAMPAIGN_CANCELLED";
 
 export interface CampaignRecipient {
   id: number;
@@ -124,8 +148,21 @@ export interface CampaignRecipient {
   first_name?: string | null;
   last_name?: string | null;
   custom_variables?: Record<string, any> | null;
+  tags?: string[];
   status: CampaignRecipientStatus;
+  current_step_number?: number;
+  next_step_due_at?: string | null;
+  stopped_reason?: string | null;
+  replied_at?: string | null;
   created_at: string;
+}
+
+export interface CampaignRecipientReschedulePayload {
+  next_step_due_at: string;
+}
+
+export interface CampaignRecipientStopPayload {
+  reason?: string;
 }
 
 export interface CampaignRecipientCreatePayload {
@@ -133,6 +170,15 @@ export interface CampaignRecipientCreatePayload {
   first_name?: string | null;
   last_name?: string | null;
   custom_variables?: Record<string, any> | null;
+  tags?: string[];
+}
+
+export interface CampaignRecipientTagsUpdatePayload {
+  tags: string[];
+}
+
+export interface CampaignRecipientTagAddPayload {
+  tag: string;
 }
 
 export interface CampaignRecipientUpdatePayload {
@@ -237,4 +283,34 @@ export interface SuppressionListParams {
   search?: string;
   limit?: number;
   offset?: number;
+}
+
+
+export interface CampaignStepAnalytics {
+  step_id: number;
+  step_number: number;
+  subject: string;
+  delay_hours: number;
+  target_tags: string[];
+  targeted_count: number;
+  sent_count: number;
+  sending_count: number;
+  bounced_count: number;
+  failed_count: number;
+  skipped_count: number;
+  replied_count: number;
+  pending_count: number;
+  delivery_rate: number;
+  reply_rate: number;
+  bounce_rate: number;
+}
+
+export interface CampaignAnalyticsResponse {
+  campaign_id: number;
+  campaign_name: string;
+  campaign_status: CampaignStatus;
+  total_recipients: number;
+  total_steps: number;
+  steps: CampaignStepAnalytics[];
+  omitted_metrics_notice?: string;
 }

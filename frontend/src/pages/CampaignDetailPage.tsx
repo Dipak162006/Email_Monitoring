@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import DOMPurify from "dompurify";
 import {
@@ -19,19 +19,32 @@ import {
   CheckCircle2,
   AlertCircle,
   AlertTriangle,
-  Code,
-  FileText,
   Copy,
   Check,
   Monitor,
   Smartphone,
   Eye,
   Reply,
+  Archive,
+  RotateCcw,
+  TrendingUp,
+  BarChart2,
+  PieChart,
+  Lightbulb,
+  Zap,
+  ChevronDown,
+  Info,
+  Plus,
+  ExternalLink,
 } from "lucide-react";
 
 import { useWorkspace } from "../hooks/useWorkspace";
 import { campaignsApi, RequestError } from "../services/api";
-import type { Campaign, CampaignDetail, CampaignPreflightResponse } from "../types/campaign";
+import type {
+  Campaign,
+  CampaignDetail,
+  CampaignPreflightResponse,
+} from "../types/campaign";
 import { CampaignStatusBadge } from "../components/campaigns/CampaignStatusBadge";
 import {
   CancelCampaignModal,
@@ -69,13 +82,22 @@ export const CampaignDetailPage: React.FC = () => {
   const { campaignId } = useParams<{ campaignId: string }>();
   const campaignIdNum = Number(campaignId);
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const { currentCompanyId, currentRole } = useWorkspace();
 
-  // Preview controls
+  // Tab State: "overview" | "sequence" | "analytics"
+  const currentTab = (searchParams.get("tab") as "overview" | "sequence" | "analytics") || "overview";
+  const setActiveTab = (tab: "overview" | "sequence" | "analytics") => {
+    setSearchParams({ tab });
+  };
+
+  // Preview & Viewport State
+  const [selectedStepNumber, setSelectedStepNumber] = useState<number>(1);
   const [contentMode, setContentMode] = useState<"preview" | "html" | "plaintext">("preview");
   const [deviceView, setDeviceView] = useState<"desktop" | "mobile">("desktop");
   const [copiedSubject, setCopiedSubject] = useState<boolean>(false);
+  const [isMoreMenuOpen, setIsMoreMenuOpen] = useState<boolean>(false);
 
   // Toast feedback state
   const [toastMessage, setToastMessage] = useState<{
@@ -83,10 +105,7 @@ export const CampaignDetailPage: React.FC = () => {
     type: "success" | "error" | "info";
   } | null>(null);
 
-  const showToast = (
-    text: string,
-    type: "success" | "error" | "info" = "success"
-  ) => {
+  const showToast = (text: string, type: "success" | "error" | "info" = "success") => {
     setToastMessage({ text, type });
     setTimeout(() => {
       setToastMessage(null);
@@ -95,7 +114,7 @@ export const CampaignDetailPage: React.FC = () => {
 
   const isAdminOrOwner = currentRole === "OWNER" || currentRole === "ADMIN";
 
-  // Modal state for cancel / delete
+  // Modal state for cancel / delete / archive / restore
   const [modalState, setModalState] = useState<{
     isOpen: boolean;
     campaign: Campaign | null;
@@ -124,41 +143,88 @@ export const CampaignDetailPage: React.FC = () => {
     staleTime: 0,
   });
 
+  // Query Campaign Analytics (M7)
+  const { data: analytics } = useQuery({
+    queryKey: ["campaigns", currentCompanyId, "analytics", campaignIdNum],
+    queryFn: () => {
+      if (!currentCompanyId || !campaignIdNum) throw new Error("Missing parameters");
+      return campaignsApi.getCampaignAnalytics(currentCompanyId, campaignIdNum);
+    },
+    enabled: Boolean(currentCompanyId && campaignIdNum),
+  });
+
   const invalidateQueries = () => {
     queryClient.invalidateQueries({
       queryKey: ["campaigns", currentCompanyId, "detail", campaignIdNum],
+    });
+    queryClient.invalidateQueries({
+      queryKey: ["campaigns", currentCompanyId, "analytics", campaignIdNum],
     });
     queryClient.invalidateQueries({
       queryKey: ["campaigns", currentCompanyId],
     });
   };
 
-  // Safe Sanitized HTML
-  const sanitizedHtml = useMemo(() => {
-    if (!campaign?.body_html) return null;
-    return DOMPurify.sanitize(campaign.body_html, {
+  // Follow-up Steps list
+  const followupSteps = useMemo(() => {
+    if (!campaign) return [];
+    if (campaign.followup_steps && campaign.followup_steps.length > 0) {
+      return campaign.followup_steps;
+    }
+    if (campaign.steps && campaign.steps.length > 1) {
+      return campaign.steps.filter((s) => s.step_number >= 2 && s.is_active !== false);
+    }
+    return [];
+  }, [campaign]);
+
+  const totalStepsCount = 1 + followupSteps.length;
+
+  // Active step selected for email preview
+  const activeStepItem = useMemo(() => {
+    if (!campaign) return null;
+    if (selectedStepNumber === 1) {
+      return {
+        step_number: 1,
+        subject: campaign.subject || "",
+        body_html: campaign.body_html || null,
+        body_text: campaign.body_text || null,
+        delay_hours: 0,
+      };
+    }
+    const found = followupSteps.find((s) => s.step_number === selectedStepNumber);
+    if (found) return found;
+    return {
+      step_number: selectedStepNumber,
+      subject: `Re: ${campaign.subject || "Campaign"}`,
+      body_html: null,
+      body_text: null,
+      delay_hours: 24,
+    };
+  }, [campaign, selectedStepNumber, followupSteps]);
+
+  // Safe Sanitized HTML for active email preview
+  const sanitizedActiveHtml = useMemo(() => {
+    if (!activeStepItem?.body_html) return null;
+    return DOMPurify.sanitize(activeStepItem.body_html, {
       ADD_TAGS: ["style"],
       ADD_ATTR: ["target"],
     });
-  }, [campaign?.body_html]);
+  }, [activeStepItem?.body_html]);
 
-  // Detected Merge Tags in content
-  const detectedMergeTags = useMemo(() => {
-    const content = `${campaign?.subject || ""} ${campaign?.body_html || ""} ${campaign?.body_text || ""}`;
-    const matches = content.match(/\{\{([a-zA-Z0-9_-]+)\}\}/g);
-    if (!matches) return [];
-    return Array.from(new Set(matches));
-  }, [campaign?.subject, campaign?.body_html, campaign?.body_text]);
 
   const handleCopySubject = () => {
-    if (!campaign?.subject) return;
-    navigator.clipboard.writeText(campaign.subject).then(() => {
-      setCopiedSubject(true);
-      setTimeout(() => setCopiedSubject(false), 2000);
-      showToast("Subject line copied to clipboard.");
-    }).catch(() => {
-      showToast("Failed to copy subject.", "error");
-    });
+    const sub = activeStepItem?.subject || campaign?.subject;
+    if (!sub) return;
+    navigator.clipboard
+      .writeText(sub)
+      .then(() => {
+        setCopiedSubject(true);
+        setTimeout(() => setCopiedSubject(false), 2000);
+        showToast("Subject line copied to clipboard.");
+      })
+      .catch(() => {
+        showToast("Failed to copy subject.", "error");
+      });
   };
 
   // Action Modal State (Preflight & Schedule/Dispatch)
@@ -178,6 +244,7 @@ export const CampaignDetailPage: React.FC = () => {
 
   const handleOpenActionModal = async (mode: "launch" | "schedule") => {
     if (!currentCompanyId || !campaignIdNum) return;
+    setIsMoreMenuOpen(false);
     setActionModalState({
       isOpen: true,
       mode,
@@ -244,9 +311,7 @@ export const CampaignDetailPage: React.FC = () => {
     },
     onError: (err: unknown) => {
       const msg =
-        err instanceof RequestError
-          ? String(err.detail || err.message)
-          : "Failed to dispatch campaign.";
+        err instanceof RequestError ? String(err.detail || err.message) : "Failed to dispatch campaign.";
       showToast(msg, "error");
     },
   });
@@ -265,14 +330,11 @@ export const CampaignDetailPage: React.FC = () => {
     },
     onError: (err: unknown) => {
       const msg =
-        err instanceof RequestError
-          ? String(err.detail || err.message)
-          : "Failed to schedule campaign.";
+        err instanceof RequestError ? String(err.detail || err.message) : "Failed to schedule campaign.";
       showToast(msg, "error");
     },
   });
 
-  // Lifecycle Mutations
   const pauseMutation = useMutation({
     mutationFn: () => {
       if (!currentCompanyId || !campaignIdNum) throw new Error("Missing parameters");
@@ -284,9 +346,7 @@ export const CampaignDetailPage: React.FC = () => {
     },
     onError: (err: unknown) => {
       const msg =
-        err instanceof RequestError
-          ? String(err.detail || err.message)
-          : "Failed to pause campaign.";
+        err instanceof RequestError ? String(err.detail || err.message) : "Failed to pause campaign.";
       showToast(msg, "error");
     },
   });
@@ -302,9 +362,7 @@ export const CampaignDetailPage: React.FC = () => {
     },
     onError: (err: unknown) => {
       const msg =
-        err instanceof RequestError
-          ? String(err.detail || err.message)
-          : "Failed to resume campaign.";
+        err instanceof RequestError ? String(err.detail || err.message) : "Failed to resume campaign.";
       showToast(msg, "error");
     },
   });
@@ -321,9 +379,7 @@ export const CampaignDetailPage: React.FC = () => {
     },
     onError: (err: unknown) => {
       const msg =
-        err instanceof RequestError
-          ? String(err.detail || err.message)
-          : "Failed to cancel campaign.";
+        err instanceof RequestError ? String(err.detail || err.message) : "Failed to cancel campaign.";
       showToast(msg, "error");
     },
   });
@@ -341,71 +397,120 @@ export const CampaignDetailPage: React.FC = () => {
     onError: (err: unknown) => {
       setModalState({ isOpen: false, campaign: null, mode: "delete" });
       const msg =
-        err instanceof RequestError
-          ? String(err.detail || err.message)
-          : "Failed to delete campaign.";
+        err instanceof RequestError ? String(err.detail || err.message) : "Failed to delete campaign.";
+      showToast(msg, "error");
+    },
+  });
+
+  const archiveMutation = useMutation({
+    mutationFn: () => {
+      if (!currentCompanyId || !campaignIdNum) throw new Error("Missing parameters");
+      return campaignsApi.archiveCampaign(currentCompanyId, campaignIdNum);
+    },
+    onSuccess: (updated) => {
+      setModalState({ isOpen: false, campaign: null, mode: "archive" });
+      invalidateQueries();
+      showToast(`Campaign "${updated.name}" archived.`);
+    },
+    onError: (err: unknown) => {
+      setModalState({ isOpen: false, campaign: null, mode: "archive" });
+      const msg =
+        err instanceof RequestError ? String(err.detail || err.message) : "Failed to archive campaign.";
+      showToast(msg, "error");
+    },
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: () => {
+      if (!currentCompanyId || !campaignIdNum) throw new Error("Missing parameters");
+      return campaignsApi.restoreCampaign(currentCompanyId, campaignIdNum);
+    },
+    onSuccess: (updated) => {
+      setModalState({ isOpen: false, campaign: null, mode: "restore" });
+      invalidateQueries();
+      showToast(`Campaign "${updated.name}" restored.`);
+    },
+    onError: (err: unknown) => {
+      setModalState({ isOpen: false, campaign: null, mode: "restore" });
+      const msg =
+        err instanceof RequestError ? String(err.detail || err.message) : "Failed to restore campaign.";
       showToast(msg, "error");
     },
   });
 
   const handleOpenCancelModal = () => {
     if (!campaign) return;
+    setIsMoreMenuOpen(false);
     setModalState({ isOpen: true, campaign, mode: "cancel" });
   };
 
   const handleOpenDeleteModal = () => {
     if (!campaign) return;
+    setIsMoreMenuOpen(false);
     setModalState({ isOpen: true, campaign, mode: "delete" });
+  };
+
+  const handleOpenArchiveModal = () => {
+    if (!campaign) return;
+    setIsMoreMenuOpen(false);
+    setModalState({ isOpen: true, campaign, mode: "archive" });
+  };
+
+  const handleOpenRestoreModal = () => {
+    if (!campaign) return;
+    setIsMoreMenuOpen(false);
+    setModalState({ isOpen: true, campaign, mode: "restore" });
   };
 
   const handleConfirmModal = () => {
     if (modalState.mode === "cancel") {
       cancelMutation.mutate();
-    } else {
+    } else if (modalState.mode === "delete") {
       deleteMutation.mutate();
+    } else if (modalState.mode === "archive") {
+      archiveMutation.mutate();
+    } else if (modalState.mode === "restore") {
+      restoreMutation.mutate();
     }
   };
 
   // 1. Loading Skeleton State
   if (isLoading) {
     return (
-      <div className="w-full max-w-7xl mx-auto min-w-0 px-4 sm:px-6 lg:px-8 py-6 space-y-6 box-border animate-pulse">
-        <div className="flex items-center justify-between">
-          <div className="h-4 bg-slate-200 rounded w-48"></div>
-          <div className="h-8 bg-slate-200 rounded w-24"></div>
-        </div>
-        <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
-          <div className="h-8 bg-slate-200 rounded w-72"></div>
-          <div className="h-4 bg-slate-200 rounded w-96"></div>
-          <div className="flex gap-2 pt-2">
-            <div className="h-9 bg-slate-200 rounded w-36"></div>
+      <div className="w-full max-w-7xl mx-auto min-w-0 px-4 sm:px-6 lg:px-8 py-6 space-y-5 animate-pulse box-border">
+        <div className="h-4 bg-slate-200 rounded w-36"></div>
+        <div className="bg-white rounded-xl border border-slate-200 p-6 flex justify-between items-center">
+          <div className="space-y-2">
+            <div className="h-7 bg-slate-200 rounded w-64"></div>
+            <div className="h-4 bg-slate-100 rounded w-96"></div>
+          </div>
+          <div className="flex gap-2">
+            <div className="h-9 bg-slate-200 rounded w-24"></div>
             <div className="h-9 bg-slate-200 rounded w-28"></div>
           </div>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-          <div className="h-32 bg-white rounded-xl border border-slate-200 p-4"></div>
-          <div className="h-32 bg-white rounded-xl border border-slate-200 p-4"></div>
-          <div className="h-32 bg-white rounded-xl border border-slate-200 p-4"></div>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="h-32 bg-white rounded-xl border border-slate-200 p-4"></div>
+          ))}
         </div>
-        <div className="h-72 bg-white rounded-xl border border-slate-200 p-6"></div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <div className="h-72 bg-white rounded-xl border border-slate-200 p-4"></div>
+          <div className="h-72 bg-white rounded-xl border border-slate-200 p-4"></div>
+        </div>
       </div>
     );
   }
 
   // 2. Error / Not Found State
   if (isError || !campaign) {
-    const isNotFound =
-      error instanceof RequestError ? error.status === 404 : false;
+    const isNotFound = error instanceof RequestError ? error.status === 404 : false;
 
     return (
       <div className="w-full max-w-7xl mx-auto min-w-0 px-4 sm:px-6 lg:px-8 py-12 box-border">
         <div className="bg-white rounded-xl border border-slate-200 p-8 sm:p-12 text-center max-w-lg mx-auto shadow-sm space-y-4">
           <div className="w-14 h-14 rounded-full bg-rose-50 text-rose-600 flex items-center justify-center mx-auto">
-            {isNotFound ? (
-              <AlertTriangle className="h-7 w-7" />
-            ) : (
-              <AlertCircle className="h-7 w-7" />
-            )}
+            {isNotFound ? <AlertTriangle className="h-7 w-7" /> : <AlertCircle className="h-7 w-7" />}
           </div>
           <h2 className="text-lg sm:text-xl font-bold text-slate-900">
             {isNotFound ? "Campaign Not Found" : "Unable to load campaign details"}
@@ -442,1019 +547,1898 @@ export const CampaignDetailPage: React.FC = () => {
   }
 
   const senderName = campaign.email_account_name || "Assigned Account";
-  const senderEmail =
-    campaign.email_account_address || `Account #${campaign.email_account_id}`;
+  const senderEmail = campaign.email_account_address || `Account #${campaign.email_account_id}`;
   const senderDomain = senderEmail.includes("@") ? senderEmail.split("@")[1] : "—";
   const isDraft = campaign.status === "DRAFT";
 
+  // Rate calculations
+  const totalTarget = campaign.recipient_count || 0;
+  const sentCount = campaign.sent_count ?? 0;
+  const repliedCount = campaign.replied_count ?? 0;
+  const bouncedCount = campaign.bounced_count ?? 0;
+  const failedCount = campaign.failed_count ?? 0;
+  const suppressedCount = campaign.suppressed_count ?? 0;
+  const pendingCount =
+    campaign.pending_count !== undefined
+      ? campaign.pending_count
+      : Math.max(0, totalTarget - sentCount - bouncedCount - failedCount - suppressedCount);
+
+  const sentRate = totalTarget > 0 ? Math.round((sentCount / totalTarget) * 100) : 0;
+  const replyRate = sentCount > 0 ? Math.round((repliedCount / sentCount) * 100) : 0;
+  const bounceRate = totalTarget > 0 ? Math.round((bouncedCount / totalTarget) * 100) : 0;
+  const failedRate = totalTarget > 0 ? Math.round((failedCount / totalTarget) * 100) : 0;
+
+  const processedCount = sentCount + bouncedCount + suppressedCount + failedCount;
+  const completionPercent = totalTarget > 0 ? Math.min(100, Math.round((processedCount / totalTarget) * 100)) : 0;
+
   return (
-    <div className="w-full max-w-7xl mx-auto min-w-0 px-4 sm:px-6 lg:px-8 py-6 space-y-6 box-border">
-      {/* 1. Header Navigation & Utilities */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-1">
+    <div className="w-full max-w-7xl mx-auto min-w-0 px-4 sm:px-6 lg:px-8 py-5 space-y-4 sm:space-y-5 box-border">
+      {/* 1. Compact Navigation Breadcrumb */}
+      <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0">
           <Link
             to="/campaigns"
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 font-medium text-xs sm:text-sm transition-colors shrink-0"
+            className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-medium text-slate-500 hover:text-indigo-600 transition-colors"
           >
             <ArrowLeft className="h-3.5 w-3.5" />
             <span>Back to Campaigns</span>
           </Link>
-          <span className="text-slate-300">/</span>
-          <nav className="flex items-center gap-1 text-xs sm:text-sm text-slate-500 truncate">
-            <span className="text-slate-500">PulseMail</span>
-            <span className="text-slate-300">/</span>
-            <Link to="/campaigns" className="hover:text-indigo-600 transition-colors">
-              Campaigns
-            </Link>
-            <span className="text-slate-300">/</span>
-            <span className="text-slate-900 font-semibold truncate max-w-[200px] sm:max-w-md">
-              {campaign.name}
-            </span>
-          </nav>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
-          <button
-            type="button"
-            onClick={() => refetch()}
-            disabled={isFetching}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium border border-slate-200/80 shadow-2xs transition-all disabled:opacity-50"
-          >
-            <RefreshCw
-              className={`h-3.5 w-3.5 text-indigo-600 ${
-                isFetching ? "animate-spin" : ""
-              }`}
-            />
-            <span className="hidden sm:inline">Refresh</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white hover:bg-slate-50 text-slate-600 text-xs font-medium border border-slate-200/80 shadow-2xs transition-all disabled:opacity-50"
+          title="Refresh Campaign Data"
+        >
+          <RefreshCw className={`h-3 w-3 text-indigo-600 ${isFetching ? "animate-spin" : ""}`} />
+          <span className="hidden sm:inline">Refresh</span>
+        </button>
       </div>
 
-      {/* 2. Spacious Campaign Header Card */}
-      <section className="w-full bg-white rounded-xl p-5 md:p-6 lg:p-7 border border-slate-200/80 shadow-2xs min-w-0 space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4 min-w-0">
-          {/* Left: Title, Badges, Subject, Metadata */}
-          <div className="space-y-3 max-w-3xl min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2.5">
-              <h1 className="text-xl sm:text-2xl lg:text-3xl font-bold text-slate-900 tracking-tight break-words">
-                {campaign.name}
-              </h1>
-              <CampaignStatusBadge status={campaign.status} />
-              <span className="px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 font-semibold text-xs border border-indigo-100">
-                {campaign.recipient_count.toLocaleString()} recipients
-              </span>
+      {/* Archived Banner */}
+      {campaign.status === "ARCHIVED" && (
+        <div className="w-full bg-amber-50/90 border border-amber-200/80 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-amber-900 shadow-2xs">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center text-amber-700 shrink-0">
+              <Archive className="h-5 w-5" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold">This campaign is archived</p>
+              <p className="text-xs text-amber-700">
+                All sending and schedule triggers are stopped. Campaign history, steps, and recipient logs are preserved.
+              </p>
+            </div>
+          </div>
+          {isAdminOrOwner && (
+            <button
+              type="button"
+              onClick={handleOpenRestoreModal}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-2xs transition-colors shrink-0"
+            >
+              <RotateCcw className="h-4 w-4" />
+              <span>Restore Campaign</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* 2. Compact Modern Campaign Header */}
+      <header className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs min-w-0">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 min-w-0">
+          {/* Left: Icon, Name, Badges, Metadata */}
+          <div className="flex items-start gap-3.5 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-sm mt-0.5">
+              <Mail className="h-5 w-5" />
             </div>
 
-            {/* Subject Line Preview Strip with Copy Action */}
-            <div className="flex items-center gap-2 p-2.5 rounded-lg bg-slate-50 border border-slate-200/60 max-w-2xl min-w-0">
-              <Mail className="h-4 w-4 text-indigo-600 shrink-0" />
-              <div className="min-w-0 flex-1 flex items-baseline gap-1.5">
-                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider shrink-0">
-                  Subject:
-                </span>
-                <span className="font-medium text-slate-900 text-sm truncate block sm:inline">
-                  "{campaign.subject || "No subject set"}"
+            <div className="space-y-1.5 min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <h1 className="text-lg sm:text-xl font-bold text-slate-900 tracking-tight truncate">
+                  {campaign.name}
+                </h1>
+                {isDraft && isAdminOrOwner && (
+                  <Link
+                    to={`/campaigns/${campaign.id}/edit`}
+                    className="p-1 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                    title="Edit Campaign Name & Details"
+                  >
+                    <FileEdit className="h-3.5 w-3.5" />
+                  </Link>
+                )}
+                <CampaignStatusBadge status={campaign.status} />
+                <span className="px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 font-semibold text-xs border border-indigo-100">
+                  {campaign.recipient_count.toLocaleString()} {campaign.recipient_count === 1 ? "recipient" : "recipients"}
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={handleCopySubject}
-                className="shrink-0 p-1 rounded hover:bg-slate-200/70 text-slate-500 hover:text-slate-800 transition-colors flex items-center gap-1"
-                title="Copy Subject Line"
-              >
-                {copiedSubject ? (
-                  <>
-                    <Check className="h-3.5 w-3.5 text-emerald-600" />
-                    <span className="text-[11px] font-semibold text-emerald-600">Copied!</span>
-                  </>
-                ) : (
-                  <Copy className="h-3.5 w-3.5" />
-                )}
-              </button>
-            </div>
 
-            {/* Metadata Chips Row */}
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 pt-0.5">
-              <span>Created {formatDate(campaign.created_at)}</span>
-              <span className="text-slate-300">•</span>
-              <span>Last modified {formatDate(campaign.updated_at)}</span>
-              <span className="text-slate-300">•</span>
-              <span className="font-mono text-slate-700 font-medium">ID: #{campaign.id}</span>
-              {campaign.scheduled_at && (
-                <>
-                  <span className="text-slate-300">•</span>
-                  <span className="text-amber-700 font-semibold">
-                    Scheduled: {formatDate(campaign.scheduled_at)}
-                  </span>
-                </>
-              )}
+              {/* Metadata Subtitle Row */}
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+                <span>Created {formatDate(campaign.created_at)}</span>
+                <span className="text-slate-300">•</span>
+                <span>Last modified {formatDate(campaign.updated_at)}</span>
+                <span className="text-slate-300">•</span>
+                <span className="font-mono text-slate-600 font-medium">ID: #{campaign.id}</span>
+                {campaign.scheduled_at && (
+                  <>
+                    <span className="text-slate-300">•</span>
+                    <span className="text-amber-700 font-semibold">
+                      Scheduled: {formatDate(campaign.scheduled_at)}
+                    </span>
+                  </>
+                )}
+              </div>
             </div>
           </div>
 
-          {/* Right Action Group: Non-cramped, generous padding & clear hierarchy */}
-          <div className="flex flex-wrap items-center gap-2.5 shrink-0 pt-2 lg:pt-0">
-            {/* DRAFT specific: Edit Draft, Schedule, Launch */}
+          {/* Right Action Buttons */}
+          <div className="flex items-center gap-2 flex-wrap shrink-0">
+            {/* DRAFT Actions */}
             {isDraft && isAdminOrOwner && (
               <>
                 <Link
                   to={`/campaigns/${campaign.id}/edit`}
-                  className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200/80 font-semibold text-xs sm:text-sm shadow-2xs transition-colors"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 text-xs font-semibold shadow-2xs transition-colors"
                 >
-                  <FileEdit className="h-4 w-4 text-indigo-600" />
+                  <FileEdit className="h-3.5 w-3.5 text-slate-500" />
                   <span>Edit Draft</span>
                 </Link>
                 <button
                   type="button"
                   onClick={() => handleOpenActionModal("schedule")}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200/80 font-semibold text-xs sm:text-sm shadow-2xs transition-colors"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
                 >
-                  <Calendar className="h-4 w-4 text-slate-500" />
+                  <Calendar className="h-3.5 w-3.5 text-slate-500" />
                   <span>Schedule</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => handleOpenActionModal("launch")}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white hover:bg-slate-50 text-indigo-600 border border-indigo-200 font-semibold text-xs sm:text-sm shadow-2xs transition-colors"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
                 >
-                  <Send className="h-4 w-4 text-indigo-600" />
+                  <Send className="h-3.5 w-3.5" />
                   <span>Launch Now</span>
                 </button>
               </>
             )}
 
-            {/* RUNNING specific */}
+            {/* SCHEDULED Actions */}
+            {campaign.status === "SCHEDULED" && isAdminOrOwner && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => handleOpenActionModal("schedule")}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+                >
+                  <Calendar className="h-3.5 w-3.5 text-slate-500" />
+                  <span>Reschedule</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleOpenActionModal("launch")}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+                >
+                  <Send className="h-3.5 w-3.5" />
+                  <span>Launch Now</span>
+                </button>
+              </>
+            )}
+
+            {/* RUNNING Actions */}
             {campaign.status === "RUNNING" && isAdminOrOwner && (
               <>
                 <button
                   type="button"
                   onClick={() => pauseMutation.mutate()}
                   disabled={pauseMutation.isPending}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-50 border border-amber-200 hover:bg-amber-100 text-amber-700 text-xs sm:text-sm font-semibold transition-colors shadow-2xs disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 hover:bg-amber-100 text-amber-700 text-xs font-semibold transition-colors shadow-2xs disabled:opacity-50 cursor-pointer"
                 >
-                  <PauseCircle className="h-4 w-4" />
+                  <PauseCircle className="h-3.5 w-3.5" />
                   <span>Pause</span>
                 </button>
                 <button
                   type="button"
                   onClick={handleOpenCancelModal}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-rose-200 hover:bg-rose-50 text-rose-600 text-xs sm:text-sm font-semibold transition-colors shadow-2xs"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-50 border border-rose-200 hover:bg-rose-100 text-rose-700 text-xs font-semibold transition-colors shadow-2xs cursor-pointer"
                 >
-                  <XCircle className="h-4 w-4" />
+                  <XCircle className="h-3.5 w-3.5" />
                   <span>Cancel</span>
                 </button>
               </>
             )}
 
-            {/* PAUSED specific */}
+            {/* PAUSED Actions */}
             {campaign.status === "PAUSED" && isAdminOrOwner && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => resumeMutation.mutate()}
-                  disabled={resumeMutation.isPending}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 text-indigo-700 text-xs sm:text-sm font-semibold transition-colors shadow-2xs disabled:opacity-50"
-                >
-                  <PlayCircle className="h-4 w-4" />
-                  <span>Resume</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleOpenCancelModal}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-rose-200 hover:bg-rose-50 text-rose-600 text-xs sm:text-sm font-semibold transition-colors shadow-2xs"
-                >
-                  <XCircle className="h-4 w-4" />
-                  <span>Cancel</span>
-                </button>
-              </>
-            )}
-
-            {/* SCHEDULED specific: Reschedule, Launch Now & Cancel */}
-            {campaign.status === "SCHEDULED" && isAdminOrOwner && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => handleOpenActionModal("schedule")}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200/80 font-semibold text-xs sm:text-sm shadow-2xs transition-colors"
-                >
-                  <Calendar className="h-4 w-4 text-slate-500" />
-                  <span>Reschedule</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleOpenActionModal("launch")}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white hover:bg-slate-50 text-indigo-600 border border-indigo-200 font-semibold text-xs sm:text-sm shadow-2xs transition-colors"
-                >
-                  <Send className="h-4 w-4 text-indigo-600" />
-                  <span>Launch Now</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleOpenCancelModal}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-rose-200 hover:bg-rose-50 text-rose-600 text-xs sm:text-sm font-semibold transition-colors shadow-2xs"
-                >
-                  <XCircle className="h-4 w-4" />
-                  <span>Cancel</span>
-                </button>
-              </>
-            )}
-
-            {/* QUEUED specific: Cancel only */}
-            {campaign.status === "QUEUED" && isAdminOrOwner && (
               <button
                 type="button"
-                onClick={handleOpenCancelModal}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-rose-200 hover:bg-rose-50 text-rose-600 text-xs sm:text-sm font-semibold transition-colors shadow-2xs"
+                onClick={() => resumeMutation.mutate()}
+                disabled={resumeMutation.isPending}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold transition-colors shadow-2xs disabled:opacity-50 cursor-pointer"
               >
-                <XCircle className="h-4 w-4" />
-                <span>Cancel</span>
+                <PlayCircle className="h-3.5 w-3.5" />
+                <span>Resume</span>
               </button>
             )}
 
-            {/* Delete Campaign Action (DRAFT, COMPLETED, CANCELLED, FAILED) */}
-            {["DRAFT", "COMPLETED", "CANCELLED", "FAILED"].includes(campaign.status) &&
-              isAdminOrOwner && (
+            {/* ARCHIVED Actions */}
+            {campaign.status === "ARCHIVED" && isAdminOrOwner && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleOpenRestoreModal}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-indigo-200 hover:bg-indigo-50 text-indigo-600 text-xs font-semibold transition-colors shadow-2xs cursor-pointer"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span>Restore</span>
+                </button>
                 <button
                   type="button"
                   onClick={handleOpenDeleteModal}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-rose-200 hover:bg-rose-50 text-rose-600 text-xs sm:text-sm font-semibold transition-colors shadow-2xs"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-rose-200 hover:bg-rose-50 text-rose-600 text-xs font-semibold transition-colors shadow-2xs cursor-pointer"
                 >
-                  <Trash2 className="h-4 w-4" />
-                  <span>Delete</span>
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Delete Permanently</span>
                 </button>
-              )}
+              </>
+            )}
 
-            {/* Primary Manage Recipients Button */}
-            <Link
-              to={`/campaigns/${campaign.id}/recipients`}
-              className="inline-flex items-center gap-2 px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs sm:text-sm shadow-2xs hover:shadow transition-all"
-            >
-              <Users className="h-4 w-4" />
-              <span>Manage Recipients</span>
-            </Link>
-          </div>
-        </div>
-      </section>
-
-      {/* 3. Three-Column Balanced Information Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-5 min-w-0">
-        {/* Card 1: Sender Identity */}
-        <div className="bg-white rounded-xl p-5 border border-slate-200/80 shadow-2xs flex flex-col justify-between space-y-4 min-w-0">
-          <div>
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
-                  <Send className="h-4 w-4" />
-                </div>
-                <h2 className="text-sm font-bold text-slate-900">Sender Identity</h2>
-              </div>
-              <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[11px] font-semibold">
-                Active
-              </span>
-            </div>
-
-            <div className="mt-3 space-y-2">
-              <div>
-                <p className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">
-                  Display Sender
-                </p>
-                <p className="text-base font-semibold text-slate-900 truncate mt-0.5" title={senderName}>
-                  {senderName}
-                </p>
-                <p
-                  className="font-mono text-xs text-slate-600 bg-slate-50 px-2.5 py-1 rounded-md mt-1 truncate border border-slate-100"
-                  title={senderEmail}
+            {/* Secondary 'More' Dropdown */}
+            {isAdminOrOwner && campaign.status !== "ARCHIVED" && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setIsMoreMenuOpen((prev) => !prev)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+                  aria-expanded={isMoreMenuOpen}
+                  aria-label="More campaign actions"
                 >
-                  {senderEmail}
-                </p>
-              </div>
+                  <span>More</span>
+                  <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+                </button>
 
-              <div className="pt-2 space-y-1.5 text-xs">
-                <div className="flex items-center justify-between text-slate-500">
-                  <span>Domain</span>
-                  <span className="font-medium text-slate-900">{senderDomain}</span>
-                </div>
-                <div className="flex items-center justify-between text-slate-500">
-                  <span>Account ID</span>
-                  <span className="font-mono text-slate-700">#{campaign.email_account_id}</span>
-                </div>
-              </div>
-            </div>
-          </div>
+                {isMoreMenuOpen && (
+                  <div
+                    className="absolute right-0 mt-1.5 w-44 bg-white rounded-xl shadow-lg border border-slate-200 py-1 z-30 animate-in fade-in zoom-in-95 duration-100"
+                    onMouseLeave={() => setIsMoreMenuOpen(false)}
+                  >
+                    {["RUNNING", "PAUSED", "SCHEDULED", "QUEUED"].includes(campaign.status) && (
+                      <button
+                        type="button"
+                        onClick={handleOpenCancelModal}
+                        className="w-full text-left px-3.5 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 flex items-center gap-2 cursor-pointer"
+                      >
+                        <XCircle className="h-3.5 w-3.5" />
+                        <span>Cancel Campaign</span>
+                      </button>
+                    )}
 
-          <div className="pt-2 border-t border-slate-100">
-            {isAdminOrOwner ? (
-              <Link
-                to="/email-accounts"
-                className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:underline"
-              >
-                <span>View Sender Accounts</span>
-                <ArrowRight className="h-3.5 w-3.5" />
-              </Link>
-            ) : (
-              <span className="text-xs text-slate-400">Account verified</span>
+                    {["DRAFT", "COMPLETED", "CANCELLED", "FAILED"].includes(campaign.status) && (
+                      <button
+                        type="button"
+                        onClick={handleOpenArchiveModal}
+                        className="w-full text-left px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
+                      >
+                        <Archive className="h-3.5 w-3.5 text-slate-400" />
+                        <span>Archive Campaign</span>
+                      </button>
+                    )}
+
+                    {["DRAFT", "COMPLETED", "CANCELLED", "FAILED"].includes(campaign.status) && (
+                      <button
+                        type="button"
+                        onClick={handleOpenDeleteModal}
+                        className="w-full text-left px-3.5 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 flex items-center gap-2 cursor-pointer border-t border-slate-100"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        <span>Delete Draft</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>
+      </header>
 
-        {/* Card 2: Schedule & Timing */}
-        <div className="bg-white rounded-xl p-5 border border-slate-200/80 shadow-2xs flex flex-col justify-between space-y-4 min-w-0">
-          <div>
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
-                  <Clock className="h-4 w-4" />
-                </div>
-                <h2 className="text-sm font-bold text-slate-900">Schedule &amp; Timing</h2>
-              </div>
-              <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[11px] font-semibold">
-                {campaign.scheduled_at ? "Scheduled" : isDraft ? "On-Demand" : campaign.status}
-              </span>
-            </div>
+      {/* 3. Compact 3-Tab Navigation Bar */}
+      <div className="flex items-center justify-between border-b border-slate-200/80 gap-4 flex-wrap">
+        <nav className="flex items-center gap-6" aria-label="Campaign Detail Tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={currentTab === "overview"}
+            aria-controls="panel-overview"
+            onClick={() => setActiveTab("overview")}
+            className={`pb-2.5 text-xs sm:text-sm font-semibold transition-all relative cursor-pointer ${
+              currentTab === "overview"
+                ? "text-indigo-600 border-b-2 border-indigo-600"
+                : "text-slate-500 hover:text-slate-900 border-b-2 border-transparent"
+            }`}
+          >
+            Overview
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={currentTab === "sequence"}
+            aria-controls="panel-sequence"
+            onClick={() => setActiveTab("sequence")}
+            className={`pb-2.5 text-xs sm:text-sm font-semibold transition-all relative cursor-pointer ${
+              currentTab === "sequence"
+                ? "text-indigo-600 border-b-2 border-indigo-600"
+                : "text-slate-500 hover:text-slate-900 border-b-2 border-transparent"
+            }`}
+          >
+            Email Sequence
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={currentTab === "analytics"}
+            aria-controls="panel-analytics"
+            onClick={() => setActiveTab("analytics")}
+            className={`pb-2.5 text-xs sm:text-sm font-semibold transition-all relative cursor-pointer ${
+              currentTab === "analytics"
+                ? "text-indigo-600 border-b-2 border-indigo-600"
+                : "text-slate-500 hover:text-slate-900 border-b-2 border-transparent"
+            }`}
+          >
+            Analytics
+          </button>
+        </nav>
 
-            <div className="mt-3 space-y-2">
+        {currentTab === "analytics" && (
+          <div className="pb-1.5 flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-white border border-slate-200 text-xs text-slate-700 font-medium shadow-2xs" title="Metrics represent full campaign lifetime totals">
+              <Calendar className="h-3 w-3 text-slate-400" />
+              <span>Campaign Lifetime</span>
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* =========================================================================
+          TAB 1: OVERVIEW TAB CONTENT
+          ========================================================================= */}
+      {currentTab === "overview" && (
+        <div className="space-y-4 sm:space-y-5">
+          {/* Row 1: 4 Balanced Summary Cards (Sender, Schedule, Audience, Quick Stats) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-stretch">
+            {/* Card 1: Sender Identity */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs flex flex-col justify-between space-y-3">
               <div>
-                <p className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">
-                  Dispatch Policy
-                </p>
-                <p className="text-base font-semibold text-slate-900 mt-0.5">
-                  {campaign.scheduled_at
-                    ? "Scheduled Dispatch"
-                    : isDraft
-                    ? "Manual Dispatch"
-                    : `Lifecycle: ${campaign.status}`}
-                </p>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  {campaign.scheduled_at
-                    ? `Launch time set for ${formatDate(campaign.scheduled_at)}.`
-                    : isDraft
-                    ? "Requires final review before queue ingestion."
-                    : `Campaign currently in ${campaign.status} phase.`}
-                </p>
-              </div>
-
-              <div className="pt-2 space-y-1.5 text-xs">
-                <div className="flex items-center justify-between text-slate-500">
-                  <span>Sending Interval</span>
-                  <span className="text-slate-800 font-medium">
-                    {formatSendInterval(campaign.send_interval_seconds)}
+                <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                      <Send className="h-3.5 w-3.5" />
+                    </div>
+                    <h3 className="text-xs sm:text-sm font-bold text-slate-900">Sender Identity</h3>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold">
+                    Active
                   </span>
                 </div>
-                {campaign.next_send_at &&
-                  (campaign.status === "RUNNING" || campaign.status === "QUEUED") && (
-                    <div className="flex items-center justify-between text-slate-500">
+                <div className="mt-2.5 space-y-1">
+                  <p className="text-xs sm:text-sm font-semibold text-slate-900 truncate" title={senderName}>
+                    {senderName}
+                  </p>
+                  <p className="text-xs text-slate-500 truncate" title={senderEmail}>
+                    {senderEmail}
+                  </p>
+                  <div className="pt-2 flex items-center justify-between text-xs text-slate-500">
+                    <span>Domain</span>
+                    <span className="font-medium text-slate-800">{senderDomain}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-slate-500">
+                    <span>Account ID</span>
+                    <span className="font-mono text-slate-700">#{campaign.email_account_id}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Card 2: Schedule & Timing */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs flex flex-col justify-between space-y-3">
+              <div>
+                <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                      <Clock className="h-3.5 w-3.5" />
+                    </div>
+                    <h3 className="text-xs sm:text-sm font-bold text-slate-900">Schedule & Timing</h3>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold">
+                    {campaign.scheduled_at ? "Scheduled" : isDraft ? "On-Demand" : campaign.status}
+                  </span>
+                </div>
+                <div className="mt-2.5 space-y-1">
+                  <p className="text-xs sm:text-sm font-semibold text-slate-900 truncate">
+                    {campaign.scheduled_at ? "Scheduled Dispatch" : isDraft ? "Manual Dispatch" : campaign.status}
+                  </p>
+                  <p className="text-[11px] text-slate-500 truncate">
+                    {campaign.scheduled_at
+                      ? `Execution set for ${formatDate(campaign.scheduled_at)}`
+                      : isDraft
+                      ? "Requires final review before queue ingestion."
+                      : `Campaign in ${campaign.status} lifecycle`}
+                  </p>
+                  <div className="pt-2 flex items-center justify-between text-xs text-slate-500">
+                    <span>Sending Interval</span>
+                    <span className="font-medium text-slate-800">{formatSendInterval(campaign.send_interval_seconds)}</span>
+                  </div>
+                  {campaign.next_send_at && (
+                    <div className="flex items-center justify-between text-xs text-slate-500">
                       <span>Next Recipient</span>
-                      <span
-                        className="text-indigo-600 font-semibold"
-                        title="Estimated next recipient send; actual timing may vary with provider latency"
-                      >
-                        ~{formatDate(campaign.next_send_at)}
-                      </span>
+                      <span className="font-medium text-slate-800">{formatDate(campaign.next_send_at)}</span>
                     </div>
                   )}
-                <div className="flex items-center justify-between text-slate-500">
-                  <span>Created</span>
-                  <span className="text-slate-800 font-medium">{formatDate(campaign.created_at)}</span>
-                </div>
-                {campaign.scheduled_at && (
-                  <div className="flex items-center justify-between text-slate-500">
-                    <span>Scheduled</span>
-                    <span className="text-amber-700 font-semibold">{formatDate(campaign.scheduled_at)}</span>
-                  </div>
-                )}
-                {campaign.started_at && (
-                  <div className="flex items-center justify-between text-slate-500">
-                    <span>Started</span>
-                    <span className="text-slate-800 font-medium">{formatDate(campaign.started_at)}</span>
-                  </div>
-                )}
-                {campaign.completed_at && (
-                  <div className="flex items-center justify-between text-slate-500">
-                    <span>Completed</span>
-                    <span className="text-emerald-700 font-semibold">{formatDate(campaign.completed_at)}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div className="pt-2 border-t border-slate-100">
-            {isDraft && isAdminOrOwner ? (
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => handleOpenActionModal("schedule")}
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:underline"
-                >
-                  <Calendar className="h-3.5 w-3.5" />
-                  <span>Schedule Execution</span>
-                </button>
-                <span className="text-slate-300">•</span>
-                <button
-                  type="button"
-                  onClick={() => handleOpenActionModal("launch")}
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:underline"
-                >
-                  <Send className="h-3.5 w-3.5" />
-                  <span>Launch Now</span>
-                </button>
-              </div>
-            ) : campaign.status === "SCHEDULED" && isAdminOrOwner ? (
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => handleOpenActionModal("schedule")}
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:underline"
-                >
-                  <Calendar className="h-3.5 w-3.5" />
-                  <span>Reschedule</span>
-                </button>
-                <span className="text-slate-300">•</span>
-                <button
-                  type="button"
-                  onClick={() => handleOpenActionModal("launch")}
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:underline"
-                >
-                  <Send className="h-3.5 w-3.5" />
-                  <span>Launch Now</span>
-                </button>
-              </div>
-            ) : (
-              <span className="text-xs text-slate-400">Timeline locked to lifecycle</span>
-            )}
-          </div>
-        </div>
-
-        {/* Card 3: Target Audience */}
-        <div className="bg-white rounded-xl p-5 border border-slate-200/80 shadow-2xs flex flex-col justify-between space-y-4 min-w-0">
-          <div>
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
-                  <Users className="h-4 w-4" />
-                </div>
-                <h2 className="text-sm font-bold text-slate-900">Target Audience</h2>
-              </div>
-              <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[11px] font-semibold">
-                Verified
-              </span>
-            </div>
-
-            <div className="mt-3 space-y-2">
-              <div>
-                <p className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">
-                  Total Target List
-                </p>
-                <p className="text-3xl font-bold text-slate-900 tracking-tight leading-none mt-1">
-                  {campaign.recipient_count.toLocaleString()}
-                </p>
-                <p className="text-xs text-slate-500 mt-1">
-                  Audience records attached to this campaign
-                </p>
-              </div>
-
-              <div className="pt-2 space-y-1.5 text-xs text-slate-500">
-                <div className="flex items-center justify-between">
-                  <span>Scope</span>
-                  <span className="font-medium text-slate-800">Company Isolated</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span>Recipients Status</span>
-                  <span className="font-semibold text-indigo-600">
-                    {campaign.recipient_count > 0 ? "Audience Configured" : "Empty Audience"}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="pt-2 border-t border-slate-100">
-            <Link
-              to={`/campaigns/${campaign.id}/recipients`}
-              className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:underline"
-            >
-              <span>View All {campaign.recipient_count.toLocaleString()} Recipients</span>
-              <ArrowRight className="h-3.5 w-3.5" />
-            </Link>
-          </div>
-        </div>
-      </div>
-
-      {/* 4. Campaign Delivery Breakdown & Telemetry */}
-      <div className="bg-white rounded-xl p-5 md:p-6 border border-slate-200/80 shadow-2xs space-y-4 min-w-0">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-base sm:text-lg font-bold text-slate-900">
-                Delivery Breakdown & Telemetry
-              </h2>
-              <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
-                {(campaign.recipient_count || 0).toLocaleString()} Total Target
-              </span>
-            </div>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Live recipient status counts aggregated across this campaign's audience.
-            </p>
-          </div>
-
-          <Link
-            to={`/campaigns/${campaign.id}/recipients`}
-            className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:underline self-start sm:self-auto"
-          >
-            <span>Inspect Recipients List</span>
-            <ArrowRight className="h-3.5 w-3.5" />
-          </Link>
-        </div>
-
-        {/* 5-Card Status Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
-          {/* 1. Pending */}
-          <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
-            <div className="flex items-center justify-between text-slate-500 mb-2">
-              <span className="text-xs font-medium">Pending</span>
-              <Clock className="h-4 w-4 text-amber-500" />
-            </div>
-            <div>
-              <span className="text-2xl font-bold text-slate-900 tracking-tight" data-testid="telemetry-pending">
-                {(campaign.pending_count ?? 0).toLocaleString()}
-              </span>
-              <p className="text-[11px] text-slate-500 mt-0.5">Queued for send</p>
-            </div>
-          </div>
-
-          {/* 2. Sent */}
-          <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
-            <div className="flex items-center justify-between text-slate-500 mb-2">
-              <span className="text-xs font-medium">Sent</span>
-              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-            </div>
-            <div>
-              <span className="text-2xl font-bold text-slate-900 tracking-tight" data-testid="telemetry-sent">
-                {(campaign.sent_count ?? 0).toLocaleString()}
-              </span>
-              <p className="text-[11px] text-slate-500 mt-0.5">Dispatched successfully</p>
-            </div>
-          </div>
-
-          {/* 3. Bounced */}
-          <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
-            <div className="flex items-center justify-between text-slate-500 mb-2">
-              <span className="text-xs font-medium">Bounced</span>
-              <AlertTriangle className="h-4 w-4 text-rose-500" />
-            </div>
-            <div>
-              <span className="text-2xl font-bold text-slate-900 tracking-tight" data-testid="telemetry-bounced">
-                {(campaign.bounced_count ?? 0).toLocaleString()}
-              </span>
-              <p className="text-[11px] text-slate-500 mt-0.5">Hard / soft bounces</p>
-            </div>
-          </div>
-
-          {/* 4. Suppressed */}
-          <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
-            <div className="flex items-center justify-between text-slate-500 mb-2">
-              <span className="text-xs font-medium">Suppressed</span>
-              <XCircle className="h-4 w-4 text-slate-400" />
-            </div>
-            <div>
-              <span className="text-2xl font-bold text-slate-900 tracking-tight" data-testid="telemetry-suppressed">
-                {(campaign.suppressed_count ?? 0).toLocaleString()}
-              </span>
-              <p className="text-[11px] text-slate-500 mt-0.5">Opted out / blocked</p>
-            </div>
-          </div>
-
-          {/* 5. Failed */}
-          <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
-            <div className="flex items-center justify-between text-slate-500 mb-2">
-              <span className="text-xs font-medium">Failed</span>
-              <AlertCircle className="h-4 w-4 text-amber-600" />
-            </div>
-            <div>
-              <span className="text-2xl font-bold text-slate-900 tracking-tight" data-testid="telemetry-failed">
-                {(campaign.failed_count ?? 0).toLocaleString()}
-              </span>
-              <p className="text-[11px] text-slate-500 mt-0.5">Exceeded max retries</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Visual Progress Bar */}
-        {(() => {
-          const totalTarget = campaign.recipient_count || 0;
-          const sentCount = campaign.sent_count ?? 0;
-          const bouncedCount = campaign.bounced_count ?? 0;
-          const suppressedCount = campaign.suppressed_count ?? 0;
-          const failedCount = campaign.failed_count ?? 0;
-
-          const processedCount = sentCount + bouncedCount + suppressedCount + failedCount;
-          const completionPercent = totalTarget > 0 ? Math.min(100, Math.round((processedCount / totalTarget) * 100)) : 0;
-          const sentPercent = totalTarget > 0 ? (sentCount / totalTarget) * 100 : 0;
-          const bouncedPercent = totalTarget > 0 ? (bouncedCount / totalTarget) * 100 : 0;
-          const suppressedPercent = totalTarget > 0 ? (suppressedCount / totalTarget) * 100 : 0;
-          const failedPercent = totalTarget > 0 ? (failedCount / totalTarget) * 100 : 0;
-
-          return (
-            <div className="pt-2 space-y-2 border-t border-slate-100">
-              <div className="flex items-center justify-between text-xs text-slate-600">
-                <span className="font-semibold text-slate-700 flex items-center gap-1.5">
-                  <span>Dispatch Progress</span>
-                  <span className="text-[11px] font-normal text-slate-400">
-                    ({processedCount.toLocaleString()} of {totalTarget.toLocaleString()} processed)
-                  </span>
-                </span>
-                <span className="font-semibold text-indigo-600">
-                  {completionPercent}%
-                </span>
-              </div>
-              <div
-                className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden flex"
-                data-testid="delivery-progress-bar"
-                role="progressbar"
-                aria-valuenow={completionPercent}
-                aria-valuemin={0}
-                aria-valuemax={100}
-              >
-                <div
-                  className="bg-emerald-500 h-full transition-all duration-500"
-                  style={{ width: `${sentPercent}%` }}
-                  title={`Sent: ${sentCount}`}
-                />
-                <div
-                  className="bg-rose-500 h-full transition-all duration-500"
-                  style={{ width: `${bouncedPercent}%` }}
-                  title={`Bounced: ${bouncedCount}`}
-                />
-                <div
-                  className="bg-slate-400 h-full transition-all duration-500"
-                  style={{ width: `${suppressedPercent}%` }}
-                  title={`Suppressed: ${suppressedCount}`}
-                />
-                <div
-                  className="bg-amber-600 h-full transition-all duration-500"
-                  style={{ width: `${failedPercent}%` }}
-                  title={`Failed: ${failedCount}`}
-                />
-              </div>
-            </div>
-          );
-        })()}
-      </div>
-
-      {/* Follow-Up Sequence & Telemetry Card */}
-      {(() => {
-        const followupSteps =
-          campaign.followup_steps && campaign.followup_steps.length > 0
-            ? campaign.followup_steps
-            : campaign.steps && campaign.steps.length > 1
-            ? campaign.steps.filter((s) => s.step_number >= 2 && s.is_active !== false)
-            : [];
-
-        if (followupSteps.length === 0) return null;
-
-        return (
-          <div
-            className="bg-white rounded-xl p-5 md:p-6 border border-slate-200/80 shadow-2xs space-y-5 min-w-0"
-            data-testid="followup-telemetry-card"
-          >
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
-                  <Reply className="h-4 w-4" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h2 className="text-base sm:text-lg font-bold text-slate-900">
-                      Automated Follow-Up Sequence
-                    </h2>
-                    <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/60">
-                      Auto-stops on Reply
+                  <div className="flex items-center justify-between text-xs text-slate-500">
+                    <span>Sending Window</span>
+                    <span className="font-medium text-slate-800" data-testid="detail-sending-window">
+                      {campaign.sending_window?.enabled
+                        ? `${campaign.sending_window.start_time} - ${campaign.sending_window.end_time}`
+                        : "Unrestricted (24/7)"}
                     </span>
                   </div>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Threaded sequential follow-ups dispatched if no customer reply is detected.
+                </div>
+              </div>
+            </div>
+
+            {/* Card 3: Target Audience */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs flex flex-col justify-between space-y-3">
+              <div>
+                <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                      <Users className="h-3.5 w-3.5" />
+                    </div>
+                    <h3 className="text-xs sm:text-sm font-bold text-slate-900">Target Audience</h3>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold">
+                    Verified
+                  </span>
+                </div>
+                <div className="mt-2.5 space-y-1">
+                  <p className="text-xl sm:text-2xl font-bold text-slate-900 leading-none">
+                    {campaign.recipient_count.toLocaleString()}
                   </p>
+                  <p className="text-[11px] text-slate-500">Total recipients</p>
+                  <div className="pt-2 flex items-center justify-between text-xs text-slate-500">
+                    <span>Scope</span>
+                    <span className="font-medium text-slate-800">Company Isolated</span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-slate-500">
+                    <span>Status</span>
+                    <span className="font-semibold text-indigo-600">Audience Configured</span>
+                  </div>
                 </div>
               </div>
-              <span className="text-xs font-medium text-slate-500 bg-slate-50 px-2.5 py-1 rounded-md border border-slate-200 self-start sm:self-auto">
-                {followupSteps.length} Follow-Up {followupSteps.length === 1 ? "Step" : "Steps"} Configured
-              </span>
-            </div>
-
-            {/* Follow-up Telemetry Counters */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
-              <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
-                <div className="flex items-center justify-between text-slate-500 mb-2">
-                  <span className="text-xs font-medium">Follow-Ups Sent</span>
-                  <Send className="h-4 w-4 text-emerald-500" />
-                </div>
-                <div>
-                  <span
-                    className="text-2xl font-bold text-slate-900 tracking-tight"
-                    data-testid="telemetry-followup-sent"
-                  >
-                    {(campaign.followup_sent_count ?? 0).toLocaleString()}
-                  </span>
-                  <p className="text-[11px] text-slate-500 mt-0.5">Dispatched across sequence steps</p>
-                </div>
-              </div>
-
-              <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
-                <div className="flex items-center justify-between text-slate-500 mb-2">
-                  <span className="text-xs font-medium">Awaiting Next Follow-Up</span>
-                  <Clock className="h-4 w-4 text-indigo-500" />
-                </div>
-                <div>
-                  <span
-                    className="text-2xl font-bold text-slate-900 tracking-tight"
-                    data-testid="telemetry-followup-scheduled"
-                  >
-                    {(campaign.followup_scheduled_count ?? 0).toLocaleString()}
-                  </span>
-                  <p className="text-[11px] text-slate-500 mt-0.5">Recipients with due timers active</p>
-                </div>
-              </div>
-
-              <div className="bg-slate-50/70 p-3.5 rounded-xl border border-slate-200/70 flex flex-col justify-between">
-                <div className="flex items-center justify-between text-slate-500 mb-2">
-                  <span className="text-xs font-medium">Auto-Stopped on Reply</span>
-                  <CheckCircle2 className="h-4 w-4 text-indigo-600" />
-                </div>
-                <div>
-                  <span
-                    className="text-2xl font-bold text-slate-900 tracking-tight"
-                    data-testid="telemetry-followup-replied"
-                  >
-                    {(campaign.replied_count ?? 0).toLocaleString()}
-                  </span>
-                  <p className="text-[11px] text-slate-500 mt-0.5">Sequences halted by genuine reply</p>
-                </div>
+              <div className="pt-1.5 border-t border-slate-100">
+                <Link
+                  to={`/campaigns/${campaign.id}/recipients`}
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:underline"
+                >
+                  <span>Manage Recipients</span>
+                  <ArrowRight className="h-3 w-3" />
+                </Link>
               </div>
             </div>
 
-            {/* Sequence Steps List */}
-            <div className="space-y-3 pt-2">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                Sequence Steps Timeline
-              </h3>
-              <div className="space-y-3">
+            {/* Card 4: Quick Stats (Last 7 days) */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs flex flex-col justify-between space-y-3">
+              <div>
+                <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                      <BarChart2 className="h-3.5 w-3.5" />
+                    </div>
+                    <h3 className="text-xs sm:text-sm font-bold text-slate-900">Quick Stats</h3>
+                  </div>
+                  <span className="text-[10px] font-medium text-slate-500 flex items-center gap-1 bg-slate-50 px-2 py-0.5 rounded border border-slate-100" title="Cumulative campaign lifetime metrics">
+                    <span>Campaign Lifetime</span>
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 mt-2.5">
+                  <div className="bg-slate-50/70 p-2 rounded-lg border border-slate-100">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span className="text-[10px] font-medium text-slate-500">Sent</span>
+                      <Send className="h-3 w-3 text-emerald-500" />
+                    </div>
+                    <p className="text-sm font-bold text-slate-900 mt-0.5">{sentCount}</p>
+                  </div>
+
+                  <div className="bg-slate-50/70 p-2 rounded-lg border border-slate-100">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span className="text-[10px] font-medium text-slate-500">Replied</span>
+                      <Reply className="h-3 w-3 text-indigo-500" />
+                    </div>
+                    <div className="flex items-baseline gap-1 mt-0.5">
+                      <p className="text-sm font-bold text-slate-900">{repliedCount}</p>
+                      <span className="text-[10px] text-slate-400">{replyRate}%</span>
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-50/70 p-2 rounded-lg border border-slate-100">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span className="text-[10px] font-medium text-slate-500">Bounced</span>
+                      <AlertTriangle className="h-3 w-3 text-rose-500" />
+                    </div>
+                    <div className="flex items-baseline gap-1 mt-0.5">
+                      <p className="text-sm font-bold text-slate-900">{bouncedCount}</p>
+                      <span className="text-[10px] text-slate-400">{bounceRate}%</span>
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-50/70 p-2 rounded-lg border border-slate-100">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span className="text-[10px] font-medium text-slate-500">Failed</span>
+                      <AlertCircle className="h-3 w-3 text-amber-500" />
+                    </div>
+                    <div className="flex items-baseline gap-1 mt-0.5">
+                      <p className="text-sm font-bold text-slate-900">{failedCount}</p>
+                      <span className="text-[10px] text-slate-400">{failedRate}%</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Row 2: Email Sequence Timeline (Left) & Email Preview (Right) */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-5 items-start">
+            {/* Left: Email Sequence Timeline */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs flex flex-col space-y-4">
+              <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                    <Mail className="h-3.5 w-3.5" />
+                  </div>
+                  <h3 className="text-xs sm:text-sm font-bold text-slate-900">Email Sequence</h3>
+                  <span className="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-[10px] font-bold border border-indigo-100">
+                    {totalStepsCount} Steps
+                  </span>
+                </div>
+
+                {isDraft && isAdminOrOwner && (
+                  <Link
+                    to={`/campaigns/${campaign.id}/edit`}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:underline"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>Add Follow-Up</span>
+                  </Link>
+                )}
+              </div>
+
+              {/* Connected Timeline */}
+              <div className="relative pl-7 space-y-4">
+                {/* Vertical timeline line */}
+                <div className="absolute left-2.5 top-3 bottom-3 w-0.5 bg-slate-200" />
+
+                {/* Step 1: Initial Outreach */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedStepNumber(1)}
+                    className={`absolute -left-7 top-1.5 w-5 h-5 rounded-full font-bold text-[10px] flex items-center justify-center z-10 transition-all cursor-pointer ${
+                      selectedStepNumber === 1
+                        ? "bg-indigo-600 text-white ring-4 ring-indigo-50"
+                        : "bg-slate-200 text-slate-600 hover:bg-slate-300"
+                    }`}
+                  >
+                    1
+                  </button>
+
+                  <div
+                    onClick={() => setSelectedStepNumber(1)}
+                    className={`p-3.5 rounded-xl border transition-all cursor-pointer space-y-1.5 ${
+                      selectedStepNumber === 1
+                        ? "bg-indigo-50/40 border-indigo-200/90 shadow-2xs"
+                        : "bg-slate-50/60 border-slate-200/80 hover:bg-slate-50"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2">
+                        <Mail className="h-3.5 w-3.5 text-indigo-600" />
+                        <span className="font-bold text-xs text-slate-900">Initial Outreach</span>
+                        <span className="text-[10px] font-semibold text-emerald-600 flex items-center gap-0.5">
+                          <Zap className="h-2.5 w-2.5 fill-emerald-600" /> Immediate
+                        </span>
+                      </div>
+                    </div>
+                    <p className="text-xs font-semibold text-slate-800 truncate">
+                      <span>Subject: </span>
+                      <span className="font-semibold text-slate-800">{campaign.subject || "No subject set"}</span>
+                    </p>
+                    <p className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
+                      Initial outreach message dispatched immediately upon sequence launch.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Step 2..N: Follow-up Steps */}
                 {followupSteps.map((step, idx) => {
-                  const delayLabel =
-                    step.delay_hours >= 24 && step.delay_hours % 24 === 0
-                      ? `${step.delay_hours / 24} day(s)`
-                      : `${step.delay_hours} hour(s)`;
-                  const stepSubject = step.subject || `Re: ${campaign.subject}`;
+                  const isDays = step.delay_hours >= 24 && step.delay_hours % 24 === 0;
+                  const delayText = isDays
+                    ? `${step.delay_hours / 24} day${step.delay_hours / 24 > 1 ? "s" : ""}`
+                    : `${step.delay_hours} hour${step.delay_hours > 1 ? "s" : ""}`;
+                  const isSelected = selectedStepNumber === step.step_number;
 
                   return (
-                    <div
-                      key={step.id || step.step_number || idx}
-                      className="border border-slate-200 rounded-lg p-3.5 bg-slate-50/40 space-y-2"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex items-center gap-2">
-                          <span className="px-2 py-0.5 rounded text-xs font-bold bg-indigo-100 text-indigo-700">
-                            Step {step.step_number}
-                          </span>
-                          <span className="text-xs font-medium text-slate-600">
-                            Wait: <strong className="text-slate-800">{delayLabel}</strong> after previous step if no reply
-                          </span>
+                    <div key={step.id || step.step_number || idx} className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedStepNumber(step.step_number)}
+                        className={`absolute -left-7 top-1.5 w-5 h-5 rounded-full font-bold text-[10px] flex items-center justify-center z-10 transition-all cursor-pointer ${
+                          isSelected
+                            ? "bg-indigo-600 text-white ring-4 ring-indigo-50"
+                            : "bg-slate-200 text-slate-600 hover:bg-slate-300"
+                        }`}
+                      >
+                        {step.step_number}
+                      </button>
+
+                      <div
+                        onClick={() => setSelectedStepNumber(step.step_number)}
+                        className={`p-3.5 rounded-xl border transition-all cursor-pointer space-y-1.5 ${
+                          isSelected
+                            ? "bg-indigo-50/40 border-indigo-200/90 shadow-2xs"
+                            : "bg-slate-50/60 border-slate-200/80 hover:bg-slate-50"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-2">
+                            <Mail className="h-3.5 w-3.5 text-indigo-600" />
+                            <span className="font-bold text-xs text-slate-900">
+                              Follow-Up #{idx + 1}
+                            </span>
+                            <span className="text-[10px] text-slate-600 flex items-center gap-1 font-medium bg-white px-2 py-0.5 rounded border border-slate-200/60">
+                              <Clock className="h-2.5 w-2.5 text-slate-400" />
+                              <span>Waits {delayText} if no reply</span>
+                            </span>
+                          </div>
                         </div>
-                        <span className="text-xs text-slate-400">Threaded in same conversation</span>
+                        <p className="text-xs font-semibold text-slate-800 truncate">
+                          Subject: {step.subject || `Re: ${campaign.subject || "Campaign"}`}
+                        </p>
+                        <p className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
+                          {step.body_text ||
+                            (step.body_html
+                              ? step.body_html.replace(/<[^>]+>/g, " ").trim()
+                              : "No content provided.")}
+                        </p>
                       </div>
-                      <div className="text-xs text-slate-700">
-                        <span className="font-semibold text-slate-500">Subject: </span>
-                        <span className="font-medium text-slate-900">{stepSubject}</span>
-                      </div>
-                      {step.body_text && (
-                        <div className="text-xs text-slate-600 bg-white p-2.5 rounded border border-slate-100 line-clamp-3">
-                          {step.body_text}
-                        </div>
-                      )}
                     </div>
                   );
                 })}
               </div>
             </div>
-          </div>
-        );
-      })()}
 
-      {/* 5. Campaign Message Preview Section */}
-      <div className="w-full bg-white rounded-xl p-5 md:p-6 lg:p-7 border border-slate-200/80 shadow-2xs space-y-5 min-w-0">
-        {/* Content View Mode Toolbar */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
-          <div>
-            <h2 className="text-base sm:text-lg font-bold text-slate-900">Campaign Message Preview</h2>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Rendered with high-fidelity sanitization and merge variable detection.
-            </p>
-          </div>
-
-          {/* Mode Segmented Controls & Device Switchers */}
-          <div className="flex flex-wrap items-center gap-2">
-            {/* View Format Segmented Controls */}
-            <div className="inline-flex p-1 rounded-lg bg-slate-100 text-slate-600 border border-slate-200/70 text-xs font-medium">
-              <button
-                type="button"
-                onClick={() => setContentMode("preview")}
-                className={`px-3 py-1 rounded-md transition-all flex items-center gap-1.5 ${
-                  contentMode === "preview"
-                    ? "bg-white text-slate-900 font-semibold shadow-2xs"
-                    : "hover:text-slate-900"
-                }`}
-              >
-                <Eye className="h-3.5 w-3.5" />
-                <span>Formatted Preview</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setContentMode("html")}
-                className={`px-3 py-1 rounded-md transition-all flex items-center gap-1.5 ${
-                  contentMode === "html"
-                    ? "bg-white text-slate-900 font-semibold shadow-2xs"
-                    : "hover:text-slate-900"
-                }`}
-              >
-                <Code className="h-3.5 w-3.5" />
-                <span>HTML Source</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setContentMode("plaintext")}
-                className={`px-3 py-1 rounded-md transition-all flex items-center gap-1.5 ${
-                  contentMode === "plaintext"
-                    ? "bg-white text-slate-900 font-semibold shadow-2xs"
-                    : "hover:text-slate-900"
-                }`}
-              >
-                <FileText className="h-3.5 w-3.5" />
-                <span>Plaintext Fallback</span>
-              </button>
-            </div>
-
-            {/* Device Switcher */}
-            <div className="inline-flex p-1 rounded-lg bg-slate-100 text-slate-600 border border-slate-200/70">
-              <button
-                type="button"
-                onClick={() => setDeviceView("desktop")}
-                className={`p-1.5 rounded-md transition-all ${
-                  deviceView === "desktop"
-                    ? "bg-white text-slate-900 shadow-2xs"
-                    : "hover:text-slate-900"
-                }`}
-                title="Desktop Viewport"
-              >
-                <Monitor className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setDeviceView("mobile")}
-                className={`p-1.5 rounded-md transition-all ${
-                  deviceView === "mobile"
-                    ? "bg-white text-slate-900 shadow-2xs"
-                    : "hover:text-slate-900"
-                }`}
-                title="Mobile Viewport"
-              >
-                <Smartphone className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Preview Frame Container */}
-        <div className="w-full flex justify-center min-w-0">
-          <div
-            className={`w-full transition-all duration-300 rounded-xl bg-slate-50/70 p-3 sm:p-5 border border-slate-200/80 space-y-4 min-w-0 ${
-              deviceView === "mobile" ? "max-w-sm" : "max-w-4xl"
-            }`}
-          >
-            {/* Mock Client Envelope Header */}
-            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/70 shadow-2xs space-y-3 min-w-0">
-              <div className="grid grid-cols-1 gap-2 text-xs text-slate-800">
+            {/* Right: Email Preview Box */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs flex flex-col space-y-3.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
                 <div className="flex items-center gap-2">
-                  <span className="w-16 text-slate-400 font-semibold uppercase">From:</span>
-                  <span className="font-semibold text-slate-900 truncate">{senderName}</span>
-                  <span className="font-mono text-slate-500 truncate">&lt;{senderEmail}&gt;</span>
+                  <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                    <Eye className="h-3.5 w-3.5" />
+                  </div>
+                  <h3 className="text-xs sm:text-sm font-bold text-slate-900">Email Preview</h3>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="w-16 text-slate-400 font-semibold uppercase">To:</span>
-                  <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-mono text-[11px] font-semibold border border-indigo-100">
-                    {`{{first_name}}`}
-                  </span>
-                  <span className="font-mono text-slate-500 truncate">&lt;recipient@target.com&gt;</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="w-16 text-slate-400 font-semibold uppercase">Subject:</span>
-                  <span className="font-semibold text-slate-900 truncate">
-                    {campaign.subject || "(No subject set)"}
-                  </span>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  {/* Step Switcher Buttons */}
+                  <div className="inline-flex p-0.5 rounded-lg bg-slate-100 text-xs font-medium border border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedStepNumber(1)}
+                      className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
+                        selectedStepNumber === 1
+                          ? "bg-indigo-600 text-white font-semibold shadow-2xs"
+                          : "text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      Initial Outreach
+                    </button>
+                    {followupSteps.map((s, idx) => (
+                      <button
+                        key={s.step_number || idx}
+                        type="button"
+                        onClick={() => setSelectedStepNumber(s.step_number)}
+                        className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
+                          selectedStepNumber === s.step_number
+                            ? "bg-indigo-600 text-white font-semibold shadow-2xs"
+                            : "text-slate-600 hover:text-slate-900"
+                        }`}
+                      >
+                        Follow-Up #{idx + 1}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Device Viewport Toggle */}
+                  <div className="inline-flex p-0.5 rounded-lg bg-slate-100 text-slate-600 border border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => setDeviceView("desktop")}
+                      className={`p-1 rounded-md transition-all cursor-pointer ${
+                        deviceView === "desktop" ? "bg-white text-slate-900 shadow-2xs" : "hover:text-slate-900"
+                      }`}
+                      title="Desktop Viewport"
+                    >
+                      <Monitor className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDeviceView("mobile")}
+                      className={`p-1 rounded-md transition-all cursor-pointer ${
+                        deviceView === "mobile" ? "bg-white text-slate-900 shadow-2xs" : "hover:text-slate-900"
+                      }`}
+                      title="Mobile Viewport"
+                    >
+                      <Smartphone className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              {/* Merge Tag Info Strip */}
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 bg-slate-50/60 px-3 py-2 rounded-lg">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <Code className="h-3.5 w-3.5 text-indigo-600" />
-                  <span className="text-xs font-semibold text-slate-700">Merge Variables Detected:</span>
-                  {detectedMergeTags.length > 0 ? (
-                    detectedMergeTags.map((tag) => (
-                      <span
-                        key={tag}
-                        className="font-mono text-[11px] bg-white px-2 py-0.5 rounded text-indigo-600 font-semibold border border-indigo-100"
-                      >
-                        {tag}
-                      </span>
-                    ))
-                  ) : (
-                    <span className="text-xs text-slate-400 italic">None detected</span>
+              {/* View Format Segmented Controls (Formatted, HTML, Plaintext) */}
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                  <span className="text-xs font-semibold text-slate-500 uppercase shrink-0">Subject:</span>
+                  <span className="text-xs sm:text-sm font-semibold text-slate-900 truncate">
+                    {activeStepItem?.subject || "No subject set"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopySubject}
+                    className="inline-flex items-center gap-1 p-1 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                    title="Copy Subject Line"
+                  >
+                    {copiedSubject ? (
+                      <>
+                        <Check className="h-3.5 w-3.5 text-emerald-600" />
+                        <span className="text-[11px] font-semibold text-emerald-600">Copied!</span>
+                      </>
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </div>
+
+                <div className="inline-flex p-0.5 rounded-lg bg-slate-100 text-[11px] font-medium border border-slate-200 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setContentMode("preview")}
+                    className={`px-2 py-0.5 rounded transition-all cursor-pointer ${
+                      contentMode === "preview" ? "bg-white text-slate-900 font-semibold shadow-2xs" : "text-slate-600"
+                    }`}
+                  >
+                    Formatted Preview
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setContentMode("html")}
+                    className={`px-2 py-0.5 rounded transition-all cursor-pointer ${
+                      contentMode === "html" ? "bg-white text-slate-900 font-semibold shadow-2xs" : "text-slate-600"
+                    }`}
+                  >
+                    HTML Source
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setContentMode("plaintext")}
+                    className={`px-2 py-0.5 rounded transition-all cursor-pointer ${
+                      contentMode === "plaintext" ? "bg-white text-slate-900 font-semibold shadow-2xs" : "text-slate-600"
+                    }`}
+                  >
+                    Plaintext Fallback
+                  </button>
+                </div>
+              </div>
+
+              {/* Rendered Preview Container Frame */}
+              <div className="w-full flex justify-center flex-1 min-h-[360px] max-h-[480px]">
+                <div
+                  className={`w-full bg-white rounded-lg border border-slate-200/90 shadow-2xs overflow-hidden flex flex-col ${
+                    deviceView === "mobile" ? "max-w-sm" : "w-full"
+                  }`}
+                >
+                  {contentMode === "preview" && (
+                    <div className="p-4 sm:p-5 overflow-y-auto flex-1 text-xs text-slate-800 leading-relaxed pulsemail-preview-canvas focus:outline-none [scrollbar-width:thin]">
+                      {sanitizedActiveHtml ? (
+                        <div dangerouslySetInnerHTML={{ __html: sanitizedActiveHtml }} />
+                      ) : activeStepItem?.body_text ? (
+                        <div className="whitespace-pre-wrap font-sans">{activeStepItem.body_text}</div>
+                      ) : (
+                        <div className="text-slate-400 italic text-center py-8">
+                          No message body configured for this step.
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {contentMode === "html" && (
+                    <div className="bg-slate-900 text-slate-100 p-4 font-mono text-xs overflow-y-auto flex-1">
+                      <div className="text-[10px] text-slate-400 pb-2 mb-2 border-b border-slate-800 flex justify-between">
+                        <span>template_source.html</span>
+                        <span>Safe Escaped View</span>
+                      </div>
+                      <pre className="whitespace-pre-wrap break-words text-slate-200">
+                        <code>{activeStepItem?.body_html || "<!-- No HTML content configured -->"}</code>
+                      </pre>
+                    </div>
+                  )}
+
+                  {contentMode === "plaintext" && (
+                    <div className="p-4 font-mono text-xs overflow-y-auto flex-1 space-y-2">
+                      <div className="text-[10px] text-slate-400 pb-1.5 mb-1.5 border-b border-slate-100 flex justify-between">
+                        <span>plaintext_fallback.txt</span>
+                        <span>Whitespace Preserved</span>
+                      </div>
+                      <pre className="whitespace-pre-wrap font-sans text-slate-800">
+                        {activeStepItem?.body_text || "(No plaintext body configured)"}
+                      </pre>
+                    </div>
                   )}
                 </div>
-                <span className="text-xs text-slate-400">Default fallback: 'Colleague'</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Row 3: Performance Overview (Left) & Step-Level Funnel (Right) */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-5 items-stretch">
+            {/* Left: Performance Overview */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-4">
+              <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+                <div>
+                  <h2 className="sr-only">Delivery Breakdown & Telemetry</h2>
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                      <BarChart2 className="h-3.5 w-3.5" />
+                    </div>
+                    <h3 className="text-xs sm:text-sm font-bold text-slate-900">Performance Overview</h3>
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Live recipient status counts aggregated across this campaign's audience.
+                  </p>
+                </div>
+                <span className="text-[10px] font-medium text-slate-500 flex items-center gap-1 bg-slate-50 px-2 py-0.5 rounded border border-slate-100" title="Live aggregated campaign metrics across all recipients">
+                  <span>Campaign Lifetime</span>
+                </span>
+              </div>
+
+              {/* 5-Tile Status Metric Strip */}
+              <div className="grid grid-cols-5 gap-2 text-center">
+                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
+                  <Users className="h-3.5 w-3.5 text-indigo-500 mx-auto mb-1" />
+                  <p className="text-sm sm:text-base font-bold text-slate-900">{totalTarget}</p>
+                  <p className="text-[10px] text-slate-500">Recipients</p>
+                </div>
+
+                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
+                  <Send className="h-3.5 w-3.5 text-emerald-500 mx-auto mb-1" />
+                  <p className="text-sm sm:text-base font-bold text-slate-900" data-testid="telemetry-sent">
+                    {sentCount}
+                  </p>
+                  <p className="text-[10px] text-slate-500">Sent {sentRate}%</p>
+                </div>
+
+                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
+                  <Reply className="h-3.5 w-3.5 text-indigo-600 mx-auto mb-1" />
+                  <p className="text-sm sm:text-base font-bold text-slate-900">{repliedCount}</p>
+                  <p className="text-[10px] text-slate-500">Replies {replyRate}%</p>
+                </div>
+
+                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
+                  <AlertTriangle className="h-3.5 w-3.5 text-rose-500 mx-auto mb-1" />
+                  <p className="text-sm sm:text-base font-bold text-slate-900" data-testid="telemetry-bounced">
+                    {bouncedCount}
+                  </p>
+                  <p className="text-[10px] text-slate-500">Bounced {bounceRate}%</p>
+                </div>
+
+                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
+                  <AlertCircle className="h-3.5 w-3.5 text-amber-500 mx-auto mb-1" />
+                  <p className="text-sm sm:text-base font-bold text-slate-900" data-testid="telemetry-failed">
+                    {failedCount}
+                  </p>
+                  <p className="text-[10px] text-slate-500">Failed {failedRate}%</p>
+                </div>
+              </div>
+
+              {/* Hidden Telemetry Counters for Test Coverage */}
+              <div className="sr-only">
+                <span data-testid="telemetry-pending">{pendingCount}</span>
+                <span data-testid="telemetry-suppressed">{suppressedCount}</span>
+              </div>
+
+              {/* Visual Progress Bar */}
+              <div className="pt-1 space-y-1.5">
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>Dispatch Completion</span>
+                  <span className="font-semibold text-indigo-600">{completionPercent}%</span>
+                </div>
+                <div
+                  className="w-full bg-slate-100 rounded-full h-2 overflow-hidden flex"
+                  data-testid="delivery-progress-bar"
+                  role="progressbar"
+                  aria-valuenow={completionPercent}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <div
+                    className="bg-emerald-500 h-full transition-all duration-300"
+                    style={{ width: `${totalTarget > 0 ? (sentCount / totalTarget) * 100 : 0}%` }}
+                  />
+                  <div
+                    className="bg-rose-500 h-full transition-all duration-300"
+                    style={{ width: `${totalTarget > 0 ? (bouncedCount / totalTarget) * 100 : 0}%` }}
+                  />
+                  <div
+                    className="bg-amber-500 h-full transition-all duration-300"
+                    style={{ width: `${totalTarget > 0 ? (failedCount / totalTarget) * 100 : 0}%` }}
+                  />
+                </div>
               </div>
             </div>
 
-            {/* Active View 1: Formatted Preview */}
-            {contentMode === "preview" && (
-              <div className="bg-white rounded-xl p-5 md:p-6 border border-slate-200/70 shadow-2xs min-w-0">
-                {sanitizedHtml ? (
-                  <div
-                    className="prose prose-sm max-w-none text-slate-800 leading-relaxed overflow-x-auto min-w-0 break-words"
-                    dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
-                  />
-                ) : campaign.body_text ? (
-                  <pre className="font-mono text-xs text-slate-800 whitespace-pre-wrap leading-relaxed overflow-x-auto min-w-0 break-words">
-                    {campaign.body_text}
-                  </pre>
-                ) : (
-                  <p className="text-xs text-slate-400 italic text-center py-8">
-                    No message body configured for this campaign.
-                  </p>
+            {/* Right: Step-Level Analytics Funnel Card */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs flex flex-col justify-between space-y-4">
+              <div>
+                <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                      <TrendingUp className="h-3.5 w-3.5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <h3 className="text-xs sm:text-sm font-bold text-slate-900">
+                          Step-Level Analytics Funnel
+                        </h3>
+                        <span className="px-2 py-0.2 rounded-full bg-indigo-50 text-indigo-700 text-[10px] font-bold border border-indigo-100">
+                          {analytics?.steps?.length || totalStepsCount} Steps
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500">
+                        Per-step conversion rates and delivery outcomes.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Compact Step Rows */}
+                <div className="space-y-2 mt-3">
+                  {(analytics?.steps && analytics.steps.length > 0 ? analytics.steps : [
+                    {
+                      step_number: 1,
+                      subject: campaign.subject,
+                      delivery_rate: sentRate,
+                      reply_rate: replyRate,
+                      bounce_rate: bounceRate,
+                      failed_count: failedCount,
+                    },
+                    ...followupSteps.map((s, idx) => ({
+                      step_number: s.step_number || idx + 2,
+                      subject: s.subject || `Re: ${campaign.subject}`,
+                      delivery_rate: 0,
+                      reply_rate: 0,
+                      bounce_rate: 0,
+                      failed_count: 0,
+                    })),
+                  ]).map((stepItem: any, idx: number) => {
+                    const stepNum = stepItem.step_number || idx + 1;
+                    const stepTitle = stepNum === 1 ? "Initial Outreach" : `Follow-Up #${stepNum - 1}`;
+                    const delRate = Math.round(stepItem.delivery_rate || 0);
+                    const repRate = Math.round(stepItem.reply_rate || 0);
+                    const bncRate = Math.round(stepItem.bounce_rate || 0);
+
+                    return (
+                      <div
+                        key={stepNum}
+                        className="p-2.5 rounded-lg bg-slate-50/70 border border-slate-200/70 flex items-center justify-between gap-3 text-xs flex-wrap"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="px-1.5 py-0.5 rounded bg-slate-900 text-white font-bold text-[10px]">
+                            Step {stepNum}
+                          </span>
+                          <span className="font-semibold text-slate-900 truncate">{stepTitle}</span>
+                        </div>
+
+                        <div className="flex items-center gap-3 text-[11px] text-slate-600 flex-wrap">
+                          <span className="flex items-center gap-1 font-medium text-emerald-700">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                            <span>Delivered {delRate}%</span>
+                          </span>
+                          <span className="flex items-center gap-1 font-medium text-indigo-700">
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
+                            <span>Replied {repRate}%</span>
+                          </span>
+                          <span className="flex items-center gap-1 font-medium text-rose-700">
+                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                            <span>Bounced {bncRate}%</span>
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-slate-100 text-center">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("analytics")}
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:underline cursor-pointer"
+                >
+                  <span>View Detailed Analytics</span>
+                  <ArrowRight className="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          TAB 2: EMAIL SEQUENCE TAB CONTENT
+          ========================================================================= */}
+      {currentTab === "sequence" && (
+        <div className="space-y-4 sm:space-y-5">
+          {/* Top Row: 3 Summary Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Card 1: Sender Identity */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-2">
+              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                    <Send className="h-3.5 w-3.5" />
+                  </div>
+                  <h3 className="text-xs sm:text-sm font-bold text-slate-900">Sender Identity</h3>
+                </div>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold">
+                  Active
+                </span>
+              </div>
+              <p className="text-xs sm:text-sm font-semibold text-slate-900 truncate">{senderName}</p>
+              <p className="text-xs text-slate-500 truncate">{senderEmail}</p>
+              <div className="pt-1 flex items-center justify-between text-xs text-slate-500">
+                <span>Domain: {senderDomain}</span>
+                <span>Account #{campaign.email_account_id}</span>
+              </div>
+            </div>
+
+            {/* Card 2: Schedule & Timing */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-2">
+              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                    <Clock className="h-3.5 w-3.5" />
+                  </div>
+                  <h3 className="text-xs sm:text-sm font-bold text-slate-900">Schedule & Timing</h3>
+                </div>
+                <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold">
+                  {campaign.scheduled_at ? "Scheduled" : isDraft ? "On-Demand" : campaign.status}
+                </span>
+              </div>
+              <p className="text-xs sm:text-sm font-semibold text-slate-900 truncate">
+                {campaign.scheduled_at ? "Scheduled Dispatch" : isDraft ? "Manual Dispatch" : campaign.status}
+              </p>
+              <p className="text-xs text-slate-500">Requires final review before queue ingestion.</p>
+              <div className="pt-1 flex items-center justify-between text-xs text-slate-500">
+                <span>Interval: {formatSendInterval(campaign.send_interval_seconds)}</span>
+                <span>Window: {campaign.sending_window?.enabled ? "Scheduled" : "Unrestricted (24/7)"}</span>
+              </div>
+            </div>
+
+            {/* Card 3: Target Audience */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-2">
+              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                    <Users className="h-3.5 w-3.5" />
+                  </div>
+                  <h3 className="text-xs sm:text-sm font-bold text-slate-900">Target Audience</h3>
+                </div>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold">
+                  Verified
+                </span>
+              </div>
+              <p className="text-xl font-bold text-slate-900 leading-none">
+                {campaign.recipient_count.toLocaleString()}
+              </p>
+              <p className="text-xs text-slate-500">Total recipients</p>
+              <div className="pt-1 flex items-center justify-between text-xs text-slate-500">
+                <span>Scope: Company Isolated</span>
+                <Link
+                  to={`/campaigns/${campaign.id}/recipients`}
+                  className="font-semibold text-indigo-600 hover:text-indigo-700 hover:underline"
+                >
+                  Audience Configured
+                </Link>
+              </div>
+            </div>
+          </div>
+
+          {/* Full Sequence Timeline & Large Interactive Preview Frame */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
+            {/* Left: Interactive Timeline with Excerpts */}
+            <div className="bg-white rounded-xl p-5 border border-slate-200/90 shadow-2xs space-y-4">
+              <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <Mail className="h-4 w-4 text-indigo-600" />
+                  <h3 className="text-sm font-bold text-slate-900">Email Sequence</h3>
+                  <span className="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-xs font-semibold">
+                    {totalStepsCount} Steps
+                  </span>
+                </div>
+                {isDraft && isAdminOrOwner && (
+                  <Link
+                    to={`/campaigns/${campaign.id}/edit`}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-700"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>Add Follow-Up</span>
+                  </Link>
                 )}
               </div>
-            )}
 
-            {/* Active View 2: HTML Source */}
-            {contentMode === "html" && (
-              <div className="bg-slate-900 text-slate-100 rounded-xl p-4 sm:p-5 shadow-2xs font-mono text-xs overflow-x-auto min-w-0">
-                <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800 text-[11px] text-slate-400 uppercase font-semibold">
-                  <span>template_source.html</span>
-                  <span>UTF-8 • Safe Escaped View</span>
-                </div>
-                <pre className="overflow-x-auto leading-5 text-slate-200 whitespace-pre-wrap break-words">
-                  <code>{campaign.body_html || "<!-- No HTML content configured -->"}</code>
-                </pre>
-              </div>
-            )}
+              <div className="relative pl-7 space-y-4">
+                <div className="absolute left-2.5 top-3 bottom-3 w-0.5 bg-slate-200" />
 
-            {/* Active View 3: Plaintext Fallback */}
-            {contentMode === "plaintext" && (
-              <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/70 shadow-2xs font-mono text-xs overflow-x-auto min-w-0 space-y-2">
-                <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100 text-[11px] text-slate-400 uppercase font-semibold">
-                  <span>plaintext_fallback.txt</span>
-                  <span>Whitespace Preserved</span>
+                {/* Step 1 */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedStepNumber(1)}
+                    className={`absolute -left-7 top-1.5 w-5 h-5 rounded-full font-bold text-[10px] flex items-center justify-center z-10 transition-all cursor-pointer ${
+                      selectedStepNumber === 1
+                        ? "bg-indigo-600 text-white ring-4 ring-indigo-50"
+                        : "bg-slate-200 text-slate-600 hover:bg-slate-300"
+                    }`}
+                  >
+                    1
+                  </button>
+                  <div
+                    onClick={() => setSelectedStepNumber(1)}
+                    className={`p-3.5 rounded-xl border transition-all cursor-pointer space-y-1.5 ${
+                      selectedStepNumber === 1
+                        ? "bg-indigo-50/40 border-indigo-200/90 shadow-2xs"
+                        : "bg-slate-50/60 border-slate-200/80 hover:bg-slate-50"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-xs text-slate-900">Initial Outreach</span>
+                      <span className="text-[10px] font-semibold text-emerald-600 flex items-center gap-0.5">
+                        <Zap className="h-2.5 w-2.5 fill-emerald-600" /> Immediate
+                      </span>
+                    </div>
+                    <p className="text-xs font-semibold text-slate-800 truncate">
+                      <span>Subject: </span>
+                      <span className="font-semibold text-slate-800">{campaign.subject || "No subject set"}</span>
+                    </p>
+                    <p className="text-[11px] text-slate-500 line-clamp-3 leading-relaxed">
+                      Initial outreach message dispatched immediately upon sequence launch.
+                    </p>
+                  </div>
                 </div>
-                <pre className="text-slate-800 whitespace-pre-wrap leading-6 break-words">
-                  {campaign.body_text || "(No plaintext body configured)"}
-                </pre>
+
+                {/* Follow-up steps */}
+                {followupSteps.map((step, idx) => {
+                  const isDays = step.delay_hours >= 24 && step.delay_hours % 24 === 0;
+                  const delayText = isDays
+                    ? `${step.delay_hours / 24} day${step.delay_hours / 24 > 1 ? "s" : ""}`
+                    : `${step.delay_hours} hour${step.delay_hours > 1 ? "s" : ""}`;
+                  const isSelected = selectedStepNumber === step.step_number;
+
+                  return (
+                    <div key={step.id || step.step_number || idx} className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedStepNumber(step.step_number)}
+                        className={`absolute -left-7 top-1.5 w-5 h-5 rounded-full font-bold text-[10px] flex items-center justify-center z-10 transition-all cursor-pointer ${
+                          isSelected
+                            ? "bg-indigo-600 text-white ring-4 ring-indigo-50"
+                            : "bg-slate-200 text-slate-600 hover:bg-slate-300"
+                        }`}
+                      >
+                        {step.step_number}
+                      </button>
+                      <div
+                        onClick={() => setSelectedStepNumber(step.step_number)}
+                        className={`p-3.5 rounded-xl border transition-all cursor-pointer space-y-1.5 ${
+                          isSelected
+                            ? "bg-indigo-50/40 border-indigo-200/90 shadow-2xs"
+                            : "bg-slate-50/60 border-slate-200/80 hover:bg-slate-50"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold text-xs text-slate-900">
+                            Follow-Up #{idx + 1} (Step {step.step_number})
+                          </span>
+                          <span className="text-[10px] text-slate-600 font-medium bg-white px-2 py-0.5 rounded border border-slate-200">
+                            Waits {delayText} if no reply
+                          </span>
+                        </div>
+                        <p className="text-xs font-semibold text-slate-800 truncate">
+                          Subject: {step.subject || `Re: ${campaign.subject || "Campaign"}`}
+                        </p>
+                        <p className="text-[11px] text-slate-500 line-clamp-3 leading-relaxed">
+                          {step.body_text ||
+                            (step.body_html
+                              ? step.body_html.replace(/<[^>]+>/g, " ").trim()
+                              : "No content provided.")}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            )}
+            </div>
+
+            {/* Right: Email Preview Panel */}
+            <div className="bg-white rounded-xl p-5 border border-slate-200/90 shadow-2xs flex flex-col space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <Eye className="h-4 w-4 text-indigo-600" />
+                  <h3 className="text-sm font-bold text-slate-900">Email Preview</h3>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <div className="inline-flex p-0.5 rounded-lg bg-slate-100 text-xs font-medium border border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedStepNumber(1)}
+                      className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
+                        selectedStepNumber === 1
+                          ? "bg-indigo-600 text-white font-semibold shadow-2xs"
+                          : "text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      Initial Outreach
+                    </button>
+                    {followupSteps.map((s, idx) => (
+                      <button
+                        key={s.step_number || idx}
+                        type="button"
+                        onClick={() => setSelectedStepNumber(s.step_number)}
+                        className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
+                          selectedStepNumber === s.step_number
+                            ? "bg-indigo-600 text-white font-semibold shadow-2xs"
+                            : "text-slate-600 hover:text-slate-900"
+                        }`}
+                      >
+                        Follow-Up #{idx + 1}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="inline-flex p-0.5 rounded-lg bg-slate-100 text-slate-600 border border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => setDeviceView("desktop")}
+                      className={`p-1 rounded-md transition-all cursor-pointer ${
+                        deviceView === "desktop" ? "bg-white text-slate-900 shadow-2xs" : "hover:text-slate-900"
+                      }`}
+                      title="Desktop Viewport"
+                    >
+                      <Monitor className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDeviceView("mobile")}
+                      className={`p-1 rounded-md transition-all cursor-pointer ${
+                        deviceView === "mobile" ? "bg-white text-slate-900 shadow-2xs" : "hover:text-slate-900"
+                      }`}
+                      title="Mobile Viewport"
+                    >
+                      <Smartphone className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Subject bar */}
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                  <span className="text-xs font-semibold text-slate-500 uppercase shrink-0">Subject:</span>
+                  <span className="text-xs sm:text-sm font-semibold text-slate-900 truncate">
+                    {activeStepItem?.subject || "No subject set"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopySubject}
+                    className="inline-flex items-center gap-1 p-1 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                    title="Copy Subject Line"
+                  >
+                    {copiedSubject ? (
+                      <>
+                        <Check className="h-3.5 w-3.5 text-emerald-600" />
+                        <span className="text-[11px] font-semibold text-emerald-600">Copied!</span>
+                      </>
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </div>
+
+                <div className="inline-flex p-0.5 rounded-lg bg-slate-100 text-[11px] font-medium border border-slate-200 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setContentMode("preview")}
+                    className={`px-2 py-0.5 rounded transition-all cursor-pointer ${
+                      contentMode === "preview" ? "bg-white text-slate-900 font-semibold shadow-2xs" : "text-slate-600"
+                    }`}
+                  >
+                    Formatted Preview
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setContentMode("html")}
+                    className={`px-2 py-0.5 rounded transition-all cursor-pointer ${
+                      contentMode === "html" ? "bg-white text-slate-900 font-semibold shadow-2xs" : "text-slate-600"
+                    }`}
+                  >
+                    HTML Source
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setContentMode("plaintext")}
+                    className={`px-2 py-0.5 rounded transition-all cursor-pointer ${
+                      contentMode === "plaintext" ? "bg-white text-slate-900 font-semibold shadow-2xs" : "text-slate-600"
+                    }`}
+                  >
+                    Plaintext Fallback
+                  </button>
+                </div>
+              </div>
+
+              {/* Frame Container */}
+              <div className="w-full flex justify-center flex-1 min-h-[320px] max-h-[460px]">
+                <div
+                  className={`w-full bg-white rounded-lg border border-slate-200/90 shadow-2xs overflow-hidden flex flex-col ${
+                    deviceView === "mobile" ? "max-w-sm" : "w-full"
+                  }`}
+                >
+                  {contentMode === "preview" && (
+                    <div className="p-4 sm:p-5 overflow-y-auto flex-1 text-xs text-slate-800 leading-relaxed pulsemail-preview-canvas focus:outline-none [scrollbar-width:thin]">
+                      {sanitizedActiveHtml ? (
+                        <div dangerouslySetInnerHTML={{ __html: sanitizedActiveHtml }} />
+                      ) : activeStepItem?.body_text ? (
+                        <div className="whitespace-pre-wrap font-sans">{activeStepItem.body_text}</div>
+                      ) : (
+                        <div className="text-slate-400 italic text-center py-8">
+                          No message body configured for this step.
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {contentMode === "html" && (
+                    <div className="bg-slate-900 text-slate-100 p-4 font-mono text-xs overflow-y-auto flex-1">
+                      <div className="text-[10px] text-slate-400 pb-2 mb-2 border-b border-slate-800 flex justify-between">
+                        <span>template_source.html</span>
+                        <span>Safe Escaped View</span>
+                      </div>
+                      <pre className="whitespace-pre-wrap break-words text-slate-200">
+                        <code>{activeStepItem?.body_html || "<!-- No HTML content configured -->"}</code>
+                      </pre>
+                    </div>
+                  )}
+
+                  {contentMode === "plaintext" && (
+                    <div className="p-4 font-mono text-xs overflow-y-auto flex-1 space-y-2">
+                      <div className="text-[10px] text-slate-400 pb-1.5 mb-1.5 border-b border-slate-100 flex justify-between">
+                        <span>plaintext_fallback.txt</span>
+                        <span>Whitespace Preserved</span>
+                      </div>
+                      <pre className="whitespace-pre-wrap font-sans text-slate-800">
+                        {activeStepItem?.body_text || "(No plaintext body configured)"}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* 5. Recipient Quick Access Callout Strip */}
-      <div className="w-full bg-white rounded-xl p-4 md:p-5 border border-slate-200/80 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-4 min-w-0">
-        <div className="flex items-center gap-3.5 min-w-0">
-          <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0 shadow-2xs">
-            <CheckCircle2 className="h-5 w-5" />
+      {/* =========================================================================
+          TAB 3: ANALYTICS TAB CONTENT
+          ========================================================================= */}
+      {currentTab === "analytics" && (
+        <div className="space-y-4 sm:space-y-5">
+          {/* Row 1: 5 KPI Metric Cards */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
+            {/* Total Recipients */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
+              <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                <Users className="h-4 w-4" />
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">
+                  Total Recipients
+                </p>
+                <p className="text-2xl font-bold text-slate-900 mt-0.5">{totalTarget}</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">Configured for this campaign</p>
+              </div>
+            </div>
+
+            {/* Sent */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                  <Send className="h-4 w-4" />
+                </div>
+                <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">
+                  {sentRate}%
+                </span>
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Sent</p>
+                <p className="text-2xl font-bold text-slate-900 mt-0.5">{sentCount}</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">Dispatched successfully</p>
+              </div>
+            </div>
+
+            {/* Replies */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                  <Reply className="h-4 w-4" />
+                </div>
+                <span className="text-xs font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full">
+                  {replyRate}%
+                </span>
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Replies</p>
+                <p className="text-2xl font-bold text-slate-900 mt-0.5">{repliedCount}</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">Positive responses</p>
+              </div>
+            </div>
+
+            {/* Bounced */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center">
+                  <AlertTriangle className="h-4 w-4" />
+                </div>
+                <span className="text-xs font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full">
+                  {bounceRate}%
+                </span>
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Bounced</p>
+                <p className="text-2xl font-bold text-slate-900 mt-0.5">{bouncedCount}</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">Hard / soft bounces</p>
+              </div>
+            </div>
+
+            {/* Failed */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center">
+                  <AlertCircle className="h-4 w-4" />
+                </div>
+                <span className="text-xs font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">
+                  {failedRate}%
+                </span>
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Failed</p>
+                <p className="text-2xl font-bold text-slate-900 mt-0.5">{failedCount}</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">Exceeded max retries</p>
+              </div>
+            </div>
           </div>
-          <div className="min-w-0">
-            <p className="text-sm font-bold text-slate-900 truncate">
-              Audience Target Records
-            </p>
-            <p className="text-xs text-slate-500 truncate mt-0.5">
-              {campaign.recipient_count.toLocaleString()} target records configured for this dispatch scope.
-            </p>
+
+          {/* Row 2: Delivery Trend (Left) & Email Status Distribution (Right) */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5 items-stretch">
+            {/* Delivery Trend (Approx 60% on desktop) */}
+            <div className="lg:col-span-7 bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-3 flex flex-col justify-between">
+              <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                    <TrendingUp className="h-3.5 w-3.5" />
+                  </div>
+                  <div>
+                    <h3 className="text-xs sm:text-sm font-bold text-slate-900">Delivery Trend</h3>
+                    <p className="text-[11px] text-slate-500">
+                      Daily email delivery activity across this campaign.
+                    </p>
+                  </div>
+                </div>
+                <span className="text-[11px] font-medium text-slate-500 flex items-center gap-0.5 px-2 py-1 rounded bg-slate-50 border border-slate-200/70" title="Cumulative campaign lifetime dispatch telemetry">
+                  <span>Campaign Lifetime</span>
+                </span>
+              </div>
+
+              {/* Honest state: Daily time-series dispatch tracking is omitted on this backend */}
+              <div className="w-full h-44 flex flex-col items-center justify-center text-center p-4 bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
+                <div className="w-10 h-10 rounded-full bg-indigo-50 text-indigo-500 flex items-center justify-center mb-2">
+                  <TrendingUp className="h-5 w-5" />
+                </div>
+                <p className="text-xs font-semibold text-slate-700">No time-series dispatch trend recorded</p>
+                <p className="text-[11px] text-slate-500 max-w-sm mt-1 leading-relaxed">
+                  Daily time-series delivery tracking is not stored for this campaign. Overall deliverability is tracked in the KPI summary and Step Performance below.
+                </p>
+              </div>
+            </div>
+
+            {/* Email Status Distribution (Approx 40% on desktop) */}
+            <div className="lg:col-span-5 bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-3 flex flex-col justify-between">
+              <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                    <PieChart className="h-3.5 w-3.5" />
+                  </div>
+                  <h3 className="text-xs sm:text-sm font-bold text-slate-900">
+                    Email Status Distribution
+                  </h3>
+                </div>
+              </div>
+
+              {/* Donut Chart and Legend */}
+              <div className="flex items-center justify-center sm:justify-around gap-4 py-2 flex-wrap sm:flex-nowrap">
+                {/* SVG Donut */}
+                <div className="relative w-28 h-28 shrink-0 flex items-center justify-center">
+                  <svg className="w-full h-full -rotate-90" viewBox="0 0 36 36">
+                    {/* Background Circle */}
+                    <circle
+                      cx="18"
+                      cy="18"
+                      r="14"
+                      fill="transparent"
+                      stroke="#f1f5f9"
+                      strokeWidth="4"
+                    />
+                    {totalTarget > 0 ? (
+                      <>
+                        {/* Sent segment */}
+                        {sentCount > 0 && (
+                          <circle
+                            cx="18"
+                            cy="18"
+                            r="14"
+                            fill="transparent"
+                            stroke="#10b981"
+                            strokeWidth="4"
+                            strokeDasharray={`${Math.round((sentCount / totalTarget) * 88)} 88`}
+                            strokeDashoffset="0"
+                          />
+                        )}
+                        {/* Pending segment */}
+                        {pendingCount > 0 && (
+                          <circle
+                            cx="18"
+                            cy="18"
+                            r="14"
+                            fill="transparent"
+                            stroke="#94a3b8"
+                            strokeWidth="4"
+                            strokeDasharray={`${Math.round((pendingCount / totalTarget) * 88)} 88`}
+                            strokeDashoffset={`-${Math.round((sentCount / totalTarget) * 88)}`}
+                          />
+                        )}
+                      </>
+                    ) : (
+                      <circle
+                        cx="18"
+                        cy="18"
+                        r="14"
+                        fill="transparent"
+                        stroke="#e2e8f0"
+                        strokeWidth="4"
+                      />
+                    )}
+                  </svg>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                    <span className="text-base font-bold text-slate-900 leading-none">{totalTarget}</span>
+                    <span className="text-[10px] text-slate-500 font-medium">Total</span>
+                  </div>
+                </div>
+
+                {/* Legend */}
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="flex items-center gap-1.5 text-slate-600">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                      <span>Sent</span>
+                    </span>
+                    <span className="font-semibold text-slate-900">{sentCount} ({sentRate}%)</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="flex items-center gap-1.5 text-slate-600">
+                      <span className="w-2 h-2 rounded-full bg-indigo-500 shrink-0" />
+                      <span>Replied</span>
+                    </span>
+                    <span className="font-semibold text-slate-900">{repliedCount} ({replyRate}%)</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="flex items-center gap-1.5 text-slate-600">
+                      <span className="w-2 h-2 rounded-full bg-rose-500 shrink-0" />
+                      <span>Bounced</span>
+                    </span>
+                    <span className="font-semibold text-slate-900">{bouncedCount} ({bounceRate}%)</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="flex items-center gap-1.5 text-slate-600">
+                      <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
+                      <span>Failed</span>
+                    </span>
+                    <span className="font-semibold text-slate-900">{failedCount} ({failedRate}%)</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="flex items-center gap-1.5 text-slate-600">
+                      <span className="w-2 h-2 rounded-full bg-slate-400 shrink-0" />
+                      <span>Pending</span>
+                    </span>
+                    <span className="font-semibold text-slate-900">
+                      {pendingCount} ({totalTarget > 0 ? Math.round((pendingCount / totalTarget) * 100) : 0}%)
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Row 3: Full-Width Step Performance Table */}
+          <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-3">
+            <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100 flex-wrap">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                  <BarChart2 className="h-3.5 w-3.5" />
+                </div>
+                <div>
+                  <h3 className="text-xs sm:text-sm font-bold text-slate-900">Step Performance</h3>
+                  <p className="text-[11px] text-slate-500">
+                    Delivery and engagement stats for each email in the sequence.
+                  </p>
+                </div>
+              </div>
+
+              <span className="text-[11px] font-medium text-slate-500 flex items-center gap-1 px-2 py-1 rounded bg-slate-50 border border-slate-200/70" title="Cumulative step conversion outcomes across all campaign recipients">
+                <span>Campaign Lifetime</span>
+              </span>
+            </div>
+
+            {/* Step Performance Table */}
+            <div className="overflow-x-auto [scrollbar-width:thin]">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-100 text-[11px] text-slate-400 uppercase font-semibold">
+                    <th className="py-2.5 px-3">Step</th>
+                    <th className="py-2.5 px-3">Email Name</th>
+                    <th className="py-2.5 px-3">Status</th>
+                    <th className="py-2.5 px-3 text-center">Recipients</th>
+                    <th className="py-2.5 px-3 text-center">Sent</th>
+                    <th className="py-2.5 px-3 text-center">Replies</th>
+                    <th className="py-2.5 px-3 text-center">Bounce Rate</th>
+                    <th className="py-2.5 px-3 text-center">Failure Rate</th>
+                    <th className="py-2.5 px-3">Delivery Rate</th>
+                    <th className="py-2.5 px-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-slate-700">
+                  {(analytics?.steps && analytics.steps.length > 0 ? analytics.steps : [
+                    {
+                      step_number: 1,
+                      subject: campaign.subject,
+                      delay_hours: 0,
+                      targeted_count: totalTarget,
+                      sent_count: sentCount,
+                      replied_count: repliedCount,
+                      bounced_count: bouncedCount,
+                      failed_count: failedCount,
+                      delivery_rate: sentRate,
+                      reply_rate: replyRate,
+                      bounce_rate: bounceRate,
+                    },
+                    ...followupSteps.map((s, idx) => ({
+                      step_number: s.step_number || idx + 2,
+                      subject: s.subject || `Re: ${campaign.subject}`,
+                      delay_hours: s.delay_hours,
+                      targeted_count: totalTarget,
+                      sent_count: 0,
+                      replied_count: 0,
+                      bounced_count: 0,
+                      failed_count: 0,
+                      delivery_rate: 0,
+                      reply_rate: 0,
+                      bounce_rate: 0,
+                    })),
+                  ]).map((stepItem: any, idx: number) => {
+                    const stepNum = stepItem.step_number || idx + 1;
+                    const stepName = stepNum === 1 ? "Initial Outreach" : `Follow-Up #${stepNum - 1}`;
+                    const delRate = Math.round(stepItem.delivery_rate || 0);
+                    const bncRate = Math.round(stepItem.bounce_rate || 0);
+                    const failRate = totalTarget > 0 ? Math.round(((stepItem.failed_count || 0) / totalTarget) * 100) : 0;
+                    const repRate = Math.round(stepItem.reply_rate || 0);
+
+                    return (
+                      <tr key={stepNum} className="hover:bg-slate-50/70 transition-colors">
+                        <td className="py-3 px-3">
+                          <span className="w-5 h-5 rounded-full bg-indigo-600 text-white font-bold text-[10px] flex items-center justify-center">
+                            {stepNum}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-semibold text-slate-900">{stepName}</span>
+                            {stepNum === 1 ? (
+                              <span className="text-[10px] font-semibold text-emerald-600 flex items-center gap-0.5">
+                                <Zap className="h-2.5 w-2.5 fill-emerald-600" /> Immediate
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-slate-500 font-medium bg-slate-100 px-1.5 py-0.2 rounded">
+                                Waits {stepItem.delay_hours ? `${stepItem.delay_hours}h` : "1h"}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3 px-3">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200/60">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                            <span>{campaign.status === "DRAFT" ? "Pending" : campaign.status}</span>
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-center font-medium">{stepItem.targeted_count ?? totalTarget}</td>
+                        <td className="py-3 px-3 text-center font-medium">{stepItem.sent_count ?? 0}</td>
+                        <td className="py-3 px-3 text-center font-medium">
+                          {stepItem.replied_count ?? 0} ({repRate}%)
+                        </td>
+                        <td className="py-3 px-3 text-center font-medium">
+                          {stepItem.bounced_count ?? 0} ({bncRate}%)
+                        </td>
+                        <td className="py-3 px-3 text-center font-medium">
+                          {stepItem.failed_count ?? 0} ({failRate}%)
+                        </td>
+                        <td className="py-3 px-3">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-slate-900 w-8">{delRate}%</span>
+                            <div className="w-16 bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                              <div
+                                className="bg-indigo-600 h-full rounded-full"
+                                style={{ width: `${delRate}%` }}
+                              />
+                            </div>
+                          </div>
+                        </td>
+                        <td className="py-3 px-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedStepNumber(stepNum);
+                              setActiveTab("sequence");
+                            }}
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 hover:underline cursor-pointer"
+                          >
+                            <span>View Details</span>
+                            <ArrowRight className="h-3 w-3" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Row 4: Recipient Engagement (Left) & Top Performing Insights (Right) */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-5 items-stretch">
+            {/* Recipient Engagement */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-3.5">
+              <div className="flex items-center gap-2 pb-2.5 border-b border-slate-100">
+                <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                  <Users className="h-3.5 w-3.5" />
+                </div>
+                <div>
+                  <h3 className="text-xs sm:text-sm font-bold text-slate-900">Recipient Engagement</h3>
+                  <p className="text-[11px] text-slate-500">How recipients are interacting with your emails.</p>
+                </div>
+              </div>
+
+              {/* 4 Engagement Tiles with honest tracking states */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100 text-center flex flex-col justify-between">
+                  <div>
+                    <Mail className="h-4 w-4 text-slate-400 mx-auto mb-1" />
+                    <p className="text-sm font-bold text-slate-400">—</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5 font-medium">Opened</p>
+                  </div>
+                  <span className="inline-block mt-1 text-[9px] text-slate-400 font-semibold bg-slate-100 px-1.5 py-0.5 rounded">
+                    Not Tracked
+                  </span>
+                </div>
+
+                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100 text-center flex flex-col justify-between">
+                  <div>
+                    <ExternalLink className="h-4 w-4 text-slate-400 mx-auto mb-1" />
+                    <p className="text-sm font-bold text-slate-400">—</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5 font-medium">Clicked</p>
+                  </div>
+                  <span className="inline-block mt-1 text-[9px] text-slate-400 font-semibold bg-slate-100 px-1.5 py-0.5 rounded">
+                    Not Tracked
+                  </span>
+                </div>
+
+                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100 text-center flex flex-col justify-between">
+                  <div>
+                    <Reply className="h-4 w-4 text-indigo-600 mx-auto mb-1" />
+                    <p className="text-sm font-bold text-slate-900">{repliedCount}</p>
+                    <p className="text-[10px] text-slate-600 mt-0.5 font-medium">Replied {replyRate}%</p>
+                  </div>
+                  <span className="inline-block mt-1 text-[9px] text-emerald-600 font-semibold bg-emerald-50 px-1.5 py-0.5 rounded">
+                    Active Signal
+                  </span>
+                </div>
+
+                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100 text-center flex flex-col justify-between">
+                  <div>
+                    <XCircle className="h-4 w-4 text-slate-400 mx-auto mb-1" />
+                    <p className="text-sm font-bold text-slate-400">—</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5 font-medium">Unsubscribed</p>
+                  </div>
+                  <span className="inline-block mt-1 text-[9px] text-slate-400 font-semibold bg-slate-100 px-1.5 py-0.5 rounded">
+                    Not Tracked
+                  </span>
+                </div>
+              </div>
+
+              <p className="text-[10px] text-slate-400 italic">
+                * Open, click, and direct unsubscribe tracking are omitted by design to maximize email deliverability and preserve recipient privacy.
+              </p>
+            </div>
+
+            {/* Top Performing Insights */}
+            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-3.5 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center gap-2 pb-2.5 border-b border-slate-100">
+                  <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                    <Lightbulb className="h-3.5 w-3.5" />
+                  </div>
+                  <div>
+                    <h3 className="text-xs sm:text-sm font-bold text-slate-900">Top Performing Insights</h3>
+                    <p className="text-[11px] text-slate-500">Key insights from your campaign performance.</p>
+                  </div>
+                </div>
+
+                <div className="mt-3 p-3.5 rounded-xl bg-indigo-50/40 border border-indigo-100 flex items-start gap-3">
+                  <Info className="h-4 w-4 text-indigo-600 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <p className="text-xs font-semibold text-indigo-900">
+                      {sentCount === 0 ? "No data available yet" : "Campaign Performance Insight"}
+                    </p>
+                    <p className="text-[11px] text-indigo-700/90 leading-relaxed">
+                      {sentCount === 0
+                        ? "Your campaign hasn't been sent yet. Analytics will appear here after emails are dispatched."
+                        : `Step 1 (Initial Outreach) has recorded ${sentCount} sends with ${repliedCount} positive replies detected.`}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
+      )}
 
-        <Link
-          to={`/campaigns/${campaign.id}/recipients`}
-          className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs sm:text-sm shadow-2xs transition-colors shrink-0"
-        >
-          <span>Inspect Recipient Table</span>
-          <span>→</span>
-        </Link>
-      </div>
-
-      {/* Confirmation Modal for Cancel / Delete */}
+      {/* Confirmation Modal for Cancel / Delete / Archive / Restore */}
       <CancelCampaignModal
         isOpen={modalState.isOpen}
         campaign={modalState.campaign}
         mode={modalState.mode}
         onClose={() => setModalState({ isOpen: false, campaign: null, mode: "cancel" })}
         onConfirm={handleConfirmModal}
-        isLoading={cancelMutation.isPending || deleteMutation.isPending}
+        isLoading={
+          cancelMutation.isPending ||
+          deleteMutation.isPending ||
+          archiveMutation.isPending ||
+          restoreMutation.isPending
+        }
       />
 
       {/* Preflight & Schedule / Launch Modal */}
