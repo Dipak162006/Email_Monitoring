@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <!-- Vibrant Blue Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4FB3FF" /> <!-- Light bright blue -->
+      <stop offset="100%" stop-color="#1965FF" /> <!-- Deep royal blue -->
+    </linearGradient>
+
+    <!-- Mask to create perfect cutouts revealing the blue background -->
+    <mask id="iconMask">
+      <!-- 1. Start completely transparent (black) -->
+      <rect width="512" height="512" fill="black" />
+      
+      <!-- 2. Draw the solid white base (Envelope + Plane) -->
+      <rect x="116" y="170" width="280" height="180" rx="24" fill="white" />
+      <polygon points="256,290 420,110 380,180" fill="white" stroke="white" stroke-width="12" stroke-linejoin="round" />
+      
+      <!-- 3. Draw black lines to erase sections (creating the fold lines and gaps) -->
+      <!-- Left flap and center fold of the paper airplane -->
+      <path d="M 106 190 L 256 290 L 390 143" fill="none" stroke="black" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" />
+      
+      <!-- Gap separating the paper airplane from the right side of the envelope -->
+      <path d="M 256 290 L 380 180" fill="none" stroke="black" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" />
+      
+      <!-- The two horizontal speed/message lines on the bottom left -->
+      <line x1="145" y1="275" x2="215" y2="275" stroke="black" stroke-width="18" stroke-linecap="round" />
+      <line x1="145" y1="315" x2="180" y2="315" stroke="black" stroke-width="18" stroke-linecap="round" />
+    </mask>
+  </defs>
+  
+  <!-- The Rounded Blue App Icon Background -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
+  
+  <!-- The White Logo Icon (Cut out perfectly by the mask) -->
+  <rect width="512" height="512" fill="#FFFFFF" mask="url(#iconMask)" />
+</svg>

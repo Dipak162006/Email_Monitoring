@@ -45,6 +45,7 @@ import type {
   CampaignUpdatePayload,
   CampaignAttachment,
   CampaignStepWritePayload,
+  SendingWindowConfig,
 } from "../types/campaign";
 import type { EmailTemplateItem, EmailSignatureItem } from "../types/emails";
 
@@ -104,6 +105,7 @@ export function CreateCampaignPage({
   const [bodyText, setBodyText] = useState<string>("");
   const [sendIntervalSeconds, setSendIntervalSeconds] = useState<number>(0);
   const [followupSteps, setFollowupSteps] = useState<CampaignStepWritePayload[]>([]);
+  const [sendingWindow, setSendingWindow] = useState<SendingWindowConfig | null>(null);
 
   // Persistence & Draft Tracking
   const [draftCampaignId, setDraftCampaignId] = useState<number | null>(() => {
@@ -112,6 +114,18 @@ export function CreateCampaignPage({
   const [attachments, setAttachments] = useState<CampaignAttachment[]>([]);
   const [isUploadingAttachment, setIsUploadingAttachment] = useState<boolean>(false);
   const [isDirty, setIsDirty] = useState<boolean>(false);
+
+  // Warn before browser window navigation when form is dirty
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isDirty) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [isDirty]);
   const [isSaving, setIsSaving] = useState<boolean>(false);
 
   // Field Validation Errors
@@ -191,29 +205,27 @@ export function CreateCampaignPage({
         if (existingCampaign.send_interval_seconds !== undefined && existingCampaign.send_interval_seconds !== null) {
           setSendIntervalSeconds(existingCampaign.send_interval_seconds);
         }
-        if (existingCampaign.followup_steps && existingCampaign.followup_steps.length > 0) {
+        if (existingCampaign.sending_window !== undefined) {
+          setSendingWindow(existingCampaign.sending_window);
+        }
+        const campaignSteps =
+          existingCampaign.steps && existingCampaign.steps.length > 1
+            ? existingCampaign.steps.filter((s) => s.step_number >= 2)
+            : existingCampaign.followup_steps && existingCampaign.followup_steps.length > 0
+            ? existingCampaign.followup_steps
+            : [];
+
+        if (campaignSteps.length > 0) {
           setFollowupSteps(
-            existingCampaign.followup_steps.map((s) => ({
+            campaignSteps.map((s) => ({
               step_number: s.step_number,
               delay_hours: s.delay_hours,
-              subject: s.subject,
-              body_text: s.body_text,
-              body_html: s.body_html,
-              is_active: s.is_active,
+              subject: s.subject || "",
+              body_text: s.body_text || null,
+              body_html: s.body_html || null,
+              target_tags: s.target_tags ?? [],
+              is_active: s.is_active ?? true,
             }))
-          );
-        } else if (existingCampaign.steps && existingCampaign.steps.length > 1) {
-          setFollowupSteps(
-            existingCampaign.steps
-              .filter((s) => s.step_number >= 2)
-              .map((s) => ({
-                step_number: s.step_number,
-                delay_hours: s.delay_hours,
-                subject: s.subject,
-                body_text: s.body_text,
-                body_html: s.body_html,
-                is_active: s.is_active,
-              }))
           );
         }
         setDraftCampaignId(existingCampaign.id);
@@ -430,6 +442,7 @@ export function CreateCampaignPage({
           body_html: bodyHtml,
           send_interval_seconds: sendIntervalSeconds,
           followup_steps: followupSteps,
+          sending_window: sendingWindow,
         });
       } else {
         // Create new draft
@@ -441,6 +454,7 @@ export function CreateCampaignPage({
           body_html: bodyHtml,
           send_interval_seconds: sendIntervalSeconds,
           followup_steps: followupSteps,
+          sending_window: sendingWindow,
         });
         savedId = created.id;
         setDraftCampaignId(created.id);
@@ -456,7 +470,12 @@ export function CreateCampaignPage({
       }
 
       setIsDirty(false);
-      showToast("Campaign draft saved successfully.", "success");
+      showToast(
+        isEditMode
+          ? "Campaign changes saved successfully."
+          : "Campaign draft saved successfully.",
+        "success"
+      );
       return savedId;
     } catch (err: unknown) {
       const msg =
@@ -674,7 +693,7 @@ export function CreateCampaignPage({
   // Edit Mode Loading Skeleton
   if (isEditMode && isLoadingExistingCampaign) {
     return (
-      <div className="w-full max-w-4xl mx-auto space-y-6 animate-pulse">
+      <div className="w-full max-w-7xl mx-auto space-y-6 animate-pulse">
         <div className="h-6 bg-slate-200 rounded w-44"></div>
         <div className="h-10 bg-slate-200 rounded w-64"></div>
         <div className="h-14 bg-slate-200 rounded-xl"></div>
@@ -773,7 +792,7 @@ export function CreateCampaignPage({
   }
 
   return (
-    <div className="w-full max-w-4xl mx-auto space-y-4 sm:space-y-5">
+    <div className="w-full max-w-7xl mx-auto space-y-4 sm:space-y-5">
       {/* 1. Wizard Header */}
       <CampaignWizardHeader
         currentStep={currentStep}
@@ -781,7 +800,9 @@ export function CreateCampaignPage({
         onBackToCampaigns={handleBackToCampaigns}
         title={isEditMode ? "Edit Campaign Draft" : "Create Campaign"}
         subtitle={
-          isEditMode
+          currentStep === 4
+            ? "Review your campaign configuration and email content before continuing."
+            : isEditMode
             ? "Update your draft campaign settings and content."
             : "Create and prepare your outreach campaign."
         }
@@ -808,6 +829,11 @@ export function CreateCampaignPage({
             subjectError={errors.subject}
             nameInputRef={nameInputRef}
             subjectInputRef={subjectInputRef}
+            sendingWindow={sendingWindow}
+            onSendingWindowChange={(w) => {
+              setSendingWindow(w);
+              setIsDirty(true);
+            }}
           />
         )}
 
@@ -846,6 +872,7 @@ export function CreateCampaignPage({
               setFollowupSteps(steps);
               setIsDirty(true);
             }}
+            sendingWindow={sendingWindow}
           />
         )}
 
@@ -858,6 +885,7 @@ export function CreateCampaignPage({
             attachments={attachments}
             sendIntervalSeconds={sendIntervalSeconds}
             followupSteps={followupSteps}
+            sendingWindow={sendingWindow}
             onEditStep={(step) => {
               setCurrentStep(step);
               scrollToTop();

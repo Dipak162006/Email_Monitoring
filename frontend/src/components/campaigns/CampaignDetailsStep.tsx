@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Info, AlertCircle, Plus, Clock, Gauge } from "lucide-react";
+import type { SendingWindowConfig } from "../../types/campaign";
+import { SendingWindowCard } from "./SendingWindowCard";
 
 interface CampaignDetailsStepProps {
   name: string;
@@ -12,6 +14,8 @@ interface CampaignDetailsStepProps {
   subjectError?: string | null;
   nameInputRef?: React.RefObject<HTMLInputElement>;
   subjectInputRef?: React.RefObject<HTMLInputElement>;
+  sendingWindow?: SendingWindowConfig | null;
+  onSendingWindowChange?: (config: SendingWindowConfig | null) => void;
 }
 
 export const CampaignDetailsStep: React.FC<CampaignDetailsStepProps> = ({
@@ -25,6 +29,8 @@ export const CampaignDetailsStep: React.FC<CampaignDetailsStepProps> = ({
   subjectError,
   nameInputRef,
   subjectInputRef,
+  sendingWindow,
+  onSendingWindowChange,
 }) => {
   // Pacing mode: 'none' (immediate/0s) or 'custom' (> 0s)
   const isCustomPacing = sendIntervalSeconds > 0;
@@ -120,155 +126,161 @@ export const CampaignDetailsStep: React.FC<CampaignDetailsStepProps> = ({
   };
 
   return (
-    <section className="space-y-6">
-      <div className="bg-white rounded-xl border border-slate-200 shadow-2xs p-6 sm:p-8 space-y-6">
-        {/* Step Header */}
-        <div className="space-y-1">
-          <h2 className="text-lg sm:text-xl font-bold text-slate-900 tracking-tight">
-            Campaign Details
-          </h2>
-          <p className="text-xs sm:text-sm text-slate-500">
-            Configure identity, labeling, and default messaging headline.
-          </p>
-        </div>
-
-        {/* Informational Callout: Draft State */}
-        <div className="p-4 rounded-lg bg-indigo-50/60 border border-indigo-100 flex items-start gap-3">
-          <Info className="h-5 w-5 text-indigo-600 shrink-0 mt-0.5" />
-          <div className="min-w-0">
-            <p className="text-xs sm:text-sm font-semibold text-slate-900 leading-snug">
-              Campaign draft state
-            </p>
-            <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
-              Your campaign will remain a draft until you complete the setup and launch it.
-            </p>
-          </div>
-        </div>
-
-        {/* Form Fields */}
-        <div className="space-y-6">
-          {/* Campaign Name Field */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <label
-                htmlFor="campaign-name"
-                className="text-xs sm:text-sm font-semibold text-slate-900"
-              >
-                Campaign Name <span className="text-red-500">*</span>
-              </label>
-              <span className="text-[11px] text-slate-400 font-normal">
-                {name.length}/80 chars
-              </span>
+    <section className="space-y-4 sm:space-y-5">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 items-start">
+        {/* Left Column (7 cols): Identity & Dispatch Pacing */}
+        <div className="lg:col-span-7 space-y-4 sm:space-y-5">
+          {/* Identity Card */}
+          <div className="bg-white rounded-xl border border-slate-200/90 shadow-2xs p-5 sm:p-6 space-y-5">
+            {/* Step Header */}
+            <div className="space-y-1">
+              <h2 className="text-lg sm:text-xl font-bold text-slate-900 tracking-tight">
+                Campaign Details
+              </h2>
+              <p className="text-xs sm:text-sm text-slate-500">
+                Configure identity, labeling, and default messaging headline.
+              </p>
             </div>
-            <div className="relative">
-              <input
-                id="campaign-name"
-                ref={nameInputRef}
-                type="text"
-                value={name}
-                maxLength={80}
-                onChange={handleNameInputChange}
-                placeholder="e.g. Product Launch — October"
-                aria-required="true"
-                aria-invalid={Boolean(nameError)}
-                aria-describedby={
-                  nameError ? "campaign-name-err" : "campaign-name-help"
-                }
-                className={`w-full px-3.5 py-2.5 rounded-lg text-xs sm:text-sm text-slate-900 placeholder:text-slate-400 border transition-all focus:outline-none focus:ring-2 ${
-                  nameError
-                    ? "border-red-300 bg-red-50/20 text-red-900 focus:ring-red-500/20 focus:border-red-600"
-                    : "border-slate-200 bg-white focus:ring-indigo-500/20 focus:border-indigo-600 shadow-2xs"
-                }`}
-              />
-              {nameError && (
-                <div className="absolute right-3 top-2.5 text-red-500 pointer-events-none">
-                  <AlertCircle className="h-5 w-5" />
+
+            {/* Informational Callout: Draft State */}
+            <div className="p-3.5 rounded-lg bg-indigo-50/60 border border-indigo-100 flex items-start gap-3">
+              <Info className="h-4 w-4 text-indigo-600 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-slate-900 leading-snug">
+                  Campaign draft state
+                </p>
+                <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
+                  Your campaign will remain a draft until you complete the setup and launch it.
+                </p>
+              </div>
+            </div>
+
+            {/* Form Fields */}
+            <div className="space-y-4 sm:space-y-5">
+              {/* Campaign Name Field */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label
+                    htmlFor="campaign-name"
+                    className="text-xs sm:text-sm font-semibold text-slate-900"
+                  >
+                    Campaign Name <span className="text-red-500">*</span>
+                  </label>
+                  <span className="text-[11px] text-slate-400 font-normal">
+                    {name.length}/80 chars
+                  </span>
                 </div>
-              )}
-            </div>
-            {nameError ? (
-              <p
-                id="campaign-name-err"
-                role="alert"
-                className="text-xs text-red-600 flex items-center gap-1 font-medium mt-1"
-              >
-                <AlertCircle className="h-3.5 w-3.5" />
-                <span>{nameError}</span>
-              </p>
-            ) : (
-              <p
-                id="campaign-name-help"
-                className="text-xs text-slate-500 mt-1"
-              >
-                Internal name used to identify this campaign.
-              </p>
-            )}
-          </div>
-
-          {/* Subject Field */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <label
-                htmlFor="campaign-subject"
-                className="text-xs sm:text-sm font-semibold text-slate-900"
-              >
-                Subject <span className="text-red-500">*</span>
-              </label>
-              <button
-                type="button"
-                onClick={handleInsertFirstName}
-                className="text-xs font-semibold text-indigo-600 hover:text-indigo-700 flex items-center gap-1 transition-colors focus:outline-none focus:underline"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                <span>Insert {"{{first_name}}"}</span>
-              </button>
-            </div>
-            <div className="relative">
-              <input
-                id="campaign-subject"
-                ref={subjectInputRef}
-                type="text"
-                value={subject}
-                onChange={(e) => onSubjectChange(e.target.value)}
-                placeholder="e.g. Introducing our new product line"
-                aria-required="true"
-                aria-invalid={Boolean(subjectError)}
-                aria-describedby={
-                  subjectError ? "campaign-subject-err" : "campaign-subject-help"
-                }
-                className={`w-full px-3.5 py-2.5 rounded-lg text-xs sm:text-sm text-slate-900 placeholder:text-slate-400 border transition-all focus:outline-none focus:ring-2 ${
-                  subjectError
-                    ? "border-red-300 bg-red-50/20 text-red-900 focus:ring-red-500/20 focus:border-red-600"
-                    : "border-slate-200 bg-white focus:ring-indigo-500/20 focus:border-indigo-600 shadow-2xs"
-                }`}
-              />
-              {subjectError && (
-                <div className="absolute right-3 top-2.5 text-red-500 pointer-events-none">
-                  <AlertCircle className="h-5 w-5" />
+                <div className="relative">
+                  <input
+                    id="campaign-name"
+                    ref={nameInputRef}
+                    type="text"
+                    value={name}
+                    maxLength={80}
+                    onChange={handleNameInputChange}
+                    placeholder="e.g. Product Launch — October"
+                    aria-required="true"
+                    aria-invalid={Boolean(nameError)}
+                    aria-describedby={
+                      nameError ? "campaign-name-err" : "campaign-name-help"
+                    }
+                    className={`w-full px-3.5 py-2.5 rounded-lg text-xs sm:text-sm text-slate-900 placeholder:text-slate-400 border transition-all focus:outline-none focus:ring-2 ${
+                      nameError
+                        ? "border-red-300 bg-red-50/20 text-red-900 focus:ring-red-500/20 focus:border-red-600"
+                        : "border-slate-200 bg-white focus:ring-indigo-500/20 focus:border-indigo-600 shadow-2xs"
+                    }`}
+                  />
+                  {nameError && (
+                    <div className="absolute right-3 top-2.5 text-red-500 pointer-events-none">
+                      <AlertCircle className="h-5 w-5" />
+                    </div>
+                  )}
                 </div>
-              )}
+                {nameError ? (
+                  <p
+                    id="campaign-name-err"
+                    role="alert"
+                    className="text-xs text-red-600 flex items-center gap-1 font-medium mt-1"
+                  >
+                    <AlertCircle className="h-3.5 w-3.5" />
+                    <span>{nameError}</span>
+                  </p>
+                ) : (
+                  <p
+                    id="campaign-name-help"
+                    className="text-xs text-slate-500 mt-1"
+                  >
+                    Internal name used to identify this campaign.
+                  </p>
+                )}
+              </div>
+
+              {/* Subject Field */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label
+                    htmlFor="campaign-subject"
+                    className="text-xs sm:text-sm font-semibold text-slate-900"
+                  >
+                    Subject <span className="text-red-500">*</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleInsertFirstName}
+                    className="text-xs font-semibold text-indigo-600 hover:text-indigo-700 flex items-center gap-1 transition-colors focus:outline-none focus:underline cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>Insert {"{{first_name}}"}</span>
+                  </button>
+                </div>
+                <div className="relative">
+                  <input
+                    id="campaign-subject"
+                    ref={subjectInputRef}
+                    type="text"
+                    value={subject}
+                    onChange={(e) => onSubjectChange(e.target.value)}
+                    placeholder="e.g. Introducing our new product line"
+                    aria-required="true"
+                    aria-invalid={Boolean(subjectError)}
+                    aria-describedby={
+                      subjectError ? "campaign-subject-err" : "campaign-subject-help"
+                    }
+                    className={`w-full px-3.5 py-2.5 rounded-lg text-xs sm:text-sm text-slate-900 placeholder:text-slate-400 border transition-all focus:outline-none focus:ring-2 ${
+                      subjectError
+                        ? "border-red-300 bg-red-50/20 text-red-900 focus:ring-red-500/20 focus:border-red-600"
+                        : "border-slate-200 bg-white focus:ring-indigo-500/20 focus:border-indigo-600 shadow-2xs"
+                    }`}
+                  />
+                  {subjectError && (
+                    <div className="absolute right-3 top-2.5 text-red-500 pointer-events-none">
+                      <AlertCircle className="h-5 w-5" />
+                    </div>
+                  )}
+                </div>
+                {subjectError ? (
+                  <p
+                    id="campaign-subject-err"
+                    role="alert"
+                    className="text-xs text-red-600 flex items-center gap-1 font-medium mt-1"
+                  >
+                    <AlertCircle className="h-3.5 w-3.5" />
+                    <span>{subjectError}</span>
+                  </p>
+                ) : (
+                  <p
+                    id="campaign-subject-help"
+                    className="text-xs text-slate-500 mt-1"
+                  >
+                    This is the subject recipients will see.
+                  </p>
+                )}
+              </div>
             </div>
-            {subjectError ? (
-              <p
-                id="campaign-subject-err"
-                role="alert"
-                className="text-xs text-red-600 flex items-center gap-1 font-medium mt-1"
-              >
-                <AlertCircle className="h-3.5 w-3.5" />
-                <span>{subjectError}</span>
-              </p>
-            ) : (
-              <p
-                id="campaign-subject-help"
-                className="text-xs text-slate-500 mt-1"
-              >
-                This is the subject recipients will see.
-              </p>
-            )}
           </div>
 
-          {/* C14 Configurable Sending Interval / Pacing Section */}
-          <div className="pt-2 border-t border-slate-100 space-y-3">
+          {/* Sending Interval / Pacing Card */}
+          <div className="bg-white rounded-xl border border-slate-200/90 shadow-2xs p-5 sm:p-6 space-y-4">
             <div className="flex items-center gap-2">
               <Gauge className="h-4 w-4 text-indigo-600 shrink-0" />
               <label className="text-xs sm:text-sm font-semibold text-slate-900">
@@ -333,7 +345,7 @@ export const CampaignDetailsStep: React.FC<CampaignDetailsStepProps> = ({
               </label>
             </div>
 
-            {/* Custom Interval Inputs (rendered when custom pacing is active) */}
+            {/* Custom Interval Inputs */}
             {isCustomPacing && (
               <div className="mt-3 p-4 rounded-lg bg-slate-50 border border-slate-200/80 space-y-3">
                 <div className="flex flex-wrap items-center gap-3">
@@ -362,7 +374,7 @@ export const CampaignDetailsStep: React.FC<CampaignDetailsStepProps> = ({
                       value={intervalUnit}
                       onChange={handleUnitChange}
                       aria-label="Pacing interval unit"
-                      className="w-full px-3 py-2 text-xs sm:text-sm bg-white rounded-lg border border-slate-200 text-slate-800 font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-2xs"
+                      className="w-full px-3 py-2 text-xs sm:text-sm bg-white rounded-lg border border-slate-200 text-slate-800 font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-2xs cursor-pointer"
                     >
                       <option value="minutes">Minutes</option>
                       <option value="seconds">Seconds</option>
@@ -388,6 +400,39 @@ export const CampaignDetailsStep: React.FC<CampaignDetailsStepProps> = ({
                 </p>
               </div>
             )}
+          </div>
+        </div>
+
+        {/* Right Column (5 cols): Sending Window & Timezone Governance + Best Practices */}
+        <div className="lg:col-span-5 space-y-4 sm:space-y-5">
+          <SendingWindowCard
+            value={sendingWindow}
+            onChange={(val) => onSendingWindowChange?.(val)}
+          />
+
+          {/* Deliverability & Pacing Best Practice Card */}
+          <div className="rounded-xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-2xs space-y-3">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0 border border-emerald-100">
+                <Clock className="h-4 w-4" />
+              </div>
+              <h4 className="text-xs sm:text-sm font-bold text-slate-900">
+                Pacing &amp; Deliverability Guide
+              </h4>
+            </div>
+            <p className="text-xs text-slate-500 leading-relaxed">
+              Combining a calibrated sending interval with local sending windows prevents mailbox rate limits and ensures outreach reaches recipients during business hours.
+            </p>
+            <div className="pt-2 border-t border-slate-100 space-y-2 text-[11px] text-slate-600">
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0" />
+                <span>Paced dispatch avoids sudden ISP sending spikes</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0" />
+                <span>Sends outside windows automatically queue until opening</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
