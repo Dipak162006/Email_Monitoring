@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # Security
     SECRET_KEY: str = "default-insecure-secret-key-change-in-production-32chars"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080
     ENCRYPTION_KEY: str = "dev-encryption-key-32-chars-long!"
 
     # CORS
