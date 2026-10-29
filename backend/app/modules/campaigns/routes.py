@@ -15,6 +15,7 @@ from app.modules.campaigns.dispatch_service import CampaignDispatchService
 from app.modules.campaigns.preflight_service import CampaignPreflightService
 from app.modules.campaigns.recipient_service import CampaignRecipientService
 from app.modules.campaigns.schemas import (
+    CampaignAnalyticsResponse,
     CampaignAttachmentListResponse,
     CampaignAttachmentRead,
     CampaignCreate,
@@ -28,6 +29,10 @@ from app.modules.campaigns.schemas import (
     CampaignRecipientCreate,
     CampaignRecipientImportResponse,
     CampaignRecipientRead,
+    CampaignRecipientRescheduleRequest,
+    CampaignRecipientStopRequest,
+    CampaignRecipientTagAddRequest,
+    CampaignRecipientTagsUpdateRequest,
     CampaignRecipientUpdate,
     CampaignScheduleRequest,
     CampaignUpdate,
@@ -127,6 +132,30 @@ async def get_campaign(
     )
     status_counts = await CampaignService.get_recipient_status_counts(db, campaign_id)
     return CampaignService.to_detail_schema(campaign, status_counts=status_counts)
+
+
+@router.get(
+    "/{campaign_id}/analytics",
+    response_model=CampaignAnalyticsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get campaign step-level analytics funnel",
+)
+async def get_campaign_analytics(
+    company_id: int,
+    campaign_id: int,
+    membership: CompanyUser = Depends(get_company_membership),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignAnalyticsResponse:
+    """Retrieve per-step conversion and outcome funnel analytics for a campaign.
+    
+    Accessible to all company members (MEMBER, ADMIN, OWNER).
+    Strictly isolated to the authorized company.
+    """
+    return await CampaignService.get_campaign_analytics(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+    )
 
 
 @router.patch(
@@ -351,6 +380,55 @@ async def cancel_campaign(
     )
 
 
+@router.post(
+    "/{campaign_id}/archive",
+    response_model=CampaignRead,
+    status_code=status.HTTP_200_OK,
+    summary="Archive an inactive or completed campaign (Admin/Owner only)",
+)
+async def archive_campaign(
+    company_id: int,
+    campaign_id: int,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRead:
+    """Archive an eligible campaign (DRAFT, COMPLETED, CANCELLED, FAILED).
+    
+    Active campaigns (RUNNING, QUEUED, SCHEDULED, PAUSED) cannot be archived.
+    Requires OWNER or ADMIN role.
+    """
+    return await CampaignService.archive_campaign(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+    )
+
+
+@router.post(
+    "/{campaign_id}/restore",
+    response_model=CampaignRead,
+    status_code=status.HTTP_200_OK,
+    summary="Restore an archived campaign (Admin/Owner only)",
+)
+async def restore_campaign(
+    company_id: int,
+    campaign_id: int,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRead:
+    """Restore an archived campaign safely to its non-active resting state.
+    
+    Restores to COMPLETED (if completed_at set), DRAFT (if unstarted), or CANCELLED (if started).
+    Never automatically schedules or resumes sending.
+    Requires OWNER or ADMIN role.
+    """
+    return await CampaignService.restore_campaign(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+    )
+
+
 # =============================================================================
 # Campaign Recipient Endpoints (C3)
 # =============================================================================
@@ -530,6 +608,90 @@ async def delete_recipient(
 
 
 @router.post(
+    "/{campaign_id}/recipients/{recipient_id}/stop",
+    response_model=CampaignRecipientRead,
+    status_code=status.HTTP_200_OK,
+    summary="Stop future follow-up steps for a recipient (Admin/Owner only)",
+)
+async def stop_recipient(
+    company_id: int,
+    campaign_id: int,
+    recipient_id: int,
+    stop_in: Optional[CampaignRecipientStopRequest] = None,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRecipientRead:
+    """Stop future initial or follow-up sends for a single recipient, clear pending timer, and record MANUAL stop reason.
+    
+    Requires OWNER or ADMIN role in the company.
+    Rejects terminal recipients (replied, bounced, unsubscribed, suppressed, completed).
+    """
+    reason = stop_in.reason if stop_in and stop_in.reason else "MANUAL"
+    return await CampaignRecipientService.stop_recipient(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+        recipient_id=recipient_id,
+        reason=reason,
+    )
+
+
+@router.post(
+    "/{campaign_id}/recipients/{recipient_id}/skip",
+    response_model=CampaignRecipientRead,
+    status_code=status.HTTP_200_OK,
+    summary="Skip the next pending follow-up step for a recipient (Admin/Owner only)",
+)
+async def skip_recipient_next_step(
+    company_id: int,
+    campaign_id: int,
+    recipient_id: int,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRecipientRead:
+    """Skip the next pending follow-up step without dispatching it.
+    
+    Advances the recipient's step and schedules the subsequent active step or marks the sequence COMPLETED.
+    Requires OWNER or ADMIN role in the company.
+    """
+    return await CampaignRecipientService.skip_recipient_next_step(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+        recipient_id=recipient_id,
+    )
+
+
+@router.post(
+    "/{campaign_id}/recipients/{recipient_id}/reschedule",
+    response_model=CampaignRecipientRead,
+    status_code=status.HTTP_200_OK,
+    summary="Reschedule the next pending follow-up step for a recipient (Admin/Owner only)",
+)
+async def reschedule_recipient(
+    company_id: int,
+    campaign_id: int,
+    recipient_id: int,
+    reschedule_in: CampaignRecipientRescheduleRequest,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRecipientRead:
+    """Reschedule the next pending follow-up step for a recipient.
+    
+    Requires OWNER or ADMIN role in the company.
+    Validates that the new time is in the future and recipient is eligible.
+    """
+    return await CampaignRecipientService.reschedule_recipient(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+        recipient_id=recipient_id,
+        rescheduled_due_at=reschedule_in.next_step_due_at,
+    )
+
+
+
+@router.post(
     "/{campaign_id}/recipients/import",
     response_model=CampaignRecipientImportResponse,
     status_code=status.HTTP_200_OK,
@@ -695,3 +857,95 @@ async def import_draft_into_campaign(
     return CampaignService.to_detail_schema(campaign, status_counts=status_counts)
 
 
+
+
+@router.get(
+    "/{campaign_id}/tags",
+    response_model=List[str],
+    status_code=status.HTTP_200_OK,
+    summary="Get all unique recipient and step tags for a campaign",
+)
+async def get_campaign_tags(
+    company_id: int,
+    campaign_id: int,
+    membership: CompanyUser = Depends(get_company_membership),
+    db: AsyncSession = Depends(get_db),
+) -> List[str]:
+    """List all distinct tags currently configured on recipients and steps in this campaign."""
+    return await CampaignRecipientService.get_campaign_tags(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+    )
+
+
+@router.put(
+    "/{campaign_id}/recipients/{recipient_id}/tags",
+    response_model=CampaignRecipientRead,
+    status_code=status.HTTP_200_OK,
+    summary="Replace all tags on a recipient (Admin/Owner only)",
+)
+async def update_recipient_tags(
+    company_id: int,
+    campaign_id: int,
+    recipient_id: int,
+    payload: CampaignRecipientTagsUpdateRequest,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRecipientRead:
+    """Replace the tag list on a campaign recipient with normalized, deduplicated tags."""
+    return await CampaignRecipientService.update_recipient_tags(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+        recipient_id=recipient_id,
+        tags=payload.tags,
+    )
+
+
+@router.post(
+    "/{campaign_id}/recipients/{recipient_id}/tags/add",
+    response_model=CampaignRecipientRead,
+    status_code=status.HTTP_200_OK,
+    summary="Add a single tag to a recipient (Admin/Owner only)",
+)
+async def add_recipient_tag(
+    company_id: int,
+    campaign_id: int,
+    recipient_id: int,
+    payload: CampaignRecipientTagAddRequest,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRecipientRead:
+    """Add a single tag to a campaign recipient."""
+    return await CampaignRecipientService.add_recipient_tag(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+        recipient_id=recipient_id,
+        tag=payload.tag,
+    )
+
+
+@router.delete(
+    "/{campaign_id}/recipients/{recipient_id}/tags/{tag}",
+    response_model=CampaignRecipientRead,
+    status_code=status.HTTP_200_OK,
+    summary="Remove a single tag from a recipient (Admin/Owner only)",
+)
+async def remove_recipient_tag(
+    company_id: int,
+    campaign_id: int,
+    recipient_id: int,
+    tag: str,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRecipientRead:
+    """Remove a tag from a campaign recipient."""
+    return await CampaignRecipientService.remove_recipient_tag(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+        recipient_id=recipient_id,
+        tag=tag,
+    )

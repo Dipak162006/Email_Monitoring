@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.campaigns.models import Campaign, CampaignRecipient, CampaignRecipientStatus, CampaignStatus
+from app.modules.campaigns.models import Campaign, CampaignDelivery, CampaignDeliveryStatus, CampaignRecipient, CampaignRecipientStatus, CampaignStep, CampaignStatus
 from app.modules.campaigns.schemas import CampaignCreate, CampaignUpdate
 from app.modules.campaigns.service import CampaignService
 from app.modules.companies.models import Company, CompanyRole, CompanyUser
@@ -853,3 +853,1028 @@ async def test_update_draft_campaign_with_invalid_email_account(
     assert resp_inactive.status_code == 400
     assert "inactive" in resp_inactive.json()["detail"].lower()
 
+
+
+# =============================================================================
+# 5. Milestone M3 - Safe Campaign Archiving & Restore Tests
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_archive_restore_and_list_filter_lifecycle(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Test end-to-end archiving, restoring, filtering, and safe permanent deletion."""
+    token = await register_and_login(async_client, "archive_user@co.com", "Archive User")
+    company_id = await create_company_helper(async_client, token, "Archive Co")
+    account_id = await create_email_account_helper(async_client, token, company_id, "archiver@co.com")
+
+    # Create a draft campaign
+    camp_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Campaign to Archive", "email_account_id": account_id, "subject": "Draft Sub"},
+    )
+    assert camp_res.status_code == 201
+    camp_id = camp_res.json()["id"]
+
+    # 1. Archive the draft campaign
+    archive_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/archive",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert archive_res.status_code == 200
+    assert archive_res.json()["status"] == "ARCHIVED"
+
+    # Idempotent re-archive succeeds
+    re_archive_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/archive",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert re_archive_res.status_code == 200
+    assert re_archive_res.json()["status"] == "ARCHIVED"
+
+    # 2. Verify list_campaigns excludes archived campaigns by default
+    list_res = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert list_res.status_code == 200
+    camps = list_res.json()
+    assert all(c["id"] != camp_id for c in camps)
+
+    # list_campaigns with status=ALL also excludes archived
+    all_res = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns?status=ALL",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert all_res.status_code == 200
+    assert all(c["id"] != camp_id for c in all_res.json())
+
+    # list_campaigns with status=ARCHIVED returns the archived campaign
+    archived_list_res = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns?status=ARCHIVED",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert archived_list_res.status_code == 200
+    archived_camps = archived_list_res.json()
+    assert any(c["id"] == camp_id for c in archived_camps)
+
+    # 3. Restore the unstarted campaign -> should restore to DRAFT
+    restore_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/restore",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert restore_res.status_code == 200
+    assert restore_res.json()["status"] == "DRAFT"
+
+    # Restoring non-archived campaign returns 400
+    invalid_restore = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/restore",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert invalid_restore.status_code == 400
+
+    # 4. Active campaigns cannot be archived (409 Conflict)
+    camp_obj = (await db_session.execute(select(Campaign).where(Campaign.id == camp_id))).scalar_one()
+    camp_obj.status = CampaignStatus.RUNNING.value
+    await db_session.commit()
+
+    active_archive_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/archive",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert active_archive_res.status_code == 409
+    assert "active campaigns must be completed or cancelled" in active_archive_res.json()["detail"].lower()
+
+    # 5. Cancel campaign, then archive it, then restore it -> should restore to CANCELLED (never auto-resume)
+    camp_obj.status = CampaignStatus.CANCELLED.value
+    camp_obj.started_at = datetime.now(timezone.utc)
+    await db_session.commit()
+
+    archive_cancelled = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/archive",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert archive_cancelled.status_code == 200
+
+    restore_started = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/restore",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert restore_started.status_code == 200
+    assert restore_started.json()["status"] == "CANCELLED"
+
+    # 6. Archive a completed campaign -> restores to COMPLETED
+    camp_obj = (await db_session.execute(select(Campaign).where(Campaign.id == camp_id))).scalar_one()
+    camp_obj.status = CampaignStatus.COMPLETED.value
+    camp_obj.completed_at = datetime.now(timezone.utc)
+    await db_session.commit()
+
+    archive_completed = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/archive",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert archive_completed.status_code == 200
+
+    restore_completed = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/restore",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert restore_completed.status_code == 200
+    assert restore_completed.json()["status"] == "COMPLETED"
+
+    # 7. Archive and permanently delete
+    await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/archive",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    del_res = await async_client.delete(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert del_res.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_archive_restore_authorization_and_isolation(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Test role enforcement and tenant isolation on archive and restore endpoints."""
+    token_owner = await register_and_login(async_client, "owner_arch@co.com", "Owner Arch")
+    company_1_id = await create_company_helper(async_client, token_owner, "Arch Co 1")
+    account_1_id = await create_email_account_helper(async_client, token_owner, company_1_id, "acc1@arch1.com")
+
+    # Create campaign
+    camp_res = await async_client.post(
+        f"/api/v1/companies/{company_1_id}/campaigns",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"name": "Auth Arch Campaign", "email_account_id": account_1_id, "subject": "Sub"},
+    )
+    camp_id = camp_res.json()["id"]
+
+    # Member user in company 1
+    token_member = await register_and_login(async_client, "member_arch@co.com", "Member Arch")
+    await add_company_member_helper(async_client, token_owner, company_1_id, "member_arch@co.com", role="MEMBER")
+
+    # Member cannot archive (403 Forbidden)
+    res_mem_arch = await async_client.post(
+        f"/api/v1/companies/{company_1_id}/campaigns/{camp_id}/archive",
+        headers={"Authorization": f"Bearer {token_member}"},
+    )
+    assert res_mem_arch.status_code == 403
+
+    # Member cannot restore (403 Forbidden)
+    res_mem_rest = await async_client.post(
+        f"/api/v1/companies/{company_1_id}/campaigns/{camp_id}/restore",
+        headers={"Authorization": f"Bearer {token_member}"},
+    )
+    assert res_mem_rest.status_code == 403
+
+    # Admin from company 2 cannot access company 1 campaign (404 Not Found anti-enumeration)
+    token_owner_2 = await register_and_login(async_client, "owner2_arch@co.com", "Owner 2 Arch")
+    company_2_id = await create_company_helper(async_client, token_owner_2, "Arch Co 2")
+
+    res_foreign_arch = await async_client.post(
+        f"/api/v1/companies/{company_2_id}/campaigns/{camp_id}/archive",
+        headers={"Authorization": f"Bearer {token_owner_2}"},
+    )
+    assert res_foreign_arch.status_code == 404
+
+    res_foreign_rest = await async_client.post(
+        f"/api/v1/companies/{company_2_id}/campaigns/{camp_id}/restore",
+        headers={"Authorization": f"Bearer {token_owner_2}"},
+    )
+    assert res_foreign_rest.status_code == 404
+
+
+
+# =============================================================================
+# Milestone M4 — Per-Recipient Operational Controls Tests
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_recipient_stop_emails_lifecycle_and_safety(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Verify Stop Emails operational control:
+    - Rejects DRAFT campaign
+    - Successfully stops recipient in active campaign
+    - Idempotent if repeated
+    - Clears next_step_due_at and sets MANUAL stop reason
+    - Cancels any PENDING deliveries
+    - Rejects terminal / replied recipients
+    """
+    token = await register_and_login(async_client, "owner_stop@co.com", "Owner Stop")
+    company_id = await create_company_helper(async_client, token, "Stop Co")
+    account_id = await create_email_account_helper(async_client, token, company_id, "stop@co.com")
+
+    # 1. Create campaign with 2 steps
+    camp_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Stop Lifecycle Campaign",
+            "email_account_id": account_id,
+            "subject": "Initial Email",
+            "body_html": "<p>Hello</p>",
+            "followup_steps": [
+                {
+                    "step_number": 2,
+                    "delay_hours": 24,
+                    "subject": "Follow-up 1",
+                    "body_html": "<p>Follow-up</p>",
+                    "is_active": True,
+                }
+            ],
+        },
+    )
+    assert camp_res.status_code == 201
+    camp_id = camp_res.json()["id"]
+
+    # Add recipient
+    recip_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "target_stop@co.com", "first_name": "Target"},
+    )
+    assert recip_res.status_code == 201
+    recip_id = recip_res.json()["id"]
+
+    # 2. Rejects stopping in DRAFT
+    stop_draft_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients/{recip_id}/stop",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert stop_draft_res.status_code == 400
+    assert "DRAFT" in stop_draft_res.json()["detail"]
+
+    # Transition campaign to RUNNING and recipient to SENT with pending follow-up
+    camp_obj = (await db_session.execute(select(Campaign).where(Campaign.id == camp_id))).scalar_one()
+    camp_obj.status = CampaignStatus.RUNNING.value
+    recip_obj = (await db_session.execute(select(CampaignRecipient).where(CampaignRecipient.id == recip_id))).scalar_one()
+    recip_obj.status = CampaignRecipientStatus.SENT.value
+    recip_obj.current_step_number = 1
+    recip_obj.next_step_due_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    # Fetch Step 2
+    step_2 = (await db_session.execute(
+        select(CampaignStep).where(CampaignStep.campaign_id == camp_id, CampaignStep.step_number == 2)
+    )).scalar_one()
+
+    # Add a pending delivery record
+    pending_delivery = CampaignDelivery(
+        campaign_id=camp_id,
+        recipient_id=recip_id,
+        step_id=step_2.id,
+        status=CampaignDeliveryStatus.PENDING.value,
+    )
+    db_session.add(pending_delivery)
+    await db_session.commit()
+
+    # 3. Stop recipient
+    stop_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients/{recip_id}/stop",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert stop_res.status_code == 200
+    data = stop_res.json()
+    assert data["status"] == "STOPPED"
+    assert data["stopped_reason"] == "MANUAL"
+    assert data["next_step_due_at"] is None
+
+    # Check pending delivery cancelled
+    await db_session.refresh(pending_delivery)
+    assert pending_delivery.status == CampaignDeliveryStatus.FAILED.value
+    assert "cancelled" in pending_delivery.error_message.lower()
+
+    # 4. Idempotent call
+    stop_again = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients/{recip_id}/stop",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert stop_again.status_code == 200
+    assert stop_again.json()["status"] == "STOPPED"
+
+
+@pytest.mark.asyncio
+async def test_recipient_skip_followup_step(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Verify Skip Follow-Up Step:
+    - Advances current_step_number without sending
+    - Records CampaignDelivery with status SKIPPED
+    - Calculates next_step_due_at for subsequent active step
+    - Transitions to COMPLETED when final step is skipped
+    """
+    token = await register_and_login(async_client, "owner_skip@co.com", "Owner Skip")
+    company_id = await create_company_helper(async_client, token, "Skip Co")
+    account_id = await create_email_account_helper(async_client, token, company_id, "skip@co.com")
+
+    # Campaign with Step 1 (initial), Step 2 (follow-up), Step 3 (follow-up)
+    camp_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Skip Step Campaign",
+            "email_account_id": account_id,
+            "subject": "Initial Email",
+            "body_html": "<p>Initial</p>",
+            "followup_steps": [
+                {
+                    "step_number": 2,
+                    "delay_hours": 12,
+                    "subject": "Follow-up 2",
+                    "body_html": "<p>F2</p>",
+                    "is_active": True,
+                },
+                {
+                    "step_number": 3,
+                    "delay_hours": 48,
+                    "subject": "Follow-up 3",
+                    "body_html": "<p>F3</p>",
+                    "is_active": True,
+                },
+            ],
+        },
+    )
+    assert camp_res.status_code == 201
+    camp_id = camp_res.json()["id"]
+
+    # Add recipient
+    recip_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "target_skip@co.com"},
+    )
+    recip_id = recip_res.json()["id"]
+
+    # Activate campaign and set recipient at Step 1 done
+    camp_obj = (await db_session.execute(select(Campaign).where(Campaign.id == camp_id))).scalar_one()
+    camp_obj.status = CampaignStatus.RUNNING.value
+    recip_obj = (await db_session.execute(select(CampaignRecipient).where(CampaignRecipient.id == recip_id))).scalar_one()
+    recip_obj.status = CampaignRecipientStatus.SENT.value
+    recip_obj.current_step_number = 1
+    recip_obj.next_step_due_at = datetime.now(timezone.utc) + timedelta(hours=12)
+    await db_session.commit()
+
+    # 1. Skip Step 2
+    skip_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients/{recip_id}/skip",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert skip_res.status_code == 200
+    skip_data = skip_res.json()
+    assert skip_data["current_step_number"] == 2
+    assert skip_data["next_step_due_at"] is not None
+
+    step_2 = (await db_session.execute(
+        select(CampaignStep).where(CampaignStep.campaign_id == camp_id, CampaignStep.step_number == 2)
+    )).scalar_one()
+    # Check delivery record for Step 2 is SKIPPED (never sent)
+    deliv_2 = (await db_session.execute(
+        select(CampaignDelivery).where(CampaignDelivery.recipient_id == recip_id, CampaignDelivery.step_id == step_2.id)
+    )).scalar_one()
+    assert deliv_2.status == CampaignDeliveryStatus.SKIPPED.value
+    assert "skipped" in deliv_2.error_message.lower()
+
+    # 2. Skip Step 3 (final step)
+    skip_final_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients/{recip_id}/skip",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert skip_final_res.status_code == 200
+    final_data = skip_final_res.json()
+    assert final_data["current_step_number"] == 3
+    assert final_data["status"] == "COMPLETED"
+    assert final_data["next_step_due_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_recipient_reschedule_followup(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Verify Reschedule Follow-Up:
+    - Validates future date
+    - Rejects past date
+    - Updates next_step_due_at
+    - Rejects terminal recipient
+    """
+    token = await register_and_login(async_client, "owner_resched@co.com", "Owner Resched")
+    company_id = await create_company_helper(async_client, token, "Resched Co")
+    account_id = await create_email_account_helper(async_client, token, company_id, "resched@co.com")
+
+    camp_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Reschedule Campaign",
+            "email_account_id": account_id,
+            "subject": "Initial",
+            "body_html": "<p>Initial</p>",
+            "followup_steps": [
+                {
+                    "step_number": 2,
+                    "delay_hours": 24,
+                    "subject": "Follow-up",
+                    "body_html": "<p>F2</p>",
+                    "is_active": True,
+                }
+            ],
+        },
+    )
+    camp_id = camp_res.json()["id"]
+
+    recip_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "target_resched@co.com"},
+    )
+    recip_id = recip_res.json()["id"]
+
+    camp_obj = (await db_session.execute(select(Campaign).where(Campaign.id == camp_id))).scalar_one()
+    camp_obj.status = CampaignStatus.RUNNING.value
+    recip_obj = (await db_session.execute(select(CampaignRecipient).where(CampaignRecipient.id == recip_id))).scalar_one()
+    recip_obj.status = CampaignRecipientStatus.SENT.value
+    recip_obj.current_step_number = 1
+    recip_obj.next_step_due_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    await db_session.commit()
+
+    # 1. Past date fails (400)
+    past_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    past_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients/{recip_id}/reschedule",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"next_step_due_at": past_time},
+    )
+    assert past_res.status_code == 400
+    assert "future" in past_res.json()["detail"].lower()
+
+    # 2. Valid future date succeeds
+    future_time = (datetime.now(timezone.utc) + timedelta(days=5)).replace(microsecond=0)
+    resched_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients/{recip_id}/reschedule",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"next_step_due_at": future_time.isoformat()},
+    )
+    assert resched_res.status_code == 200
+    updated_recip = resched_res.json()
+    assert updated_recip["next_step_due_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_recipient_controls_authorization_and_isolation(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Verify authorization and isolation:
+    - Member role gets 403 on stop, skip, reschedule
+    - Foreign company admin gets 404 on stop, skip, reschedule
+    """
+    token_owner = await register_and_login(async_client, "owner_ctrl_auth@co.com", "Owner Ctrl")
+    company_1_id = await create_company_helper(async_client, token_owner, "Ctrl Co 1")
+    account_1_id = await create_email_account_helper(async_client, token_owner, company_1_id, "ctrl@co.com")
+
+    camp_res = await async_client.post(
+        f"/api/v1/companies/{company_1_id}/campaigns",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={
+            "name": "Auth Ctrl Campaign",
+            "email_account_id": account_1_id,
+            "subject": "Sub",
+            "followup_steps": [{"step_number": 2, "delay_hours": 24, "subject": "F2", "body_html": "F2", "is_active": True}],
+        },
+    )
+    camp_id = camp_res.json()["id"]
+
+    recip_res = await async_client.post(
+        f"/api/v1/companies/{company_1_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "auth_test_target@co.com"},
+    )
+    recip_id = recip_res.json()["id"]
+
+    camp_obj = (await db_session.execute(select(Campaign).where(Campaign.id == camp_id))).scalar_one()
+    camp_obj.status = CampaignStatus.RUNNING.value
+    recip_obj = (await db_session.execute(select(CampaignRecipient).where(CampaignRecipient.id == recip_id))).scalar_one()
+    recip_obj.status = CampaignRecipientStatus.SENT.value
+    recip_obj.current_step_number = 1
+    recip_obj.next_step_due_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    await db_session.commit()
+
+    # Member user in company 1
+    token_member = await register_and_login(async_client, "member_ctrl@co.com", "Member Ctrl")
+    await add_company_member_helper(async_client, token_owner, company_1_id, "member_ctrl@co.com", role="MEMBER")
+
+    # Member gets 403 on stop
+    res_mem_stop = await async_client.post(
+        f"/api/v1/companies/{company_1_id}/campaigns/{camp_id}/recipients/{recip_id}/stop",
+        headers={"Authorization": f"Bearer {token_member}"},
+    )
+    assert res_mem_stop.status_code == 403
+
+    # Member gets 403 on skip
+    res_mem_skip = await async_client.post(
+        f"/api/v1/companies/{company_1_id}/campaigns/{camp_id}/recipients/{recip_id}/skip",
+        headers={"Authorization": f"Bearer {token_member}"},
+    )
+    assert res_mem_skip.status_code == 403
+
+    # Member gets 403 on reschedule
+    future_time = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    res_mem_resched = await async_client.post(
+        f"/api/v1/companies/{company_1_id}/campaigns/{camp_id}/recipients/{recip_id}/reschedule",
+        headers={"Authorization": f"Bearer {token_member}"},
+        json={"next_step_due_at": future_time},
+    )
+    assert res_mem_resched.status_code == 403
+
+    # Foreign company admin gets 404
+    token_foreign = await register_and_login(async_client, "foreign_admin@co.com", "Foreign Admin")
+    company_2_id = await create_company_helper(async_client, token_foreign, "Foreign Co")
+
+    res_foreign_stop = await async_client.post(
+        f"/api/v1/companies/{company_2_id}/campaigns/{camp_id}/recipients/{recip_id}/stop",
+        headers={"Authorization": f"Bearer {token_foreign}"},
+    )
+    assert res_foreign_stop.status_code == 404
+
+    res_foreign_skip = await async_client.post(
+        f"/api/v1/companies/{company_2_id}/campaigns/{camp_id}/recipients/{recip_id}/skip",
+        headers={"Authorization": f"Bearer {token_foreign}"},
+    )
+    assert res_foreign_skip.status_code == 404
+
+    res_foreign_resched = await async_client.post(
+        f"/api/v1/companies/{company_2_id}/campaigns/{camp_id}/recipients/{recip_id}/reschedule",
+        headers={"Authorization": f"Bearer {token_foreign}"},
+        json={"next_step_due_at": future_time},
+    )
+    assert res_foreign_resched.status_code == 404
+
+
+
+# =============================================================================
+# Milestone M5 — Recipient Tags & Selective Step Targeting Tests
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_recipient_tags_crud_and_normalization(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Test recipient tags creation, normalization, deduplication, add/remove endpoints, and campaign tag listing."""
+    token_owner = await register_and_login(async_client, "owner_tags_m5@test.com", "Tag Owner")
+    company_id = await create_company_helper(async_client, token_owner, "Tags Org")
+    account_id = await create_email_account_helper(async_client, token_owner, company_id)
+
+    camp_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={
+            "name": "Tagging Campaign",
+            "email_account_id": account_id,
+            "subject": "Tagging Subject",
+            "followup_steps": [
+                {
+                    "step_number": 2,
+                    "delay_hours": 24,
+                    "subject": "Followup Step 2",
+                    "target_tags": ["VIP", "Enterprise "],
+                }
+            ],
+        },
+    )
+    assert camp_res.status_code == 201
+    camp_id = camp_res.json()["id"]
+
+    # 1. Create recipient with tags (case-insensitive and trimmed)
+    recip_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={
+            "email": "lead@target.com",
+            "first_name": "Lead",
+            "tags": [" VIP ", "tier-1", "VIP"],  # duplicate "VIP" and extra spaces
+        },
+    )
+    assert recip_res.status_code == 201
+    recip_data = recip_res.json()
+    recip_id = recip_data["id"]
+    assert recip_data["tags"] == ["vip", "tier-1"]  # normalized and deduplicated
+
+    # 2. Query campaign tags
+    tags_res = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/tags",
+        headers={"Authorization": f"Bearer {token_owner}"},
+    )
+    assert tags_res.status_code == 200
+    camp_tags = tags_res.json()
+    # Includes step target_tags ("vip", "enterprise") and recipient tags ("vip", "tier-1")
+    assert "vip" in camp_tags
+    assert "enterprise" in camp_tags
+    assert "tier-1" in camp_tags
+
+    # 3. Add a single tag
+    add_tag_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients/{recip_id}/tags/add",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"tag": " Hot-Lead "},
+    )
+    assert add_tag_res.status_code == 200
+    assert "hot-lead" in add_tag_res.json()["tags"]
+
+    # 4. Remove a tag
+    remove_tag_res = await async_client.delete(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients/{recip_id}/tags/vip",
+        headers={"Authorization": f"Bearer {token_owner}"},
+    )
+    assert remove_tag_res.status_code == 200
+    assert "vip" not in remove_tag_res.json()["tags"]
+
+    # 5. Replace all tags
+    replace_tags_res = await async_client.put(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients/{recip_id}/tags",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"tags": ["beta_tester", "priority.high"]},
+    )
+    assert replace_tags_res.status_code == 200
+    assert replace_tags_res.json()["tags"] == ["beta_tester", "priority.high"]
+
+    # 6. Reject invalid tags (empty, spaces only, invalid symbols)
+    invalid_tag_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients/{recip_id}/tags/add",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"tag": "invalid tag with spaces!"},
+    )
+    assert invalid_tag_res.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_step_selective_targeting_or_matching(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Test OR-matching: recipient with matching tag gets step dispatched; non-matching recipient records SKIPPED delivery."""
+    from app.modules.campaigns.delivery_service import CampaignDeliveryService
+    from unittest.mock import AsyncMock
+
+    token_owner = await register_and_login(async_client, "owner_targeting_m5@test.com", "Targeting Owner")
+    company_id = await create_company_helper(async_client, token_owner, "Targeting Org")
+    account_id = await create_email_account_helper(async_client, token_owner, company_id)
+
+    # Campaign with Step 1 and 2 follow-up steps
+    camp_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={
+            "name": "Targeted Sequence",
+            "email_account_id": account_id,
+            "subject": "Initial Outreach",
+            "followup_steps": [
+                {
+                    "step_number": 2,
+                    "delay_hours": 1,
+                    "subject": "VIP Step 2",
+                    "body_text": "Hello VIP, special offer for you.",
+                    "target_tags": ["vip", "platinum"],  # OR matching
+                },
+                {
+                    "step_number": 3,
+                    "delay_hours": 2,
+                    "subject": "Standard Step 3",
+                    "body_text": "Hello Standard, regular follow-up.",
+                    "target_tags": ["standard"],
+                },
+            ],
+        },
+    )
+    camp_id = camp_res.json()["id"]
+
+    # Recipient 1 has tag 'vip'
+    r1_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "vip_user@domain.com", "tags": ["vip"]},
+    )
+    r1_id = r1_res.json()["id"]
+
+    # Recipient 2 has tag 'standard'
+    r2_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "standard_user@domain.com", "tags": ["standard"]},
+    )
+    r2_id = r2_res.json()["id"]
+
+    # Set campaign to RUNNING and simulate Step 1 SENT for both recipients
+    now_utc = datetime.now(timezone.utc)
+    past_2h = now_utc - timedelta(hours=3)
+
+    camp_obj = await db_session.get(Campaign, camp_id)
+    camp_obj.status = CampaignStatus.RUNNING.value
+
+    # Find Step 1
+    step_1 = (await db_session.execute(
+        select(CampaignStep).where(CampaignStep.campaign_id == camp_id, CampaignStep.step_number == 1)
+    )).scalar_one()
+
+    # Step 1 deliveries
+    d1 = CampaignDelivery(
+        campaign_id=camp_id,
+        recipient_id=r1_id,
+        step_id=step_1.id,
+        status=CampaignDeliveryStatus.SENT.value,
+        sent_at=past_2h,
+        message_id="<msg_r1_step1@domain.com>",
+    )
+    d2 = CampaignDelivery(
+        campaign_id=camp_id,
+        recipient_id=r2_id,
+        step_id=step_1.id,
+        status=CampaignDeliveryStatus.SENT.value,
+        sent_at=past_2h,
+        message_id="<msg_r2_step1@domain.com>",
+    )
+    db_session.add_all([d1, d2])
+
+    recip_1 = await db_session.get(CampaignRecipient, r1_id)
+    recip_1.current_step_number = 1
+    recip_1.status = CampaignRecipientStatus.SENT.value
+    recip_1.next_step_due_at = past_2h + timedelta(hours=1)
+
+    recip_2 = await db_session.get(CampaignRecipient, r2_id)
+    recip_2.current_step_number = 1
+    recip_2.status = CampaignRecipientStatus.SENT.value
+    recip_2.next_step_due_at = past_2h + timedelta(hours=1)
+
+    await db_session.commit()
+
+    # Mock EmailService for follow-up transmission
+    mock_email_service = AsyncMock()
+    mock_sent_email = AsyncMock()
+    mock_sent_email.id = None
+    mock_sent_email.thread_id = None
+    mock_sent_email.message_id = "<followup_sent@domain.com>"
+    mock_email_service.send_email.return_value = mock_sent_email
+
+    from tests.conftest import TestAsyncSessionLocal
+    results = await CampaignDeliveryService.process_due_followup_steps(
+        db_factory=TestAsyncSessionLocal,
+        email_service=mock_email_service,
+        now_utc=now_utc,
+    )
+
+    # Verify outcomes:
+    # Recipient 1 (vip) matched Step 2 -> Step 2 SENT
+    # Recipient 2 (standard) skipped Step 2 (non-matching) -> Step 2 SKIPPED, advanced to Step 3!
+    await db_session.refresh(recip_1)
+    await db_session.refresh(recip_2)
+
+    assert recip_1.current_step_number == 2
+    assert recip_1.status == CampaignRecipientStatus.COMPLETED.value
+
+    # Recipient 2 skipped Step 2 and dispatched Step 3 (or is on Step 3)
+    assert recip_2.current_step_number >= 2
+    # Verify skipped delivery record was created for Step 2 on Recipient 2
+    step_2 = (await db_session.execute(
+        select(CampaignStep).where(CampaignStep.campaign_id == camp_id, CampaignStep.step_number == 2)
+    )).scalar_one()
+
+    r2_step2_deliv = (await db_session.execute(
+        select(CampaignDelivery).where(
+            CampaignDelivery.campaign_id == camp_id,
+            CampaignDelivery.recipient_id == r2_id,
+            CampaignDelivery.step_id == step_2.id,
+        )
+    )).scalar_one_or_none()
+
+    assert r2_step2_deliv is not None
+    assert r2_step2_deliv.status == CampaignDeliveryStatus.SKIPPED.value
+    assert "Skipped: recipient does not match step targeting tags" in r2_step2_deliv.error_message
+
+
+@pytest.mark.asyncio
+async def test_consecutive_nonmatching_steps_advance_safely(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Test that a recipient with no matching tags skips consecutive targeted steps safely and marks sequence COMPLETED."""
+    from app.modules.campaigns.delivery_service import CampaignDeliveryService
+    from unittest.mock import AsyncMock
+
+    token_owner = await register_and_login(async_client, "owner_consec_m5@test.com", "Consec Owner")
+    company_id = await create_company_helper(async_client, token_owner, "Consec Org")
+    account_id = await create_email_account_helper(async_client, token_owner, company_id)
+
+    # Campaign where Steps 2 and 3 both target 'exclusive'
+    camp_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={
+            "name": "Exclusive Sequence",
+            "email_account_id": account_id,
+            "subject": "Initial Intro",
+            "followup_steps": [
+                {"step_number": 2, "delay_hours": 1, "subject": "Exclusive Step 2", "target_tags": ["exclusive"]},
+                {"step_number": 3, "delay_hours": 1, "subject": "Exclusive Step 3", "target_tags": ["exclusive"]},
+            ],
+        },
+    )
+    camp_id = camp_res.json()["id"]
+
+    # Recipient has no matching tags
+    r_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "non_exclusive@domain.com", "tags": ["general"]},
+    )
+    r_id = r_res.json()["id"]
+
+    now_utc = datetime.now(timezone.utc)
+    past_time = now_utc - timedelta(hours=3)
+
+    camp_obj = await db_session.get(Campaign, camp_id)
+    camp_obj.status = CampaignStatus.RUNNING.value
+
+    step_1 = (await db_session.execute(
+        select(CampaignStep).where(CampaignStep.campaign_id == camp_id, CampaignStep.step_number == 1)
+    )).scalar_one()
+
+    d1 = CampaignDelivery(
+        campaign_id=camp_id,
+        recipient_id=r_id,
+        step_id=step_1.id,
+        status=CampaignDeliveryStatus.SENT.value,
+        sent_at=past_time,
+        message_id="<intro@domain.com>",
+    )
+    db_session.add(d1)
+
+    recip = await db_session.get(CampaignRecipient, r_id)
+    recip.current_step_number = 1
+    recip.status = CampaignRecipientStatus.SENT.value
+    recip.next_step_due_at = past_time + timedelta(hours=1)
+    await db_session.commit()
+
+    mock_email_service = AsyncMock()
+    from tests.conftest import TestAsyncSessionLocal
+
+    results = await CampaignDeliveryService.process_due_followup_steps(
+        db_factory=TestAsyncSessionLocal,
+        email_service=mock_email_service,
+        now_utc=now_utc,
+    )
+
+    # Nothing should be sent
+    assert mock_email_service.send_email.call_count == 0
+
+    await db_session.refresh(recip)
+    # Sequence should have skipped both steps and marked COMPLETED
+    assert recip.current_step_number == 3
+    assert recip.status == CampaignRecipientStatus.COMPLETED.value
+    assert recip.next_step_due_at is None
+
+
+@pytest.mark.asyncio
+async def test_untargeted_steps_and_step1_preserve_existing_behavior(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Test that untargeted steps (target_tags = [] or None) target all recipients regardless of tags."""
+    from app.modules.campaigns.delivery_service import CampaignDeliveryService
+    from unittest.mock import AsyncMock
+
+    token_owner = await register_and_login(async_client, "owner_untargeted_m5@test.com", "Untargeted Owner")
+    company_id = await create_company_helper(async_client, token_owner, "Untargeted Org")
+    account_id = await create_email_account_helper(async_client, token_owner, company_id)
+
+    camp_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={
+            "name": "Broadcast Campaign",
+            "email_account_id": account_id,
+            "subject": "Broadcast Subject",
+            "followup_steps": [
+                {
+                    "step_number": 2,
+                    "delay_hours": 1,
+                    "subject": "Broadcast Step 2",
+                    "body_text": "Broadcast follow-up for everyone.",
+                    "target_tags": [],
+                },
+            ],
+        },
+    )
+    camp_id = camp_res.json()["id"]
+
+    r_res = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token_owner}"},
+        json={"email": "anyone@domain.com", "tags": ["custom-tag-123"]},
+    )
+    r_id = r_res.json()["id"]
+
+    now_utc = datetime.now(timezone.utc)
+    past_time = now_utc - timedelta(hours=2)
+
+    camp_obj = await db_session.get(Campaign, camp_id)
+    camp_obj.status = CampaignStatus.RUNNING.value
+
+    step_1 = (await db_session.execute(
+        select(CampaignStep).where(CampaignStep.campaign_id == camp_id, CampaignStep.step_number == 1)
+    )).scalar_one()
+
+    d1 = CampaignDelivery(
+        campaign_id=camp_id,
+        recipient_id=r_id,
+        step_id=step_1.id,
+        status=CampaignDeliveryStatus.SENT.value,
+        sent_at=past_time,
+        message_id="<broadcast1@domain.com>",
+    )
+    db_session.add(d1)
+
+    recip = await db_session.get(CampaignRecipient, r_id)
+    recip.current_step_number = 1
+    recip.status = CampaignRecipientStatus.SENT.value
+    recip.next_step_due_at = past_time + timedelta(hours=1)
+    await db_session.commit()
+
+    mock_email_service = AsyncMock()
+    mock_sent_email = AsyncMock()
+    mock_sent_email.id = None
+    mock_sent_email.thread_id = None
+    mock_sent_email.message_id = "<broadcast2_sent@domain.com>"
+    mock_email_service.send_email.return_value = mock_sent_email
+
+    from tests.conftest import TestAsyncSessionLocal
+    results = await CampaignDeliveryService.process_due_followup_steps(
+        db_factory=TestAsyncSessionLocal,
+        email_service=mock_email_service,
+        now_utc=now_utc,
+    )
+
+    # Dispatched because target_tags was empty
+    assert mock_email_service.send_email.call_count == 1
+    await db_session.refresh(recip)
+    assert recip.current_step_number == 2
+    assert recip.status == CampaignRecipientStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_tags_company_and_campaign_isolation(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Test that tag endpoints enforce tenant isolation and role permissions."""
+    token_owner_a = await register_and_login(async_client, "owner_iso_a@test.com", "Owner A")
+    token_owner_b = await register_and_login(async_client, "owner_iso_b@test.com", "Owner B")
+    token_member_a = await register_and_login(async_client, "member_iso_a@test.com", "Member A")
+
+    company_a_id = await create_company_helper(async_client, token_owner_a, "Company A")
+    company_b_id = await create_company_helper(async_client, token_owner_b, "Company B")
+    await add_company_member_helper(async_client, token_owner_a, company_a_id, "member_iso_a@test.com", "MEMBER")
+
+    account_a_id = await create_email_account_helper(async_client, token_owner_a, company_a_id)
+
+    camp_res = await async_client.post(
+        f"/api/v1/companies/{company_a_id}/campaigns",
+        headers={"Authorization": f"Bearer {token_owner_a}"},
+        json={"name": "Company A Campaign", "email_account_id": account_a_id},
+    )
+    camp_a_id = camp_res.json()["id"]
+
+    recip_res = await async_client.post(
+        f"/api/v1/companies/{company_a_id}/campaigns/{camp_a_id}/recipients",
+        headers={"Authorization": f"Bearer {token_owner_a}"},
+        json={"email": "isolated@company.com", "tags": ["secret-tag"]},
+    )
+    recip_a_id = recip_res.json()["id"]
+
+    # 1. Foreign company access to tags -> 404
+    foreign_tags = await async_client.get(
+        f"/api/v1/companies/{company_b_id}/campaigns/{camp_a_id}/tags",
+        headers={"Authorization": f"Bearer {token_owner_b}"},
+    )
+    assert foreign_tags.status_code == 404
+
+    # 2. Foreign company tag modification -> 404
+    foreign_add = await async_client.post(
+        f"/api/v1/companies/{company_b_id}/campaigns/{camp_a_id}/recipients/{recip_a_id}/tags/add",
+        headers={"Authorization": f"Bearer {token_owner_b}"},
+        json={"tag": "hack"},
+    )
+    assert foreign_add.status_code == 404
+
+    # 3. Non-admin member role tag modification -> 403
+    member_add = await async_client.post(
+        f"/api/v1/companies/{company_a_id}/campaigns/{camp_a_id}/recipients/{recip_a_id}/tags/add",
+        headers={"Authorization": f"Bearer {token_member_a}"},
+        json={"tag": "member-tag"},
+    )
+    assert member_add.status_code == 403

@@ -1,3 +1,4 @@
+from app.modules.campaigns.window_service import SendingWindowService
 from datetime import datetime, timezone, timedelta
 from html import escape
 import logging
@@ -318,6 +319,27 @@ class CampaignDeliveryService:
                             "delay_seconds": int(delay_sec),
                         }
 
+            # Check campaign sending window if configured and enabled
+            sw_config = getattr(campaign, "sending_window", None)
+            if sw_config and not SendingWindowService.is_within_sending_window(current_time, sw_config):
+                next_window_utc = SendingWindowService.compute_next_window_opening(current_time, sw_config)
+                campaign.next_send_at = next_window_utc
+                await db.commit()
+                delay_sec = max(1, int((next_window_utc - current_time).total_seconds()))
+                logger.info(
+                    "Campaign %d is outside its configured sending window. Deferring to %s (in %ds).",
+                    campaign_id,
+                    next_window_utc,
+                    delay_sec,
+                )
+                return {
+                    "status": "WAITING_WINDOW",
+                    "campaign_id": campaign_id,
+                    "company_id": company_id,
+                    "next_send_at": next_window_utc.isoformat(),
+                    "delay_seconds": delay_sec,
+                }
+
         # ---------------------------------------------------------------------
         # Phase 2: Identify Eligible Recipients & Suppressions
         # ---------------------------------------------------------------------
@@ -447,6 +469,19 @@ class CampaignDeliveryService:
         )
 
         for recip_id in target_recipient_ids:
+            # Revalidate immediate sending window before dispatching each individual recipient
+            if campaign_obj := getattr(campaign, "sending_window", None):
+                now_eval = now_utc or datetime.now(timezone.utc)
+                if not SendingWindowService.is_within_sending_window(now_eval, campaign_obj):
+                    next_win = SendingWindowService.compute_next_window_opening(now_eval, campaign_obj)
+                    logger.info("Campaign %d sending window closed mid-execution. Deferring remaining to %s", campaign_id, next_win)
+                    async with db_factory() as db_win:
+                        c_up = await db_win.get(Campaign, campaign_id)
+                        if c_up:
+                            c_up.next_send_at = next_win
+                            await db_win.commit()
+                    break
+
             # 3a. Prepare delivery record in SENDING status under short transaction
             delivery_id: Optional[int] = None
             recipient_email: str = ""
@@ -509,7 +544,11 @@ class CampaignDeliveryService:
                     current_attempt_time = current_attempt_time.replace(tzinfo=timezone.utc)
 
                 if send_interval_sec > 0:
-                    campaign.next_send_at = current_attempt_time + timedelta(seconds=send_interval_sec)
+                    candidate_next = current_attempt_time + timedelta(seconds=send_interval_sec)
+                    sw_paced = getattr(campaign, "sending_window", None)
+                    if sw_paced and not SendingWindowService.is_within_sending_window(candidate_next, sw_paced):
+                        candidate_next = SendingWindowService.compute_next_window_opening(candidate_next, sw_paced)
+                    campaign.next_send_at = candidate_next
 
                 if not delivery:
                     delivery = CampaignDelivery(
@@ -635,7 +674,11 @@ class CampaignDeliveryService:
                         step_2_res = await db.execute(step_2_stmt)
                         step_2 = step_2_res.scalar_one_or_none()
                         if step_2:
-                            recipient.next_step_due_at = delivery.sent_at + timedelta(hours=step_2.delay_hours)
+                            raw_s2_due = delivery.sent_at + timedelta(hours=step_2.delay_hours)
+                            sw_s2 = getattr(campaign, "sending_window", None)
+                            if sw_s2:
+                                raw_s2_due = SendingWindowService.compute_next_window_opening(raw_s2_due, sw_s2)
+                            recipient.next_step_due_at = raw_s2_due
                         else:
                             recipient.next_step_due_at = None
                         sent_count += 1
@@ -679,33 +722,42 @@ class CampaignDeliveryService:
                 camp_res = await db.execute(camp_stmt)
                 active_camp = camp_res.scalar_one_or_none()
 
-            if remaining_pending > 0 and active_camp and active_camp.status == CampaignStatus.RUNNING.value:
-                now_check = datetime.now(timezone.utc)
-                due_time = active_camp.next_send_at or (now_check + timedelta(seconds=send_interval_sec))
-                if due_time.tzinfo is None:
-                    due_time = due_time.replace(tzinfo=timezone.utc)
-                delay_sec = max(1, int((due_time - now_check).total_seconds()))
+                if remaining_pending > 0 and active_camp and active_camp.status == CampaignStatus.RUNNING.value:
+                    now_check = now_utc or datetime.now(timezone.utc)
+                    if now_check.tzinfo is None:
+                        now_check = now_check.replace(tzinfo=timezone.utc)
+                    due_time = active_camp.next_send_at or (now_check + timedelta(seconds=send_interval_sec))
+                    if due_time.tzinfo is None:
+                        due_time = due_time.replace(tzinfo=timezone.utc)
 
-                from app.workers.campaign_tasks import dispatch_campaign_task
-                try:
-                    dispatch_campaign_task.apply_async(
-                        args=[campaign_id, company_id],
-                        countdown=delay_sec,
-                    )
-                except Exception as sched_err:
-                    logger.warning("Could not enqueue next paced dispatch for campaign %d: %s", campaign_id, sched_err)
+                    sw_paced = getattr(active_camp, "sending_window", None)
+                    if sw_paced and not SendingWindowService.is_within_sending_window(due_time, sw_paced):
+                        due_time = SendingWindowService.compute_next_window_opening(due_time, sw_paced)
+                        active_camp.next_send_at = due_time
+                        await db.commit()
 
-                return {
-                    "status": "RUNNING",
-                    "campaign_id": campaign_id,
-                    "company_id": company_id,
-                    "total_recipients": len(pending_recipients),
-                    "sent_count": sent_count,
-                    "failed_count": failed_count,
-                    "skipped_count": skipped_count,
-                    "remaining_pending": remaining_pending,
-                    "next_send_at": due_time.isoformat(),
-                }
+                    delay_sec = max(1, int((due_time - now_check).total_seconds()))
+
+                    from app.workers.campaign_tasks import dispatch_campaign_task
+                    try:
+                        dispatch_campaign_task.apply_async(
+                            args=[campaign_id, company_id],
+                            countdown=delay_sec,
+                        )
+                    except Exception as sched_err:
+                        logger.warning("Could not enqueue next paced dispatch for campaign %d: %s", campaign_id, sched_err)
+
+                    return {
+                        "status": "RUNNING",
+                        "campaign_id": campaign_id,
+                        "company_id": company_id,
+                        "total_recipients": len(pending_recipients),
+                        "sent_count": sent_count,
+                        "failed_count": failed_count,
+                        "skipped_count": skipped_count,
+                        "remaining_pending": remaining_pending,
+                        "next_send_at": due_time.isoformat(),
+                    }
 
         # ---------------------------------------------------------------------
         # Phase 4: Finalize Campaign Lifecycle State
@@ -1536,25 +1588,7 @@ class CampaignDeliveryService:
                 ):
                     continue
 
-                # a. Find next active step
-                target_step_number = recipient.current_step_number + 1
-                next_step_stmt = select(CampaignStep).where(
-                    CampaignStep.campaign_id == campaign.id,
-                    CampaignStep.step_number == target_step_number,
-                    CampaignStep.is_active == True,
-                )
-                next_step_res = await db.execute(next_step_stmt)
-                next_step = next_step_res.scalar_one_or_none()
-
-                if not next_step:
-                    logger.info("No active follow-up step %d for recipient %d in campaign %d. Clearing next_step_due_at.", target_step_number, recipient.id, campaign.id)
-                    recipient.next_step_due_at = None
-                    await db.commit()
-                    continue
-
-                next_step_number = next_step.step_number
-
-                # b. Find previous SENT delivery to obtain thread_id and message_id
+                # a. Find previous SENT delivery to obtain thread_id and message_id
                 prev_deliv_stmt = (
                     select(CampaignDelivery)
                     .where(
@@ -1573,7 +1607,7 @@ class CampaignDeliveryService:
                     await db.commit()
                     continue
 
-                # c. Safety Auto-Stop Checks
+                # b. Safety Auto-Stop Checks
                 # Check for replies on the thread
                 has_reply = False
                 if prev_delivery.thread_id:
@@ -1583,7 +1617,7 @@ class CampaignDeliveryService:
                         has_reply = True
 
                 if has_reply or recipient.replied_at is not None:
-                    logger.info("Customer replied to campaign %d before follow-up step %d for recipient %d. Auto-stopping.", campaign.id, next_step.step_number, recipient.id)
+                    logger.info("Customer replied to campaign %d before follow-up for recipient %d. Auto-stopping.", campaign.id, recipient.id)
                     recipient.stopped_reason = CampaignRecipientStopReason.REPLIED.value
                     if not recipient.replied_at:
                         recipient.replied_at = current_time
@@ -1604,7 +1638,7 @@ class CampaignDeliveryService:
                     recipient.status in (CampaignRecipientStatus.BOUNCED.value, CampaignRecipientStatus.SUPPRESSED.value)
                     or await SuppressionService.is_suppressed(db, campaign.company_id, recipient.email)
                 ):
-                    logger.info("Recipient %s is suppressed/bounced in campaign %d. Cancelling follow-up step %d.", recipient.email, campaign.id, next_step.step_number)
+                    logger.info("Recipient %s is suppressed/bounced in campaign %d. Cancelling follow-up.", recipient.email, campaign.id)
                     recipient.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
                     recipient.next_step_due_at = None
                     recipient.status = CampaignRecipientStatus.SUPPRESSED.value
@@ -1622,6 +1656,96 @@ class CampaignDeliveryService:
                 if not sender_account or not sender_account.is_active:
                     logger.error("Sender account for campaign %d is missing or inactive. Skipping follow-up.", campaign.id)
                     continue
+
+                # c. Step Targeting & Advancement
+                remaining_steps_stmt = (
+                    select(CampaignStep)
+                    .where(
+                        CampaignStep.campaign_id == campaign.id,
+                        CampaignStep.step_number > recipient.current_step_number,
+                        CampaignStep.is_active == True,
+                    )
+                    .order_by(CampaignStep.step_number.asc())
+                )
+                remaining_steps = list((await db.execute(remaining_steps_stmt)).scalars().all())
+
+                if not remaining_steps:
+                    logger.info("No active follow-up steps remaining for recipient %d in campaign %d. Clearing next_step_due_at.", recipient.id, campaign.id)
+                    recipient.next_step_due_at = None
+                    if recipient.status in (CampaignRecipientStatus.SENT.value, CampaignRecipientStatus.ACTIVE.value):
+                        recipient.status = CampaignRecipientStatus.COMPLETED.value
+                    await db.commit()
+                    continue
+
+                recip_tags = set(t.strip().lower() for t in recipient.tags)
+                next_step = None
+
+                for candidate_step in remaining_steps:
+                    step_tags = [t.strip().lower() for t in (candidate_step.target_tags or []) if t.strip()]
+                    is_match = (len(step_tags) == 0) or any(t in recip_tags for t in step_tags)
+
+                    if not is_match:
+                        # Non-matching step: record SKIPPED delivery idempotently and advance current_step_number
+                        logger.info(
+                            "Recipient %d does not match target tags %s for Step %d. Skipping step.",
+                            recipient.id,
+                            step_tags,
+                            candidate_step.step_number,
+                        )
+                        deliv_stmt = select(CampaignDelivery).where(
+                            CampaignDelivery.campaign_id == campaign.id,
+                            CampaignDelivery.recipient_id == recipient.id,
+                            CampaignDelivery.step_id == candidate_step.id,
+                        )
+                        existing_deliv = (await db.execute(deliv_stmt)).scalar_one_or_none()
+                        if not existing_deliv:
+                            skip_deliv = CampaignDelivery(
+                                campaign_id=campaign.id,
+                                recipient_id=recipient.id,
+                                step_id=candidate_step.id,
+                                status=CampaignDeliveryStatus.SKIPPED.value,
+                                error_message="Skipped: recipient does not match step targeting tags",
+                            )
+                            db.add(skip_deliv)
+                        else:
+                            existing_deliv.status = CampaignDeliveryStatus.SKIPPED.value
+                            existing_deliv.error_message = "Skipped: recipient does not match step targeting tags"
+
+                        recipient.current_step_number = candidate_step.step_number
+                        continue
+                    else:
+                        # Candidate step matches targeting tags. Check due timing relative to previous send.
+                        ref_time = prev_delivery.sent_at or prev_delivery.created_at or current_time
+                        if ref_time.tzinfo is None:
+                            ref_time = ref_time.replace(tzinfo=timezone.utc)
+                        step_due_time = ref_time + timedelta(hours=candidate_step.delay_hours)
+                        sw_fu = getattr(campaign, "sending_window", None)
+                        if sw_fu:
+                            step_due_time = SendingWindowService.compute_next_window_opening(step_due_time, sw_fu)
+
+                        if step_due_time > current_time:
+                            # Step is not due yet; schedule it
+                            recipient.next_step_due_at = step_due_time
+                            next_step = None
+                            break
+                        else:
+                            # Step is due now, but re-validate immediate window before dispatching
+                            if sw_fu and not SendingWindowService.is_within_sending_window(current_time, sw_fu):
+                                recipient.next_step_due_at = SendingWindowService.compute_next_window_opening(current_time, sw_fu)
+                                next_step = None
+                                break
+                            next_step = candidate_step
+                            break
+
+                if not next_step:
+                    if recipient.current_step_number >= remaining_steps[-1].step_number:
+                        recipient.next_step_due_at = None
+                        if recipient.status in (CampaignRecipientStatus.SENT.value, CampaignRecipientStatus.ACTIVE.value):
+                            recipient.status = CampaignRecipientStatus.COMPLETED.value
+                    await db.commit()
+                    continue
+
+                next_step_number = next_step.step_number
 
                 # Create follow-up CampaignDelivery in SENDING state
                 followup_delivery = CampaignDelivery(
@@ -1711,16 +1835,34 @@ class CampaignDeliveryService:
                             recip_obj.status = CampaignRecipientStatus.SENT.value
 
                             # Check for subsequent step
-                            subseq_stmt = select(CampaignStep).where(
-                                CampaignStep.campaign_id == camp_id,
-                                CampaignStep.step_number == next_step_number + 1,
-                                CampaignStep.is_active == True,
+                            subseq_stmt = (
+                                select(CampaignStep)
+                                .where(
+                                    CampaignStep.campaign_id == camp_id,
+                                    CampaignStep.step_number > next_step_number,
+                                    CampaignStep.is_active == True,
+                                )
+                                .order_by(CampaignStep.step_number.asc())
                             )
-                            subseq_step = (await db.execute(subseq_stmt)).scalar_one_or_none()
-                            if subseq_step:
-                                recip_obj.next_step_due_at = deliv_obj.sent_at + timedelta(hours=subseq_step.delay_hours)
+                            subseq_steps = (await db.execute(subseq_stmt)).scalars().all()
+
+                            recip_tags = set(t.strip().lower() for t in recip_obj.tags)
+                            next_matching_subseq = None
+                            for candidate_subseq in subseq_steps:
+                                s_tags = [t.strip().lower() for t in (candidate_subseq.target_tags or []) if t.strip()]
+                                if len(s_tags) == 0 or any(t in recip_tags for t in s_tags):
+                                    next_matching_subseq = candidate_subseq
+                                    break
+
+                            if next_matching_subseq:
+                                raw_next_due = deliv_obj.sent_at + timedelta(hours=next_matching_subseq.delay_hours)
+                                sw_sub = getattr(campaign, "sending_window", None)
+                                if sw_sub:
+                                    raw_next_due = SendingWindowService.compute_next_window_opening(raw_next_due, sw_sub)
+                                recip_obj.next_step_due_at = raw_next_due
                             else:
                                 recip_obj.next_step_due_at = None
+                                recip_obj.status = CampaignRecipientStatus.COMPLETED.value
 
                         await db.commit()
                         logger.info("Dispatched follow-up Step %d for recipient %d (delivery %d).", next_step_number, recip_id, delivery_id)

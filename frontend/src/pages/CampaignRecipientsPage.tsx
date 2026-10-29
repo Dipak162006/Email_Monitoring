@@ -32,6 +32,10 @@ import { RecipientTable } from "../components/campaigns/recipients/RecipientTabl
 import { RecipientMobileCard } from "../components/campaigns/recipients/RecipientMobileCard";
 import { RecipientDeleteModal } from "../components/campaigns/recipients/RecipientDeleteModal";
 import { RecipientEditModal } from "../components/campaigns/recipients/RecipientEditModal";
+import { RecipientStopModal } from "../components/campaigns/recipients/RecipientStopModal";
+import { RecipientSkipModal } from "../components/campaigns/recipients/RecipientSkipModal";
+import { RecipientRescheduleModal } from "../components/campaigns/recipients/RecipientRescheduleModal";
+import { RecipientTagModal } from "../components/campaigns/recipients/RecipientTagModal";
 import {
   RecipientSkeleton,
   RecipientEmptyAudience,
@@ -79,6 +83,26 @@ export const CampaignRecipientsPage: React.FC = () => {
   }>({ isOpen: false, recipient: null });
 
   const [editModal, setEditModal] = useState<{
+    isOpen: boolean;
+    recipient: CampaignRecipient | null;
+  }>({ isOpen: false, recipient: null });
+
+  const [stopModal, setStopModal] = useState<{
+    isOpen: boolean;
+    recipient: CampaignRecipient | null;
+  }>({ isOpen: false, recipient: null });
+
+  const [skipModal, setSkipModal] = useState<{
+    isOpen: boolean;
+    recipient: CampaignRecipient | null;
+  }>({ isOpen: false, recipient: null });
+
+  const [rescheduleModal, setRescheduleModal] = useState<{
+    isOpen: boolean;
+    recipient: CampaignRecipient | null;
+  }>({ isOpen: false, recipient: null });
+
+  const [tagModal, setTagModal] = useState<{
     isOpen: boolean;
     recipient: CampaignRecipient | null;
   }>({ isOpen: false, recipient: null });
@@ -214,6 +238,114 @@ export const CampaignRecipientsPage: React.FC = () => {
         err instanceof RequestError
           ? String(err.detail || err.message)
           : "Failed to remove recipient.";
+      showToast(msg, "error");
+    },
+  });
+
+  const canManageFollowups = Boolean(
+    isAdminOrOwner && campaign?.status !== "DRAFT" && campaign?.status !== "CANCELLED" && campaign?.status !== "ARCHIVED"
+  );
+
+  // Stop Recipient Mutation
+  const stopMutation = useMutation({
+    mutationFn: (recipientId: number) => {
+      if (!currentCompanyId || !campaignIdNum) throw new Error("Missing parameters");
+      return campaignsApi.stopRecipient(currentCompanyId, campaignIdNum, recipientId);
+    },
+    onSuccess: (updated) => {
+      invalidateRecipientQueries();
+      setStopModal({ isOpen: false, recipient: null });
+      showToast(`Stopped follow-ups for ${updated.email}.`);
+    },
+    onError: (err: unknown) => {
+      setStopModal({ isOpen: false, recipient: null });
+      const msg =
+        err instanceof RequestError
+          ? String(err.detail || err.message)
+          : "Failed to stop recipient.";
+      showToast(msg, "error");
+    },
+  });
+
+  // Skip Next Step Mutation
+  const skipMutation = useMutation({
+    mutationFn: (recipientId: number) => {
+      if (!currentCompanyId || !campaignIdNum) throw new Error("Missing parameters");
+      return campaignsApi.skipRecipientNextStep(currentCompanyId, campaignIdNum, recipientId);
+    },
+    onSuccess: (updated) => {
+      invalidateRecipientQueries();
+      setSkipModal({ isOpen: false, recipient: null });
+      showToast(`Advanced ${updated.email} to Step ${updated.current_step_number}.`);
+    },
+    onError: (err: unknown) => {
+      setSkipModal({ isOpen: false, recipient: null });
+      const msg =
+        err instanceof RequestError
+          ? String(err.detail || err.message)
+          : "Failed to skip step.";
+      showToast(msg, "error");
+    },
+  });
+
+  // Update Recipient Tags Mutation
+  const updateTagsMutation = useMutation({
+    mutationFn: async ({
+      recipientId,
+      tags,
+    }: {
+      recipientId: number;
+      tags: string[];
+    }) => {
+      if (!currentCompanyId || !campaignIdNum) throw new Error("Missing parameters");
+      return campaignsApi.updateRecipientTags(
+        currentCompanyId,
+        campaignIdNum,
+        recipientId,
+        tags
+      );
+    },
+    onSuccess: (updated) => {
+      invalidateRecipientQueries();
+      queryClient.invalidateQueries({
+        queryKey: ["campaigns", currentCompanyId, "tags", campaignIdNum],
+      });
+      showToast(`Tags updated for ${updated.email}.`);
+    },
+    onError: (err: unknown) => {
+      const msg =
+        err instanceof RequestError
+          ? String(err.detail || err.message)
+          : "Failed to update tags.";
+      showToast(msg, "error");
+    },
+  });
+
+  // Reschedule Follow-Up Mutation
+  const rescheduleMutation = useMutation({
+    mutationFn: ({
+      recipientId,
+      nextStepDueAt,
+    }: {
+      recipientId: number;
+      nextStepDueAt: string;
+    }) => {
+      if (!currentCompanyId || !campaignIdNum) throw new Error("Missing parameters");
+      return campaignsApi.rescheduleRecipient(currentCompanyId, campaignIdNum, recipientId, {
+        next_step_due_at: nextStepDueAt,
+      });
+    },
+    onSuccess: (updated) => {
+      invalidateRecipientQueries();
+      setRescheduleModal({ isOpen: false, recipient: null });
+      showToast(`Rescheduled next follow-up for ${updated.email}.`);
+    },
+    onError: (err: unknown) => {
+      setRescheduleModal({ isOpen: false, recipient: null });
+      const msg =
+        err instanceof RequestError
+          ? String(err.detail || err.message)
+          : "Failed to reschedule.";
       showToast(msg, "error");
     },
   });
@@ -450,9 +582,14 @@ export const CampaignRecipientsPage: React.FC = () => {
               <RecipientTable
                 recipients={loadedRecipients}
                 isEditable={isEditable}
+                canManageFollowups={canManageFollowups}
                 onEdit={(r) => setEditModal({ isOpen: true, recipient: r })}
                 onDelete={(r) => setDeleteModal({ isOpen: true, recipient: r })}
                 onCopyEmail={handleCopyEmail}
+                onStop={(r) => setStopModal({ isOpen: true, recipient: r })}
+                onSkip={(r) => setSkipModal({ isOpen: true, recipient: r })}
+                onReschedule={(r) => setRescheduleModal({ isOpen: true, recipient: r })}
+                onManageTags={(r) => setTagModal({ isOpen: true, recipient: r })}
               />
             </div>
 
@@ -463,9 +600,14 @@ export const CampaignRecipientsPage: React.FC = () => {
                   key={recipient.id}
                   recipient={recipient}
                   isEditable={isEditable}
+                  canManageFollowups={canManageFollowups}
                   onEdit={(r) => setEditModal({ isOpen: true, recipient: r })}
                   onDelete={(r) => setDeleteModal({ isOpen: true, recipient: r })}
                   onCopyEmail={handleCopyEmail}
+                  onStop={(r) => setStopModal({ isOpen: true, recipient: r })}
+                  onSkip={(r) => setSkipModal({ isOpen: true, recipient: r })}
+                  onReschedule={(r) => setRescheduleModal({ isOpen: true, recipient: r })}
+                  onManageTags={(r) => setTagModal({ isOpen: true, recipient: r })}
                 />
               ))}
             </div>
@@ -582,6 +724,58 @@ export const CampaignRecipientsPage: React.FC = () => {
           updateMutation.mutate({ recipientId, payload });
         }}
         isLoading={updateMutation.isPending}
+      />
+
+      {/* Stop Follow-Ups Confirmation Dialog */}
+      <RecipientStopModal
+        isOpen={stopModal.isOpen}
+        recipient={stopModal.recipient}
+        onClose={() => setStopModal({ isOpen: false, recipient: null })}
+        onConfirm={() => {
+          if (stopModal.recipient) {
+            stopMutation.mutate(stopModal.recipient.id);
+          }
+        }}
+        isLoading={stopMutation.isPending}
+      />
+
+      {/* Skip Next Step Confirmation Dialog */}
+      <RecipientSkipModal
+        isOpen={skipModal.isOpen}
+        recipient={skipModal.recipient}
+        onClose={() => setSkipModal({ isOpen: false, recipient: null })}
+        onConfirm={() => {
+          if (skipModal.recipient) {
+            skipMutation.mutate(skipModal.recipient.id);
+          }
+        }}
+        isLoading={skipMutation.isPending}
+      />
+
+      {/* Manage Recipient Tags Dialog */}
+      <RecipientTagModal
+        isOpen={tagModal.isOpen}
+        recipient={tagModal.recipient}
+        onClose={() => setTagModal({ isOpen: false, recipient: null })}
+        onUpdateTags={async (recipientId, tags) => {
+          await updateTagsMutation.mutateAsync({ recipientId, tags });
+        }}
+      />
+
+      {/* Reschedule Follow-Up Dialog */}
+      <RecipientRescheduleModal
+        isOpen={rescheduleModal.isOpen}
+        recipient={rescheduleModal.recipient}
+        onClose={() => setRescheduleModal({ isOpen: false, recipient: null })}
+        onConfirm={(newScheduledIso) => {
+          if (rescheduleModal.recipient) {
+            rescheduleMutation.mutate({
+              recipientId: rescheduleModal.recipient.id,
+              nextStepDueAt: newScheduledIso,
+            });
+          }
+        }}
+        isLoading={rescheduleMutation.isPending}
       />
 
       {/* Toast Notification */}

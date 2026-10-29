@@ -1,4 +1,5 @@
 import csv
+from datetime import datetime, timedelta, timezone
 import io
 import json
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -8,8 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.campaigns.models import (
     Campaign,
+    CampaignDelivery,
+    CampaignDeliveryStatus,
     CampaignRecipient,
     CampaignRecipientStatus,
+    CampaignRecipientStopReason,
+    CampaignStep,
     CampaignStatus,
 )
 from app.modules.campaigns.schemas import (
@@ -19,8 +24,11 @@ from app.modules.campaigns.schemas import (
     CampaignRecipientRead,
     CampaignRecipientUpdate,
     normalize_and_validate_email,
+    normalize_and_validate_tag,
+    normalize_and_validate_tag_list,
 )
 from app.modules.campaigns.service import CampaignService
+from app.modules.campaigns.suppression_service import SuppressionService
 
 MAX_CSV_BYTES = 5 * 1024 * 1024  # 5 Megabytes practical file size limit
 
@@ -84,12 +92,16 @@ class CampaignRecipientService:
                 detail=f"Recipient with email '{norm_email}' already exists in this campaign.",
             )
 
+        custom_vars = dict(recipient_in.custom_variables) if recipient_in.custom_variables else {}
+        if recipient_in.tags is not None:
+            custom_vars["tags"] = recipient_in.tags
+
         recipient = CampaignRecipient(
             campaign_id=campaign_id,
             email=norm_email,
             first_name=recipient_in.first_name,
             last_name=recipient_in.last_name,
-            custom_variables=recipient_in.custom_variables,
+            custom_variables=custom_vars,
             status=CampaignRecipientStatus.PENDING.value,
         )
         db.add(recipient)
@@ -141,13 +153,16 @@ class CampaignRecipientService:
             if norm_email in existing_in_db:
                 skipped_emails.append(norm_email)
             else:
+                cv = dict(item.custom_variables) if item.custom_variables else {}
+                if item.tags is not None:
+                    cv["tags"] = item.tags
                 new_recipients.append(
                     CampaignRecipient(
                         campaign_id=campaign_id,
                         email=norm_email,
                         first_name=item.first_name,
                         last_name=item.last_name,
-                        custom_variables=item.custom_variables,
+                        custom_variables=cv,
                         status=CampaignRecipientStatus.PENDING.value,
                     )
                 )
@@ -264,6 +279,8 @@ class CampaignRecipientService:
             recipient.last_name = update_data["last_name"]
         if "custom_variables" in update_data:
             recipient.custom_variables = update_data["custom_variables"]
+        if "tags" in update_data:
+            recipient.set_tags(update_data["tags"] or [])
 
         await db.commit()
         await db.refresh(recipient)
@@ -361,6 +378,10 @@ class CampaignRecipientService:
             (i for i, h in enumerate(headers) if h in ("custom_variables", "custom variables", "variables")),
             None,
         )
+        tags_idx = next(
+            (i for i, h in enumerate(headers) if h in ("tags", "tag", "labels", "recipient_tags")),
+            None,
+        )
 
         seen_emails: Set[str] = set()
         valid_rows: List[Tuple[str, Optional[str], Optional[str], Optional[Dict[str, Any]]]] = []
@@ -412,6 +433,25 @@ class CampaignRecipientService:
                 except Exception:
                     custom_vars = {"raw": raw_vars}
 
+            raw_tags = (
+                row[tags_idx].strip()
+                if tags_idx is not None and tags_idx < len(row) and row[tags_idx].strip()
+                else None
+            )
+            if raw_tags:
+                delims = [",", ";", "|"]
+                delim = ","
+                for d in delims:
+                    if d in raw_tags:
+                        delim = d
+                        break
+                candidates = [t.strip() for t in raw_tags.split(delim) if t.strip()]
+                parsed_tags = normalize_and_validate_tag_list(candidates)
+                if parsed_tags:
+                    if custom_vars is None:
+                        custom_vars = {}
+                    custom_vars["tags"] = parsed_tags
+
             valid_rows.append((norm_email, first_name, last_name, custom_vars))
 
         # 4. Check existing recipients in database with a single query
@@ -456,3 +496,433 @@ class CampaignRecipientService:
             skipped_emails=skipped_emails,
             invalid_rows=invalid_rows,
         )
+
+
+    @staticmethod
+    async def stop_recipient(
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+        recipient_id: int,
+        reason: str = "MANUAL",
+    ) -> CampaignRecipient:
+        """Stop future initial or follow-up sends for a recipient, clear pending timer, and record MANUAL stop reason.
+        
+        - Enforces company isolation via campaign lookup.
+        - Synchronizes with due-follow-up workers via row-level lock (with_for_update).
+        - Idempotent if recipient was already manually stopped.
+        - Rejects terminal recipients (replied, bounced, unsubscribed, suppressed, completed).
+        - Rejects if campaign is in DRAFT.
+        - Cancels any PENDING deliveries.
+        """
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        if campaign.status == CampaignStatus.DRAFT.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot stop recipient: campaign is still in DRAFT status. Recipients can be deleted or edited directly.",
+            )
+
+        stmt = (
+            select(CampaignRecipient)
+            .where(
+                CampaignRecipient.id == recipient_id,
+                CampaignRecipient.campaign_id == campaign_id,
+            )
+            .with_for_update()
+        )
+        res = await db.execute(stmt)
+        recipient = res.scalar_one_or_none()
+        if not recipient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Campaign recipient not found.",
+            )
+
+        if (
+            recipient.status == CampaignRecipientStatus.STOPPED.value
+            and recipient.stopped_reason == CampaignRecipientStopReason.MANUAL.value
+        ):
+            return recipient
+
+        if recipient.replied_at is not None or recipient.stopped_reason == CampaignRecipientStopReason.REPLIED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot stop recipient: recipient has already replied.",
+            )
+        if recipient.stopped_reason == CampaignRecipientStopReason.BOUNCED.value or recipient.status == CampaignRecipientStatus.BOUNCED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot stop recipient: recipient has bounced.",
+            )
+        if recipient.stopped_reason == CampaignRecipientStopReason.UNSUBSCRIBED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot stop recipient: recipient has unsubscribed.",
+            )
+        if recipient.status == CampaignRecipientStatus.SUPPRESSED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot stop recipient: recipient is on the suppression list.",
+            )
+        if recipient.status == CampaignRecipientStatus.COMPLETED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot stop recipient: recipient has already completed the sequence.",
+            )
+
+        pending_delivs_stmt = select(CampaignDelivery).where(
+            CampaignDelivery.campaign_id == campaign_id,
+            CampaignDelivery.recipient_id == recipient_id,
+            CampaignDelivery.status == CampaignDeliveryStatus.PENDING.value,
+        )
+        deliv_res = await db.execute(pending_delivs_stmt)
+        for deliv in deliv_res.scalars().all():
+            deliv.status = CampaignDeliveryStatus.FAILED.value
+            deliv.error_message = "Delivery cancelled: recipient stopped manually"
+
+        recipient.status = CampaignRecipientStatus.STOPPED.value
+        recipient.stopped_reason = CampaignRecipientStopReason.MANUAL.value
+        recipient.next_step_due_at = None
+
+        await db.commit()
+        await db.refresh(recipient)
+        return recipient
+
+    @staticmethod
+    async def skip_recipient_next_step(
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+        recipient_id: int,
+    ) -> CampaignRecipient:
+        """Skip the next pending follow-up step without dispatching it.
+        
+        Advances recipient.current_step_number to the skipped step, records SKIPPED delivery,
+        and either schedules the subsequent configured active step or marks the sequence COMPLETED.
+        - Enforces company isolation.
+        - Rejects terminal, suppressed, stopped, or completed recipients.
+        - Rejects campaigns that are DRAFT, CANCELLED, or ARCHIVED.
+        - Synchronizes with due-follow-up workers via row-level lock.
+        """
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        if campaign.status in (
+            CampaignStatus.DRAFT.value,
+            CampaignStatus.CANCELLED.value,
+            CampaignStatus.ARCHIVED.value,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot skip steps for campaign with status '{campaign.status}'.",
+            )
+
+        stmt = (
+            select(CampaignRecipient)
+            .where(
+                CampaignRecipient.id == recipient_id,
+                CampaignRecipient.campaign_id == campaign_id,
+            )
+            .with_for_update()
+        )
+        res = await db.execute(stmt)
+        recipient = res.scalar_one_or_none()
+        if not recipient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Campaign recipient not found.",
+            )
+
+        if await SuppressionService.is_suppressed(db, company_id, recipient.email):
+            recipient.status = CampaignRecipientStatus.SUPPRESSED.value
+            recipient.next_step_due_at = None
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot skip step: recipient is on the company suppression list.",
+            )
+
+        if recipient.replied_at is not None or recipient.stopped_reason == CampaignRecipientStopReason.REPLIED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot skip step: recipient has already replied.",
+            )
+        if recipient.stopped_reason == CampaignRecipientStopReason.BOUNCED.value or recipient.status == CampaignRecipientStatus.BOUNCED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot skip step: recipient has bounced.",
+            )
+        if recipient.stopped_reason == CampaignRecipientStopReason.UNSUBSCRIBED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot skip step: recipient has unsubscribed.",
+            )
+        if recipient.status == CampaignRecipientStatus.STOPPED.value or recipient.stopped_reason is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot skip step: recipient is stopped ({recipient.stopped_reason or 'STOPPED'}).",
+            )
+        if recipient.status == CampaignRecipientStatus.SUPPRESSED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot skip step: recipient is suppressed.",
+            )
+        if recipient.status == CampaignRecipientStatus.COMPLETED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot skip step: sequence is already completed.",
+            )
+
+        skipped_step_number = recipient.current_step_number + 1
+        step_stmt = select(CampaignStep).where(
+            CampaignStep.campaign_id == campaign_id,
+            CampaignStep.step_number == skipped_step_number,
+            CampaignStep.is_active == True,
+        )
+        step_to_skip = (await db.execute(step_stmt)).scalar_one_or_none()
+        if not step_to_skip:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"No active Step {skipped_step_number} found to skip.",
+            )
+
+        delivery_stmt = select(CampaignDelivery).where(
+            CampaignDelivery.campaign_id == campaign_id,
+            CampaignDelivery.recipient_id == recipient_id,
+            CampaignDelivery.step_id == step_to_skip.id,
+        )
+        deliv = (await db.execute(delivery_stmt)).scalar_one_or_none()
+        if deliv:
+            deliv.status = CampaignDeliveryStatus.SKIPPED.value
+            deliv.error_message = "Step skipped by administrator"
+        else:
+            deliv = CampaignDelivery(
+                campaign_id=campaign_id,
+                recipient_id=recipient_id,
+                step_id=step_to_skip.id,
+                status=CampaignDeliveryStatus.SKIPPED.value,
+                error_message="Step skipped by administrator",
+            )
+            db.add(deliv)
+
+        recipient.current_step_number = skipped_step_number
+
+        subseq_stmt = (
+            select(CampaignStep)
+            .where(
+                CampaignStep.campaign_id == campaign_id,
+                CampaignStep.step_number > skipped_step_number,
+                CampaignStep.is_active == True,
+            )
+            .order_by(CampaignStep.step_number.asc())
+        )
+        subseq_step = (await db.execute(subseq_stmt)).scalars().first()
+        if subseq_step:
+            now_utc = datetime.now(timezone.utc)
+            candidate_due = now_utc + timedelta(hours=subseq_step.delay_hours)
+            recipient.next_step_due_at = candidate_due
+            recipient.status = CampaignRecipientStatus.SENT.value
+        else:
+            recipient.next_step_due_at = None
+            recipient.status = CampaignRecipientStatus.COMPLETED.value
+
+        await db.commit()
+        await db.refresh(recipient)
+        return recipient
+
+    @staticmethod
+    async def reschedule_recipient(
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+        recipient_id: int,
+        rescheduled_due_at: datetime,
+    ) -> CampaignRecipient:
+        """Reschedule the next pending follow-up step for a recipient.
+        
+        - Enforces company isolation.
+        - Validates that rescheduled_due_at is timezone-aware and in the future.
+        - Rejects terminal, suppressed, stopped, or completed recipients.
+        - Rejects campaigns that are DRAFT, CANCELLED, or ARCHIVED.
+        - Verifies that an active next step exists to be scheduled.
+        - Synchronizes with due-follow-up workers via row-level lock.
+        """
+        if rescheduled_due_at.tzinfo is None:
+            rescheduled_due_at = rescheduled_due_at.replace(tzinfo=timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        if rescheduled_due_at <= now_utc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Rescheduled time must be in the future.",
+            )
+
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        if campaign.status in (
+            CampaignStatus.DRAFT.value,
+            CampaignStatus.CANCELLED.value,
+            CampaignStatus.ARCHIVED.value,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot reschedule follow-up for campaign with status '{campaign.status}'.",
+            )
+
+        stmt = (
+            select(CampaignRecipient)
+            .where(
+                CampaignRecipient.id == recipient_id,
+                CampaignRecipient.campaign_id == campaign_id,
+            )
+            .with_for_update()
+        )
+        res = await db.execute(stmt)
+        recipient = res.scalar_one_or_none()
+        if not recipient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Campaign recipient not found.",
+            )
+
+        if await SuppressionService.is_suppressed(db, company_id, recipient.email):
+            recipient.status = CampaignRecipientStatus.SUPPRESSED.value
+            recipient.next_step_due_at = None
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot reschedule follow-up: recipient is on the company suppression list.",
+            )
+
+        if recipient.replied_at is not None or recipient.stopped_reason == CampaignRecipientStopReason.REPLIED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot reschedule: recipient has already replied.",
+            )
+        if recipient.stopped_reason == CampaignRecipientStopReason.BOUNCED.value or recipient.status == CampaignRecipientStatus.BOUNCED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot reschedule: recipient has bounced.",
+            )
+        if recipient.stopped_reason == CampaignRecipientStopReason.UNSUBSCRIBED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot reschedule: recipient has unsubscribed.",
+            )
+        if recipient.status == CampaignRecipientStatus.STOPPED.value or recipient.stopped_reason is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot reschedule: recipient is stopped ({recipient.stopped_reason or 'STOPPED'}).",
+            )
+        if recipient.status == CampaignRecipientStatus.SUPPRESSED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot reschedule: recipient is suppressed.",
+            )
+        if recipient.status == CampaignRecipientStatus.COMPLETED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot reschedule: sequence is already completed.",
+            )
+
+        next_step_number = recipient.current_step_number + 1
+        step_stmt = select(CampaignStep).where(
+            CampaignStep.campaign_id == campaign_id,
+            CampaignStep.step_number == next_step_number,
+            CampaignStep.is_active == True,
+        )
+        next_step = (await db.execute(step_stmt)).scalar_one_or_none()
+        if not next_step:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"No active follow-up step (Step {next_step_number}) found to reschedule.",
+            )
+
+        recipient.next_step_due_at = rescheduled_due_at
+        await db.commit()
+        await db.refresh(recipient)
+        return recipient
+
+    @staticmethod
+    async def update_recipient_tags(
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+        recipient_id: int,
+        tags: List[str],
+    ) -> CampaignRecipient:
+        """Replace all tags of a campaign recipient."""
+        recipient = await CampaignRecipientService.get_recipient(db, company_id, campaign_id, recipient_id)
+        validated_tags = normalize_and_validate_tag_list(tags)
+        recipient.set_tags(validated_tags)
+        await db.commit()
+        await db.refresh(recipient)
+        return recipient
+
+    @staticmethod
+    async def add_recipient_tag(
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+        recipient_id: int,
+        tag: str,
+    ) -> CampaignRecipient:
+        """Add a single tag to a campaign recipient."""
+        recipient = await CampaignRecipientService.get_recipient(db, company_id, campaign_id, recipient_id)
+        norm_tag = normalize_and_validate_tag(tag)
+        current_tags = list(recipient.tags)
+        if norm_tag not in current_tags:
+            current_tags.append(norm_tag)
+            recipient.set_tags(current_tags)
+            await db.commit()
+            await db.refresh(recipient)
+        return recipient
+
+    @staticmethod
+    async def remove_recipient_tag(
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+        recipient_id: int,
+        tag: str,
+    ) -> CampaignRecipient:
+        """Remove a single tag from a campaign recipient."""
+        recipient = await CampaignRecipientService.get_recipient(db, company_id, campaign_id, recipient_id)
+        norm_tag = normalize_and_validate_tag(tag)
+        current_tags = [t for t in recipient.tags if t != norm_tag]
+        recipient.set_tags(current_tags)
+        await db.commit()
+        await db.refresh(recipient)
+        return recipient
+
+    @staticmethod
+    async def get_campaign_tags(
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+    ) -> List[str]:
+        """Get all unique tags used across recipients and steps in a campaign."""
+        await CampaignRecipientService.get_campaign_read(db, company_id, campaign_id)
+
+        recip_stmt = select(CampaignRecipient.custom_variables).where(
+            CampaignRecipient.campaign_id == campaign_id,
+            CampaignRecipient.custom_variables.is_not(None),
+        )
+        recip_res = await db.execute(recip_stmt)
+        unique_tags: Set[str] = set()
+        for cv in recip_res.scalars().all():
+            if isinstance(cv, dict):
+                tags_val = cv.get("tags")
+                if isinstance(tags_val, list):
+                    for t in tags_val:
+                        if isinstance(t, str) and t.strip():
+                            unique_tags.add(t.strip().lower())
+
+        step_stmt = select(CampaignStep.target_tags).where(
+            CampaignStep.campaign_id == campaign_id,
+            CampaignStep.target_tags.is_not(None),
+        )
+        step_res = await db.execute(step_stmt)
+        for tt in step_res.scalars().all():
+            if isinstance(tt, list):
+                for t in tt:
+                    if isinstance(t, str) and t.strip():
+                        unique_tags.add(t.strip().lower())
+
+        return sorted(list(unique_tags))

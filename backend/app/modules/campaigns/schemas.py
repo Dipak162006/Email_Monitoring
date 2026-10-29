@@ -1,7 +1,8 @@
+from app.modules.campaigns.window_service import SendingWindowConfig
 from datetime import datetime
 import re
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.sanitizer import sanitize_html
 from app.modules.campaigns.models import (
@@ -41,6 +42,43 @@ def normalize_and_validate_email(email_raw: str) -> str:
     return email
 
 
+TAG_REGEX = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
+
+
+def normalize_and_validate_tag(tag: str) -> str:
+    """Normalize and validate a single recipient tag.
+    
+    Trims whitespace, lowercases, verifies length 1..50 and allowed characters.
+    Allowed characters: alphanumeric, underscores, hyphens, and dots.
+    """
+    if not isinstance(tag, str):
+        raise ValueError("Tag must be a string.")
+    normalized = tag.strip().lower()
+    if not normalized:
+        raise ValueError("Tag cannot be empty or whitespace only.")
+    if len(normalized) > 50:
+        raise ValueError(f"Tag '{normalized}' exceeds maximum length of 50 characters.")
+    if not TAG_REGEX.match(normalized):
+        raise ValueError(
+            f"Invalid tag '{normalized}'. Tags may only contain letters, numbers, hyphens, underscores, and dots."
+        )
+    return normalized
+
+
+def normalize_and_validate_tag_list(tags: Optional[List[str]]) -> List[str]:
+    """Normalize, validate, and deduplicate a list of tags while preserving order."""
+    if not tags:
+        return []
+    result: List[str] = []
+    seen = set()
+    for item in tags:
+        norm = normalize_and_validate_tag(item)
+        if norm not in seen:
+            seen.add(norm)
+            result.append(norm)
+    return result
+
+
 # =============================================================================
 # Campaign Attachment Schemas (C12)
 # =============================================================================
@@ -58,6 +96,7 @@ class CampaignAttachmentRead(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
 
 
 class CampaignAttachmentListResponse(BaseModel):
@@ -83,6 +122,7 @@ class CampaignStepWrite(BaseModel):
     subject: Optional[str] = Field(default="", max_length=255, description="Follow-up subject (if empty, defaults to Re: <Campaign Subject>)")
     body_text: Optional[str] = None
     body_html: Optional[str] = None
+    target_tags: Optional[List[str]] = Field(default_factory=list, description="Optional recipient tags to target for this step")
     is_active: bool = True
 
     model_config = ConfigDict(extra="forbid")
@@ -91,6 +131,11 @@ class CampaignStepWrite(BaseModel):
     @classmethod
     def sanitize_step_html(cls, v: Optional[str]) -> Optional[str]:
         return sanitize_html(v) if v is not None else None
+
+    @field_validator("target_tags")
+    @classmethod
+    def validate_target_tags(cls, v: Optional[List[str]]) -> List[str]:
+        return normalize_and_validate_tag_list(v)
 
 
 class CampaignStepRead(BaseModel):
@@ -101,11 +146,21 @@ class CampaignStepRead(BaseModel):
     subject: str
     body_text: Optional[str] = None
     body_html: Optional[str] = None
+    target_tags: List[str] = Field(default_factory=list)
     is_active: bool
     created_at: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("target_tags", mode="before")
+    @classmethod
+    def coerce_target_tags(cls, v: Any) -> List[str]:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return [str(x) for x in v]
+        return []
 
 
 # =============================================================================
@@ -128,6 +183,10 @@ class CampaignCreate(BaseModel):
     followup_steps: Optional[List[CampaignStepWrite]] = Field(
         default=None,
         description="Optional list of automated follow-up steps (steps 2..10)",
+    )
+    sending_window: Optional[SendingWindowConfig] = Field(
+        default=None,
+        description="Optional sending window and timezone governance configuration",
     )
 
     model_config = ConfigDict(extra="forbid")
@@ -179,6 +238,10 @@ class CampaignUpdate(BaseModel):
     followup_steps: Optional[List[CampaignStepWrite]] = Field(
         default=None,
         description="Optional list of automated follow-up steps (steps 2..10)",
+    )
+    sending_window: Optional[SendingWindowConfig] = Field(
+        default=None,
+        description="Optional sending window and timezone governance configuration",
     )
 
     model_config = ConfigDict(extra="forbid")
@@ -245,8 +308,13 @@ class CampaignRead(BaseModel):
     attachments: List[CampaignAttachmentRead] = Field(default_factory=list)
     steps: List[CampaignStepRead] = Field(default_factory=list)
     followup_steps: List[CampaignStepRead] = Field(default_factory=list)
+    sending_window: Optional[SendingWindowConfig] = Field(
+        default=None,
+        description="Optional sending window and timezone governance configuration",
+    )
 
     model_config = ConfigDict(from_attributes=True)
+
 
 
 class CampaignDetailRead(CampaignRead):
@@ -265,6 +333,7 @@ class CampaignDetailRead(CampaignRead):
     model_config = ConfigDict(from_attributes=True)
 
 
+
 # =============================================================================
 # Campaign Recipient Schemas (C3)
 # =============================================================================
@@ -275,6 +344,7 @@ class CampaignRecipientCreate(BaseModel):
     first_name: Optional[str] = Field(default=None, max_length=100, description="Recipient first name")
     last_name: Optional[str] = Field(default=None, max_length=100, description="Recipient last name")
     custom_variables: Optional[Dict[str, Any]] = Field(default=None, description="Arbitrary merge tag custom variables")
+    tags: Optional[List[str]] = Field(default=None, description="Optional recipient tags")
 
     model_config = ConfigDict(extra="forbid")
 
@@ -283,6 +353,13 @@ class CampaignRecipientCreate(BaseModel):
     def validate_email_address(cls, v: str) -> str:
         return normalize_and_validate_email(v)
 
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is not None:
+            return normalize_and_validate_tag_list(v)
+        return None
+
 
 class CampaignRecipientUpdate(BaseModel):
     """Request schema for updating an existing campaign recipient in a DRAFT campaign."""
@@ -290,6 +367,7 @@ class CampaignRecipientUpdate(BaseModel):
     first_name: Optional[str] = Field(default=None, max_length=100, description="Updated recipient first name")
     last_name: Optional[str] = Field(default=None, max_length=100, description="Updated recipient last name")
     custom_variables: Optional[Dict[str, Any]] = Field(default=None, description="Updated custom variables")
+    tags: Optional[List[str]] = Field(default=None, description="Optional updated tags")
 
     model_config = ConfigDict(extra="forbid")
 
@@ -298,6 +376,13 @@ class CampaignRecipientUpdate(BaseModel):
     def validate_optional_email(cls, v: Optional[str]) -> Optional[str]:
         if v is not None:
             return normalize_and_validate_email(v)
+        return None
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is not None:
+            return normalize_and_validate_tag_list(v)
         return None
 
 
@@ -309,6 +394,7 @@ class CampaignRecipientRead(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     custom_variables: Optional[Dict[str, Any]] = None
+    tags: List[str] = Field(default_factory=list)
     status: CampaignRecipientStatus
     current_step_number: int = 0
     next_step_due_at: Optional[datetime] = None
@@ -317,6 +403,67 @@ class CampaignRecipientRead(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def coerce_tags(cls, v: Any) -> List[str]:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return [str(x) for x in v]
+        return []
+
+
+class CampaignRecipientTagsUpdateRequest(BaseModel):
+    """Request schema for replacing all tags of a recipient."""
+    tags: List[str] = Field(..., description="List of tags to assign to the recipient")
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: List[str]) -> List[str]:
+        return normalize_and_validate_tag_list(v)
+
+
+class CampaignRecipientTagAddRequest(BaseModel):
+    """Request schema for adding a single tag to a recipient."""
+    tag: str = Field(..., description="Tag to add to the recipient")
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("tag")
+    @classmethod
+    def validate_tag(cls, v: str) -> str:
+        return normalize_and_validate_tag(v)
+
+
+class CampaignRecipientRescheduleRequest(BaseModel):
+    """Request schema for rescheduling a recipient's next follow-up step."""
+    next_step_due_at: Optional[datetime] = Field(
+        default=None,
+        description="New scheduled timestamp in UTC or with timezone for the next follow-up step",
+    )
+    scheduled_at: Optional[datetime] = Field(
+        default=None,
+        description="Alias for next_step_due_at",
+    )
+
+    @model_validator(mode="after")
+    def validate_timestamp(self) -> "CampaignRecipientRescheduleRequest":
+        if self.next_step_due_at is None and self.scheduled_at is None:
+            raise ValueError("next_step_due_at or scheduled_at must be provided.")
+        if self.next_step_due_at is None:
+            self.next_step_due_at = self.scheduled_at
+        return self
+
+
+class CampaignRecipientStopRequest(BaseModel):
+    """Request schema for manually stopping future emails to a recipient."""
+    reason: Optional[str] = Field(
+        default="MANUAL",
+        description="Optional reason for stopping future sends to this recipient",
+    )
 
 
 class CampaignRecipientBulkCreateRequest(BaseModel):
@@ -380,6 +527,7 @@ class SuppressionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+
 class SuppressionBulkCreateRequest(BaseModel):
     """Request schema for bulk creating company suppression entries."""
     emails: List[str] = Field(..., min_length=1, description="List of email addresses to suppress")
@@ -424,6 +572,7 @@ class PreflightIssue(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+
 class CampaignPreflightResponse(BaseModel):
     """Deterministic eligibility report returned by campaign preflight."""
     eligible: bool = Field(..., description="Whether the campaign is currently eligible to proceed to execution")
@@ -434,6 +583,7 @@ class CampaignPreflightResponse(BaseModel):
     issues: List[PreflightIssue] = Field(default_factory=list, description="List of blocking and warning validation issues")
 
     model_config = ConfigDict(from_attributes=True)
+
 
 
 # =============================================================================
@@ -453,3 +603,46 @@ class CampaignDispatchResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+
+
+
+# =============================================================================
+# Campaign Analytics Funnel Schemas (M7)
+# =============================================================================
+
+class CampaignStepAnalytics(BaseModel):
+    """Step-level conversion and outcome metrics derived from persisted delivery records."""
+    step_id: int = Field(..., description="ID of the campaign step")
+    step_number: int = Field(..., description="1-based step sequence number")
+    subject: str = Field(..., description="Subject line for this step")
+    delay_hours: int = Field(..., description="Delay hours relative to previous step")
+    target_tags: List[str] = Field(default_factory=list, description="Target recipient tags configured for this step")
+    targeted_count: int = Field(..., description="Number of campaign recipients targeted by this step's criteria")
+    sent_count: int = Field(..., description="Number of deliveries dispatched with SENT status")
+    sending_count: int = Field(default=0, description="Number of deliveries currently in SENDING status")
+    bounced_count: int = Field(..., description="Number of deliveries marked BOUNCED or with bounced_at timestamp")
+    failed_count: int = Field(default=0, description="Number of deliveries marked FAILED")
+    skipped_count: int = Field(..., description="Number of deliveries SKIPPED due to manual action or tag non-match")
+    replied_count: int = Field(..., description="Number of recipients whose reply was elicited by this step")
+    pending_count: int = Field(..., description="Number of recipients queued or waiting to receive this step")
+    delivery_rate: float = Field(..., description="Percentage of targeted recipients sent (sent_count / targeted_count * 100)")
+    reply_rate: float = Field(..., description="Percentage of sent recipients who replied (replied_count / sent_count * 100)")
+    bounce_rate: float = Field(..., description="Percentage of sent recipients who bounced (bounced_count / sent_count * 100)")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignAnalyticsResponse(BaseModel):
+    """Campaign-level and per-step analytics funnel response."""
+    campaign_id: int = Field(..., description="ID of the campaign")
+    campaign_name: str = Field(..., description="Name of the campaign")
+    campaign_status: str = Field(..., description="Lifecycle status of the campaign")
+    total_recipients: int = Field(..., description="Total recipients attached to the campaign")
+    total_steps: int = Field(..., description="Total steps configured for the campaign")
+    steps: List[CampaignStepAnalytics] = Field(default_factory=list, description="Ordered per-step funnel analytics")
+    omitted_metrics_notice: Optional[str] = Field(
+        default="Open and click tracking metrics are omitted because the system does not record tracking pixels or link wraps.",
+        description="Explanation for why open and click tracking metrics cannot be derived from stored data",
+    )
+
+    model_config = ConfigDict(from_attributes=True)

@@ -175,6 +175,25 @@ class CampaignSchedulingService:
                     "reason": "Campaign scheduled_at has not arrived yet.",
                 }
 
+            from app.modules.campaigns.window_service import SendingWindowService
+            sw_config = getattr(campaign, "sending_window", None)
+            if sw_config and not SendingWindowService.is_within_sending_window(now_utc, sw_config):
+                next_open = SendingWindowService.compute_next_window_opening(now_utc, sw_config)
+                campaign.scheduled_at = next_open
+                await db.commit()
+                logger.info(
+                    "Scheduled campaign %d is outside sending window at %s. Deferring scheduled_at to %s",
+                    campaign_id,
+                    now_utc,
+                    next_open,
+                )
+                return {
+                    "campaign_id": campaign_id,
+                    "company_id": company_id,
+                    "status": "DEFERRED_WINDOW",
+                    "next_scheduled_at": next_open.isoformat(),
+                }
+
             from app.modules.campaigns.dispatch_service import CampaignDispatchService
             try:
                 dispatch_res = await CampaignDispatchService.dispatch_scheduled_campaign(

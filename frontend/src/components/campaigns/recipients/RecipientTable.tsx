@@ -1,22 +1,32 @@
 import React, { useState } from "react";
-import { Copy, Check, Edit, Trash2 } from "lucide-react";
+import { Copy, Check, Edit, Trash2, Calendar, FastForward, StopCircle, Tag } from "lucide-react";
 import type { CampaignRecipient } from "../../../types/campaign";
 import { RecipientStatusBadge } from "./RecipientStatusBadge";
 
 interface RecipientTableProps {
   recipients: CampaignRecipient[];
   isEditable: boolean;
+  canManageFollowups?: boolean;
   onEdit: (recipient: CampaignRecipient) => void;
   onDelete: (recipient: CampaignRecipient) => void;
   onCopyEmail: (email: string) => void;
+  onStop?: (recipient: CampaignRecipient) => void;
+  onSkip?: (recipient: CampaignRecipient) => void;
+  onReschedule?: (recipient: CampaignRecipient) => void;
+  onManageTags?: (recipient: CampaignRecipient) => void;
 }
 
 export const RecipientTable: React.FC<RecipientTableProps> = ({
   recipients,
   isEditable,
+  canManageFollowups = false,
   onEdit,
   onDelete,
   onCopyEmail,
+  onStop,
+  onSkip,
+  onReschedule,
+  onManageTags,
 }) => {
   const [copiedId, setCopiedId] = useState<number | null>(null);
 
@@ -36,38 +46,56 @@ export const RecipientTable: React.FC<RecipientTableProps> = ({
     return recipient.email.slice(0, 2).toUpperCase();
   };
 
-  const formatDate = (isoString: string) => {
+  const formatDateTime = (isoString?: string | null) => {
+    if (!isoString) return null;
     try {
       const date = new Date(isoString);
-      return date.toLocaleDateString(undefined, {
+      return date.toLocaleString(undefined, {
         month: "short",
         day: "numeric",
         year: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
       });
     } catch {
       return isoString;
     }
   };
 
+  const isActionable = (recipient: CampaignRecipient) => {
+    if (
+      recipient.status === "COMPLETED" ||
+      recipient.status === "STOPPED" ||
+      recipient.status === "BOUNCED" ||
+      recipient.status === "SUPPRESSED" ||
+      recipient.status === "FAILED" ||
+      recipient.stopped_reason ||
+      recipient.replied_at
+    ) {
+      return false;
+    }
+    return true;
+  };
+
   return (
     <div className="w-full overflow-hidden">
       <div className="overflow-x-auto min-w-0">
-        <table className="w-full text-left border-collapse min-w-[640px]">
+        <table className="w-full text-left border-collapse min-w-[760px]">
           <thead>
             <tr className="bg-slate-50/80 border-b border-slate-200/80 text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-              <th scope="col" className="py-3 px-4 w-[28%] min-w-[160px]">
+              <th scope="col" className="py-3 px-4 w-[24%] min-w-[150px]">
                 Recipient
               </th>
-              <th scope="col" className="py-3 px-4 w-[36%] min-w-[200px]">
+              <th scope="col" className="py-3 px-4 w-[28%] min-w-[180px]">
                 Email Address
               </th>
-              <th scope="col" className="py-3 px-4 w-[16%] min-w-[110px]">
-                Status
+              <th scope="col" className="py-3 px-4 w-[18%] min-w-[130px]">
+                Status & Sequence
               </th>
-              <th scope="col" className="py-3 px-4 w-[14%] min-w-[100px]">
-                Added Date
+              <th scope="col" className="py-3 px-4 w-[16%] min-w-[130px]">
+                Next Scheduled Send
               </th>
-              <th scope="col" className="py-3 px-4 w-[6%] text-right min-w-[70px]">
+              <th scope="col" className="py-3 px-4 w-[14%] text-right min-w-[100px]">
                 Actions
               </th>
             </tr>
@@ -77,6 +105,8 @@ export const RecipientTable: React.FC<RecipientTableProps> = ({
               const fullName = [recipient.first_name, recipient.last_name]
                 .filter(Boolean)
                 .join(" ");
+              const nextSendFormatted = formatDateTime(recipient.next_step_due_at);
+              const actionable = isActionable(recipient);
 
               return (
                 <tr
@@ -93,6 +123,18 @@ export const RecipientTable: React.FC<RecipientTableProps> = ({
                         <p className="font-semibold text-slate-900 truncate">
                           {fullName || recipient.email.split("@")[0]}
                         </p>
+                        {recipient.tags && recipient.tags.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-0.5">
+                            {recipient.tags.map((t) => (
+                              <span
+                                key={t}
+                                className="px-1.5 py-0.2 rounded text-[10px] font-medium bg-indigo-50 text-indigo-700 border border-indigo-100"
+                              >
+                                #{t}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </td>
@@ -120,12 +162,23 @@ export const RecipientTable: React.FC<RecipientTableProps> = ({
 
                   {/* Status Badge */}
                   <td className="py-3 px-4 min-w-0">
-                    <RecipientStatusBadge status={recipient.status} />
+                    <RecipientStatusBadge
+                      status={recipient.status}
+                      stoppedReason={recipient.stopped_reason}
+                      currentStepNumber={recipient.current_step_number}
+                      nextStepDueAt={recipient.next_step_due_at}
+                    />
                   </td>
 
-                  {/* Added Date */}
-                  <td className="py-3 px-4 min-w-0 text-slate-500 text-xs">
-                    {formatDate(recipient.created_at)}
+                  {/* Next Send Time */}
+                  <td className="py-3 px-4 min-w-0 text-slate-600 text-xs">
+                    {nextSendFormatted ? (
+                      <span className="font-medium text-slate-800">
+                        {nextSendFormatted}
+                      </span>
+                    ) : (
+                      <span className="text-slate-400 font-mono">—</span>
+                    )}
                   </td>
 
                   {/* Actions */}
@@ -144,6 +197,19 @@ export const RecipientTable: React.FC<RecipientTableProps> = ({
                         )}
                       </button>
 
+                      {onManageTags && (
+                        <button
+                          type="button"
+                          onClick={() => onManageTags(recipient)}
+                          className="p-1 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                          title="Manage tags"
+                          aria-label={`Manage tags for ${recipient.email}`}
+                        >
+                          <Tag className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+
+                      {/* DRAFT campaign actions: Edit & Delete */}
                       {isEditable && (
                         <>
                           <button
@@ -162,6 +228,45 @@ export const RecipientTable: React.FC<RecipientTableProps> = ({
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
+                        </>
+                      )}
+
+                      {/* Live Follow-Up Actions: Reschedule, Skip, Stop */}
+                      {canManageFollowups && actionable && (
+                        <>
+                          {onReschedule && (
+                            <button
+                              type="button"
+                              onClick={() => onReschedule(recipient)}
+                              className="p-1 rounded text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 transition-colors"
+                              title="Reschedule next step"
+                              aria-label={`Reschedule next step for ${recipient.email}`}
+                            >
+                              <Calendar className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          {onSkip && (
+                            <button
+                              type="button"
+                              onClick={() => onSkip(recipient)}
+                              className="p-1 rounded text-blue-600 hover:text-blue-800 hover:bg-blue-50 transition-colors"
+                              title="Skip next step"
+                              aria-label={`Skip next step for ${recipient.email}`}
+                            >
+                              <FastForward className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          {onStop && (
+                            <button
+                              type="button"
+                              onClick={() => onStop(recipient)}
+                              className="p-1 rounded text-amber-600 hover:text-amber-800 hover:bg-amber-50 transition-colors"
+                              title="Stop future follow-ups"
+                              aria-label={`Stop follow-ups for ${recipient.email}`}
+                            >
+                              <StopCircle className="h-3.5 w-3.5" />
+                            </button>
+                          )}
                         </>
                       )}
                     </div>

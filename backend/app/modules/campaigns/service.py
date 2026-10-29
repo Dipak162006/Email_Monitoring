@@ -22,9 +22,11 @@ from app.modules.campaigns.models import (
     CampaignStatus,
 )
 from app.modules.campaigns.schemas import (
+    CampaignAnalyticsResponse,
     CampaignAttachmentRead,
     CampaignCreate,
     CampaignDetailRead,
+    CampaignStepAnalytics,
     CampaignStepRead,
     CampaignUpdate,
 )
@@ -37,6 +39,7 @@ VALID_TRANSITIONS: dict[str, Set[str]] = {
     CampaignStatus.DRAFT.value: {
         CampaignStatus.SCHEDULED.value,
         CampaignStatus.QUEUED.value,
+        CampaignStatus.ARCHIVED.value,
     },
     CampaignStatus.SCHEDULED.value: {
         CampaignStatus.SCHEDULED.value,
@@ -59,12 +62,30 @@ VALID_TRANSITIONS: dict[str, Set[str]] = {
         CampaignStatus.RUNNING.value,
         CampaignStatus.CANCELLED.value,
     },
-    CampaignStatus.COMPLETED.value: set(),
-    CampaignStatus.CANCELLED.value: set(),
-    CampaignStatus.FAILED.value: set(),
+    CampaignStatus.COMPLETED.value: {
+        CampaignStatus.ARCHIVED.value,
+    },
+    CampaignStatus.CANCELLED.value: {
+        CampaignStatus.ARCHIVED.value,
+    },
+    CampaignStatus.FAILED.value: {
+        CampaignStatus.ARCHIVED.value,
+    },
+    CampaignStatus.ARCHIVED.value: {
+        CampaignStatus.DRAFT.value,
+        CampaignStatus.COMPLETED.value,
+        CampaignStatus.CANCELLED.value,
+    },
 }
 
 TERMINAL_STATES: Set[str] = {
+    CampaignStatus.COMPLETED.value,
+    CampaignStatus.CANCELLED.value,
+    CampaignStatus.FAILED.value,
+}
+
+ARCHIVABLE_STATES: Set[str] = {
+    CampaignStatus.DRAFT.value,
     CampaignStatus.COMPLETED.value,
     CampaignStatus.CANCELLED.value,
     CampaignStatus.FAILED.value,
@@ -75,6 +96,7 @@ DELETABLE_STATES: Set[str] = {
     CampaignStatus.COMPLETED.value,
     CampaignStatus.CANCELLED.value,
     CampaignStatus.FAILED.value,
+    CampaignStatus.ARCHIVED.value,
 }
 
 
@@ -137,6 +159,7 @@ class CampaignService:
             send_interval_seconds=campaign_in.send_interval_seconds,
             status=CampaignStatus.DRAFT.value,
             created_by_user_id=creator_user_id,
+            sending_window=campaign_in.sending_window.model_dump() if campaign_in.sending_window else None,
         )
         db.add(campaign)
         await db.flush()
@@ -166,6 +189,7 @@ class CampaignService:
                     subject=subj,
                     body_text=f_step.body_text,
                     body_html=f_step.body_html,
+                    target_tags=f_step.target_tags or [],
                     is_active=f_step.is_active,
                 )
                 db.add(step_item)
@@ -233,7 +257,12 @@ class CampaignService:
 
         if status_filter:
             norm_status = status_filter.strip().upper()
-            query = query.where(Campaign.status == norm_status)
+            if norm_status != "ALL":
+                query = query.where(Campaign.status == norm_status)
+            else:
+                query = query.where(Campaign.status != CampaignStatus.ARCHIVED.value)
+        else:
+            query = query.where(Campaign.status != CampaignStatus.ARCHIVED.value)
 
         query = query.order_by(Campaign.created_at.desc(), Campaign.id.desc()).offset(offset).limit(limit)
         result = await db.execute(query)
@@ -326,6 +355,7 @@ class CampaignService:
                         subject=subj,
                         body_text=f_step.get("body_text"),
                         body_html=f_step.get("body_html"),
+                        target_tags=f_step.get("target_tags") or [],
                         is_active=f_step.get("is_active", True),
                     )
                     db.add(step_item)
@@ -584,6 +614,69 @@ class CampaignService:
             recip.stopped_reason = CampaignRecipientStopReason.CAMPAIGN_CANCELLED.value
 
         await db.commit()
+        return campaign
+
+    @staticmethod
+    async def archive_campaign(
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+    ) -> Campaign:
+        """Archive an eligible campaign (DRAFT, COMPLETED, CANCELLED, FAILED).
+        
+        Active campaigns (RUNNING, QUEUED, SCHEDULED, PAUSED) cannot be archived directly and return 409 Conflict.
+        Clears next_send_at and preserves all recipients, steps, and delivery history.
+        """
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+
+        if campaign.status == CampaignStatus.ARCHIVED.value:
+            return campaign
+
+        if campaign.status not in ARCHIVABLE_STATES:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot archive campaign in '{campaign.status}' status. Active campaigns must be completed or cancelled first.",
+            )
+
+        campaign.status = CampaignStatus.ARCHIVED.value
+        campaign.next_send_at = None
+        await db.commit()
+        await db.refresh(campaign)
+        return campaign
+
+    @staticmethod
+    async def restore_campaign(
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+    ) -> Campaign:
+        """Restore an archived campaign safely to its non-active resting state.
+        
+        Restores to:
+        - COMPLETED if completed_at was set
+        - DRAFT if started_at is None (unstarted draft)
+        - CANCELLED if started_at is set but incomplete
+        
+        Never automatically resumes or schedules delivery.
+        """
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+
+        if campaign.status != CampaignStatus.ARCHIVED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot restore campaign with status '{campaign.status}'. Only ARCHIVED campaigns can be restored.",
+            )
+
+        if campaign.completed_at is not None:
+            campaign.status = CampaignStatus.COMPLETED.value
+        elif campaign.started_at is None:
+            campaign.status = CampaignStatus.DRAFT.value
+        else:
+            campaign.status = CampaignStatus.CANCELLED.value
+
+        campaign.next_send_at = None
+        await db.commit()
+        await db.refresh(campaign)
         return campaign
 
     @staticmethod
@@ -1043,4 +1136,222 @@ class CampaignService:
         await db.commit()
         await db.refresh(campaign)
         return await CampaignService.get_campaign(db, company_id, campaign_id)
+
+    @staticmethod
+    async def get_campaign_analytics(
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+    ) -> CampaignAnalyticsResponse:
+        """Calculate step-level analytics funnel from persisted delivery and recipient records.
+        
+        Strictly enforces company tenant isolation (raises 404 if not found).
+        Derives outcomes per step using existing stored data:
+        - targeted_count: Step 1 = all recipients; Follow-ups = tag-targeted recipients (or all if untargeted)
+        - sent_count: deliveries with status SENT (scoped to targeted recipients)
+        - sending_count: deliveries with status SENDING (scoped to targeted recipients)
+        - bounced_count: deliveries with status BOUNCED or bounced_at IS NOT NULL
+        - failed_count: deliveries with status FAILED (excluding bounced)
+        - skipped_count: deliveries with status SKIPPED for targeted recipients
+        - replied_count: distinct replying recipients attributed to their single highest sent step (replied_count <= sent_count)
+        - pending_count: active recipients queued or progressing towards their next eligible step (at most 1 step per recipient)
+        - delivery_rate, reply_rate, bounce_rate with safe zero-division handling
+        """
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+
+        # 1. Fetch steps sorted by step_number
+        steps_stmt = (
+            select(CampaignStep)
+            .where(CampaignStep.campaign_id == campaign.id)
+            .order_by(CampaignStep.step_number.asc())
+        )
+        steps = (await db.execute(steps_stmt)).scalars().all()
+
+        # 2. Fetch all recipients for this campaign
+        recip_stmt = (
+            select(CampaignRecipient)
+            .where(CampaignRecipient.campaign_id == campaign.id)
+        )
+        recipients = (await db.execute(recip_stmt)).scalars().all()
+        total_recipients = len(recipients)
+
+        # 3. Fetch all deliveries and check for thread replies via EmailThread
+        from app.modules.emails.models import EmailThread
+        deliv_stmt = (
+            select(
+                CampaignDelivery.id,
+                CampaignDelivery.step_id,
+                CampaignDelivery.recipient_id,
+                CampaignDelivery.status,
+                CampaignDelivery.sent_at,
+                CampaignDelivery.bounced_at,
+                CampaignDelivery.thread_id,
+                EmailThread.has_reply,
+            )
+            .outerjoin(EmailThread, CampaignDelivery.thread_id == EmailThread.id)
+            .where(CampaignDelivery.campaign_id == campaign.id)
+        )
+        deliv_rows = (await db.execute(deliv_stmt)).all()
+
+        deliv_by_recipient_step: dict[tuple[int, int], dict] = {}
+        deliv_by_step: dict[int, list[dict]] = {s.id: [] for s in steps}
+        sent_steps_by_recipient: dict[int, list[int]] = {r.id: [] for r in recipients}
+        recipient_has_reply_thread: dict[int, bool] = {r.id: False for r in recipients}
+
+        for row in deliv_rows:
+            d_id, s_id, r_id, status_val, sent_at, bounced_at, thread_id, thread_has_reply = row
+            deliv_data = {
+                "id": d_id,
+                "step_id": s_id,
+                "recipient_id": r_id,
+                "status": status_val,
+                "sent_at": sent_at,
+                "bounced_at": bounced_at,
+                "thread_id": thread_id,
+                "thread_has_reply": bool(thread_has_reply),
+            }
+            deliv_by_recipient_step[(r_id, s_id)] = deliv_data
+            if s_id in deliv_by_step:
+                deliv_by_step[s_id].append(deliv_data)
+
+            if status_val == CampaignDeliveryStatus.SENT.value:
+                step_obj = next((s for s in steps if s.id == s_id), None)
+                if step_obj and r_id in sent_steps_by_recipient:
+                    sent_steps_by_recipient[r_id].append(step_obj.step_number)
+
+            if thread_has_reply and r_id in recipient_has_reply_thread:
+                recipient_has_reply_thread[r_id] = True
+
+        # Precompute set of targeted recipient IDs per step
+        step_targeted_recipient_ids: dict[int, set[int]] = {}
+        for step in steps:
+            target_tags = step.target_tags or []
+            if step.step_number == 1 or not target_tags:
+                step_targeted_recipient_ids[step.id] = {r.id for r in recipients}
+            else:
+                tag_set = {t.strip().lower() for t in target_tags if t and t.strip()}
+                step_targeted_recipient_ids[step.id] = {
+                    r.id for r in recipients
+                    if any(t.strip().lower() in tag_set for t in (r.tags or []))
+                }
+
+        # 4. Attribute replies to the highest step actually sent (replied_count <= sent_count)
+        reply_attributed_step_numbers: dict[int, int] = {}
+        for r in recipients:
+            replied = (
+                r.replied_at is not None
+                or r.stopped_reason == CampaignRecipientStopReason.REPLIED.value
+                or recipient_has_reply_thread.get(r.id, False)
+            )
+            if replied:
+                sent_nums = sent_steps_by_recipient.get(r.id, [])
+                if sent_nums:
+                    max_sent = max(sent_nums)
+                    reply_attributed_step_numbers[max_sent] = reply_attributed_step_numbers.get(max_sent, 0) + 1
+
+        # 5. Determine at most one pending step per active recipient
+        recipient_pending_step_id: dict[int, int] = {}
+        for r in recipients:
+            if r.stopped_reason is not None or r.status in (
+                CampaignRecipientStatus.STOPPED.value,
+                CampaignRecipientStatus.COMPLETED.value,
+            ):
+                continue
+
+            # If recipient already has a delivery currently PENDING or SENDING, that is their pending step
+            explicit_pending_step_id = None
+            for step in steps:
+                d = deliv_by_recipient_step.get((r.id, step.id))
+                if d and d["status"] in (CampaignDeliveryStatus.PENDING.value, CampaignDeliveryStatus.SENDING.value):
+                    explicit_pending_step_id = step.id
+                    break
+
+            if explicit_pending_step_id is not None:
+                recipient_pending_step_id[r.id] = explicit_pending_step_id
+                continue
+
+            # Otherwise, find the first future step that targets this recipient
+            for step in steps:
+                if step.step_number <= r.current_step_number:
+                    continue
+                d = deliv_by_recipient_step.get((r.id, step.id))
+                if d and d["status"] in (
+                    CampaignDeliveryStatus.SENT.value,
+                    CampaignDeliveryStatus.BOUNCED.value,
+                    CampaignDeliveryStatus.FAILED.value,
+                    CampaignDeliveryStatus.SKIPPED.value,
+                ):
+                    continue
+
+                if r.id in step_targeted_recipient_ids.get(step.id, set()):
+                    recipient_pending_step_id[r.id] = step.id
+                    break
+
+        # 6. Aggregate per-step metrics
+        step_analytics_list: List[CampaignStepAnalytics] = []
+
+        for step in steps:
+            targeted_ids = step_targeted_recipient_ids.get(step.id, set())
+            targeted_count = len(targeted_ids)
+            target_tags = step.target_tags or []
+
+            # Only deliveries of targeted recipients belong to this step's funnel
+            step_delivs = [d for d in deliv_by_step.get(step.id, []) if d["recipient_id"] in targeted_ids]
+
+            sent_count = 0
+            sending_count = 0
+            bounced_count = 0
+            failed_count = 0
+            skipped_count = 0
+
+            for d in step_delivs:
+                st = d["status"]
+                is_bounced = st == CampaignDeliveryStatus.BOUNCED.value or d["bounced_at"] is not None
+                if is_bounced:
+                    bounced_count += 1
+                elif st == CampaignDeliveryStatus.SENT.value:
+                    sent_count += 1
+                elif st == CampaignDeliveryStatus.SENDING.value:
+                    sending_count += 1
+                elif st == CampaignDeliveryStatus.FAILED.value:
+                    failed_count += 1
+                elif st == CampaignDeliveryStatus.SKIPPED.value:
+                    skipped_count += 1
+
+            replied_count = reply_attributed_step_numbers.get(step.step_number, 0)
+            pending_count = sum(1 for p_step_id in recipient_pending_step_id.values() if p_step_id == step.id)
+
+            delivery_rate = round((sent_count / targeted_count * 100), 1) if targeted_count > 0 else 0.0
+            reply_rate = round((replied_count / sent_count * 100), 1) if sent_count > 0 else 0.0
+            bounce_rate = round((bounced_count / sent_count * 100), 1) if sent_count > 0 else 0.0
+
+            step_analytics_list.append(
+                CampaignStepAnalytics(
+                    step_id=step.id,
+                    step_number=step.step_number,
+                    subject=step.subject or f"Step {step.step_number}",
+                    delay_hours=step.delay_hours,
+                    target_tags=target_tags,
+                    targeted_count=targeted_count,
+                    sent_count=sent_count,
+                    sending_count=sending_count,
+                    bounced_count=bounced_count,
+                    failed_count=failed_count,
+                    skipped_count=skipped_count,
+                    replied_count=replied_count,
+                    pending_count=pending_count,
+                    delivery_rate=delivery_rate,
+                    reply_rate=reply_rate,
+                    bounce_rate=bounce_rate,
+                )
+            )
+
+        return CampaignAnalyticsResponse(
+            campaign_id=campaign.id,
+            campaign_name=campaign.name,
+            campaign_status=campaign.status,
+            total_recipients=total_recipients,
+            total_steps=len(steps),
+            steps=step_analytics_list,
+        )
 

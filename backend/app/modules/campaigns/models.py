@@ -34,6 +34,7 @@ class CampaignStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
     FAILED = "FAILED"
+    ARCHIVED = "ARCHIVED"
 
 
 class CampaignRecipientStatus(str, enum.Enum):
@@ -67,6 +68,7 @@ class CampaignDeliveryStatus(str, enum.Enum):
     FAILED = "FAILED"
     BOUNCED = "BOUNCED"
     UNCERTAIN = "UNCERTAIN"
+    SKIPPED = "SKIPPED"
 
 
 class SuppressionReason(str, enum.Enum):
@@ -124,6 +126,11 @@ class Campaign(Base):
         DateTime(timezone=True),
         nullable=True,
         index=True,
+    )
+    sending_window: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=True,
+        default=None,
     )
 
     created_by_user_id: Mapped[Optional[int]] = mapped_column(
@@ -194,6 +201,7 @@ class CampaignStep(Base):
     subject: Mapped[str] = mapped_column(String(255), nullable=False)
     body_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     body_html: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    target_tags: Mapped[Optional[List[str]]] = mapped_column(JSON, nullable=True, default=list)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -264,6 +272,20 @@ class CampaignRecipient(Base):
         back_populates="recipient",
         cascade="all, delete-orphan",
     )
+
+    @property
+    def tags(self) -> List[str]:
+        if not self.custom_variables or not isinstance(self.custom_variables, dict):
+            return []
+        tags_val = self.custom_variables.get("tags")
+        if isinstance(tags_val, list):
+            return [str(t) for t in tags_val]
+        return []
+
+    def set_tags(self, tags: List[str]) -> None:
+        cv = dict(self.custom_variables) if isinstance(self.custom_variables, dict) else {}
+        cv["tags"] = tags
+        self.custom_variables = cv
 
     def __repr__(self) -> str:
         return f"<CampaignRecipient id={self.id} campaign_id={self.campaign_id} email='{self.email}' status='{self.status}'>"
