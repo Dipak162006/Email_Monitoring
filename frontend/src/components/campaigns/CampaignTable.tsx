@@ -14,6 +14,8 @@ interface CampaignTableProps {
   onPauseCampaign?: (campaign: Campaign) => void;
   onResumeCampaign?: (campaign: Campaign) => void;
   onCancelCampaign?: (campaign: Campaign) => void;
+  onArchiveCampaign?: (campaign: Campaign) => void;
+  onRestoreCampaign?: (campaign: Campaign) => void;
   onDeleteCampaign?: (campaign: Campaign) => void;
   mutatingCampaignId?: number | null;
 }
@@ -28,6 +30,8 @@ export const CampaignTable: React.FC<CampaignTableProps> = ({
   onPauseCampaign,
   onResumeCampaign,
   onCancelCampaign,
+  onArchiveCampaign,
+  onRestoreCampaign,
   onDeleteCampaign,
   mutatingCampaignId,
 }) => {
@@ -94,6 +98,8 @@ export const CampaignTable: React.FC<CampaignTableProps> = ({
                 onPause={onPauseCampaign}
                 onResume={onResumeCampaign}
                 onCancel={onCancelCampaign}
+                onArchive={onArchiveCampaign}
+                onRestore={onRestoreCampaign}
                 onDelete={onDeleteCampaign}
                 isMutating={mutatingCampaignId === campaign.id}
               />
@@ -119,6 +125,8 @@ export const CampaignTable: React.FC<CampaignTableProps> = ({
             onPause={onPauseCampaign}
             onResume={onResumeCampaign}
             onCancel={onCancelCampaign}
+            onArchive={onArchiveCampaign}
+            onRestore={onRestoreCampaign}
             onDelete={onDeleteCampaign}
             isMutating={mutatingCampaignId === campaign.id}
           />

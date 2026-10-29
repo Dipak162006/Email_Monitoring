@@ -24,6 +24,7 @@ const CAMPAIGN_STATUSES: { label: string; value: string }[] = [
   { label: "COMPLETED", value: "COMPLETED" },
   { label: "CANCELLED", value: "CANCELLED" },
   { label: "FAILED", value: "FAILED" },
+  { label: "ARCHIVED", value: "ARCHIVED" },
 ];
 
 export const CampaignToolbar: React.FC<CampaignToolbarProps> = ({

@@ -242,6 +242,48 @@ export function CampaignsPage() {
     },
   });
 
+  // 6. Archive Campaign
+  const archiveMutation = useMutation({
+    mutationFn: (campaign: Campaign) => {
+      if (!currentCompanyId) throw new Error("No active company");
+      return campaignsApi.archiveCampaign(currentCompanyId, campaign.id);
+    },
+    onSuccess: (updated) => {
+      setModalState({ isOpen: false, campaign: null, mode: "archive" });
+      invalidateCampaigns();
+      showToast(`Campaign "${updated.name}" was archived.`);
+    },
+    onError: (err: unknown) => {
+      setModalState({ isOpen: false, campaign: null, mode: "archive" });
+      const msg =
+        err instanceof RequestError
+          ? String(err.detail || err.message)
+          : "Failed to archive campaign.";
+      showToast(msg, "error");
+    },
+  });
+
+  // 7. Restore Campaign
+  const restoreMutation = useMutation({
+    mutationFn: (campaign: Campaign) => {
+      if (!currentCompanyId) throw new Error("No active company");
+      return campaignsApi.restoreCampaign(currentCompanyId, campaign.id);
+    },
+    onSuccess: (updated) => {
+      setModalState({ isOpen: false, campaign: null, mode: "restore" });
+      invalidateCampaigns();
+      showToast(`Campaign "${updated.name}" was restored.`);
+    },
+    onError: (err: unknown) => {
+      setModalState({ isOpen: false, campaign: null, mode: "restore" });
+      const msg =
+        err instanceof RequestError
+          ? String(err.detail || err.message)
+          : "Failed to restore campaign.";
+      showToast(msg, "error");
+    },
+  });
+
   // Action handlers
   const handleOpenCancelModal = (campaign: Campaign) => {
     setModalState({
@@ -259,12 +301,40 @@ export function CampaignsPage() {
     });
   };
 
+  const handleOpenArchiveModal = (campaign: Campaign) => {
+    setModalState({
+      isOpen: true,
+      campaign,
+      mode: "archive",
+    });
+  };
+
+  const handleOpenRestoreModal = (campaign: Campaign) => {
+    setModalState({
+      isOpen: true,
+      campaign,
+      mode: "restore",
+    });
+  };
+
   const handleConfirmModalAction = () => {
-    if (!modalState.campaign || cancelMutation.isPending || deleteMutation.isPending) return;
+    if (
+      !modalState.campaign ||
+      cancelMutation.isPending ||
+      deleteMutation.isPending ||
+      archiveMutation.isPending ||
+      restoreMutation.isPending
+    )
+      return;
+
     if (modalState.mode === "cancel") {
       cancelMutation.mutate(modalState.campaign);
-    } else {
+    } else if (modalState.mode === "delete") {
       deleteMutation.mutate(modalState.campaign);
+    } else if (modalState.mode === "archive") {
+      archiveMutation.mutate(modalState.campaign);
+    } else if (modalState.mode === "restore") {
+      restoreMutation.mutate(modalState.campaign);
     }
   };
 
@@ -302,6 +372,10 @@ export function CampaignsPage() {
       ? cancelMutation.variables.id
       : deleteMutation.isPending && deleteMutation.variables
       ? deleteMutation.variables.id
+      : archiveMutation.isPending && archiveMutation.variables
+      ? archiveMutation.variables.id
+      : restoreMutation.isPending && restoreMutation.variables
+      ? restoreMutation.variables.id
       : null;
 
   return (
@@ -405,6 +479,8 @@ export function CampaignsPage() {
                   isAdminOrOwner ? (c) => resumeMutation.mutate(c) : undefined
                 }
                 onCancelCampaign={isAdminOrOwner ? handleOpenCancelModal : undefined}
+                onArchiveCampaign={isAdminOrOwner ? handleOpenArchiveModal : undefined}
+                onRestoreCampaign={isAdminOrOwner ? handleOpenRestoreModal : undefined}
                 onDeleteCampaign={isAdminOrOwner ? handleOpenDeleteModal : undefined}
                 mutatingCampaignId={mutatingCampaignId}
               />
@@ -434,7 +510,12 @@ export function CampaignsPage() {
         mode={modalState.mode}
         onClose={() => setModalState({ isOpen: false, campaign: null, mode: "cancel" })}
         onConfirm={handleConfirmModalAction}
-        isLoading={cancelMutation.isPending || deleteMutation.isPending}
+        isLoading={
+          cancelMutation.isPending ||
+          deleteMutation.isPending ||
+          archiveMutation.isPending ||
+          restoreMutation.isPending
+        }
       />
 
       {/* 6. Toast Banner */}

@@ -116,6 +116,19 @@ export const CampaignStatusBadge: React.FC<CampaignStatusBadgeProps> = ({
         </span>
       );
 
+    case "ARCHIVED":
+      return (
+        <span
+          className={cn(
+            "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-zinc-100 text-zinc-600 border border-zinc-300 select-none",
+            className
+          )}
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-zinc-400" />
+          ARCHIVED
+        </span>
+      );
+
     default:
       return (
         <span

@@ -18,6 +18,8 @@ interface CampaignMobileCardProps {
   onPause?: (campaign: Campaign) => void;
   onResume?: (campaign: Campaign) => void;
   onCancel?: (campaign: Campaign) => void;
+  onArchive?: (campaign: Campaign) => void;
+  onRestore?: (campaign: Campaign) => void;
   onDelete?: (campaign: Campaign) => void;
   isMutating?: boolean;
 }
@@ -80,6 +82,8 @@ export const CampaignMobileCard: React.FC<CampaignMobileCardProps> = ({
   onPause,
   onResume,
   onCancel,
+  onArchive,
+  onRestore,
   onDelete,
   isMutating = false,
 }) => {
@@ -130,6 +134,8 @@ export const CampaignMobileCard: React.FC<CampaignMobileCardProps> = ({
             onPause={onPause}
             onResume={onResume}
             onCancel={onCancel}
+            onArchive={onArchive}
+            onRestore={onRestore}
             onDelete={onDelete}
             isMutating={isMutating}
           />

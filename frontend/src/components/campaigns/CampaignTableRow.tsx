@@ -13,6 +13,8 @@ import {
   Edit,
   Trash2,
   Loader2,
+  Archive,
+  RotateCcw,
 } from "lucide-react";
 import type { Campaign } from "../../types/campaign";
 import type { AuthorizedEmailAccount } from "../../types/emails";
@@ -29,6 +31,8 @@ export interface CampaignTableRowProps {
   onPause?: (campaign: Campaign) => void;
   onResume?: (campaign: Campaign) => void;
   onCancel?: (campaign: Campaign) => void;
+  onArchive?: (campaign: Campaign) => void;
+  onRestore?: (campaign: Campaign) => void;
   onDelete?: (campaign: Campaign) => void;
   isMutating?: boolean;
   isMenuOpen?: boolean;
@@ -136,6 +140,8 @@ export const CampaignTableRow: React.FC<CampaignTableRowProps> = ({
   onView,
   onEdit,
   onManageRecipients,
+  onArchive,
+  onRestore,
   onDelete,
   isMutating = false,
 }) => {
@@ -152,7 +158,9 @@ export const CampaignTableRow: React.FC<CampaignTableRowProps> = ({
 
   const status = (campaign.status || "").toUpperCase();
   const isDraft = status === "DRAFT";
-  const isDeletable = ["DRAFT", "COMPLETED", "CANCELLED", "FAILED"].includes(status);
+  const isArchived = status === "ARCHIVED";
+  const isArchivable = ["DRAFT", "COMPLETED", "CANCELLED", "FAILED"].includes(status);
+  const isDeletable = ["DRAFT", "COMPLETED", "CANCELLED", "FAILED", "ARCHIVED"].includes(status);
 
   return (
     <tr className="group transition-colors duration-150 hover:bg-slate-50/80 border-b border-slate-100/90 last:border-b-0">
@@ -299,13 +307,41 @@ export const CampaignTableRow: React.FC<CampaignTableRowProps> = ({
                 </Tooltip>
               )}
 
-              {/* 4. Delete Campaign (only for permitted statuses) */}
+              {/* 4. Archive Campaign */}
+              {isArchivable && onArchive && (
+                <Tooltip content="Archive campaign" side="top">
+                  <button
+                    type="button"
+                    onClick={() => onArchive(campaign)}
+                    aria-label="Archive campaign"
+                    className="p-1 rounded text-slate-500 hover:text-slate-800 hover:bg-slate-100 transition-colors focus:outline-none focus:ring-1 focus:ring-slate-400 cursor-pointer"
+                  >
+                    <Archive className="h-4 w-4" />
+                  </button>
+                </Tooltip>
+              )}
+
+              {/* 5. Restore Campaign */}
+              {isArchived && onRestore && (
+                <Tooltip content="Restore campaign" side="top">
+                  <button
+                    type="button"
+                    onClick={() => onRestore(campaign)}
+                    aria-label="Restore campaign"
+                    className="p-1 rounded text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 transition-colors focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                  </button>
+                </Tooltip>
+              )}
+
+              {/* 6. Delete Campaign (only for permitted statuses) */}
               {isDeletable && onDelete && (
-                <Tooltip content="Delete campaign" side="top">
+                <Tooltip content={isArchived ? "Delete permanently" : "Delete campaign"} side="top">
                   <button
                     type="button"
                     onClick={() => onDelete(campaign)}
-                    aria-label="Delete campaign"
+                    aria-label={isArchived ? "Delete campaign permanently" : "Delete campaign"}
                     className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors focus:outline-none focus:ring-1 focus:ring-rose-500 cursor-pointer"
                   >
                     <Trash2 className="h-4 w-4" />

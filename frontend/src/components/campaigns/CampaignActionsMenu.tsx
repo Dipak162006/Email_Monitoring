@@ -11,6 +11,8 @@ import {
   Send,
   Loader2,
   Users,
+  Archive,
+  RotateCcw,
 } from "lucide-react";
 import type { Campaign } from "../../types/campaign";
 
@@ -26,6 +28,8 @@ interface CampaignActionsMenuProps {
   onPause?: (campaign: Campaign) => void;
   onResume?: (campaign: Campaign) => void;
   onCancel?: (campaign: Campaign) => void;
+  onArchive?: (campaign: Campaign) => void;
+  onRestore?: (campaign: Campaign) => void;
   onDelete?: (campaign: Campaign) => void;
   isMutating?: boolean;
 }
@@ -42,6 +46,8 @@ export const CampaignActionsMenu: React.FC<CampaignActionsMenuProps> = ({
   onPause,
   onResume,
   onCancel,
+  onArchive,
+  onRestore,
   onDelete,
   isMutating = false,
 }) => {
@@ -324,11 +330,50 @@ export const CampaignActionsMenu: React.FC<CampaignActionsMenuProps> = ({
                 </>
               )}
 
-            {/* Delete Draft / Finished Campaign - available for DRAFT, COMPLETED, CANCELLED, FAILED */}
+            {/* ARCHIVED specific: Restore */}
+            {status === "ARCHIVED" && onRestore && (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRestore(campaign);
+                  onClose();
+                }}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-indigo-50 text-xs text-indigo-600 font-medium transition-colors"
+              >
+                <RotateCcw className="h-3.5 w-3.5 text-indigo-500" />
+                <span>Restore Campaign</span>
+              </button>
+            )}
+
+            {/* Archive Campaign - available for DRAFT, COMPLETED, CANCELLED, FAILED */}
             {(status === "DRAFT" ||
               status === "COMPLETED" ||
               status === "CANCELLED" ||
               status === "FAILED") &&
+              onArchive && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onArchive(campaign);
+                    onClose();
+                  }}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-100 text-xs text-slate-700 transition-colors"
+                >
+                  <Archive className="h-3.5 w-3.5 text-slate-500" />
+                  <span>Archive Campaign</span>
+                </button>
+              )}
+
+            {/* Delete Draft / Finished / Archived Campaign */}
+            {(status === "DRAFT" ||
+              status === "COMPLETED" ||
+              status === "CANCELLED" ||
+              status === "FAILED" ||
+              status === "ARCHIVED") &&
               onDelete && (
                 <>
                   <div className="h-px bg-slate-100 my-1" />
@@ -343,7 +388,13 @@ export const CampaignActionsMenu: React.FC<CampaignActionsMenuProps> = ({
                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-rose-50 text-xs text-rose-600 transition-colors"
                   >
                     <Trash2 className="h-3.5 w-3.5 text-rose-500" />
-                    <span>{status === "DRAFT" ? "Delete Draft" : "Delete Campaign"}</span>
+                    <span>
+                      {status === "DRAFT"
+                        ? "Delete Draft"
+                        : status === "ARCHIVED"
+                        ? "Delete Permanently"
+                        : "Delete Campaign"}
+                    </span>
                   </button>
                 </>
               )}
