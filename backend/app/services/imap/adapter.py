@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class BaseIMAPAdapter(ABC):
-    """Abstract interface for IMAP mailbox retrieval adapters.
+    """Abstract interface for incoming mailbox retrieval adapters.
     
     Permits plugging in different transport implementations or test fakes
     without altering the core mailbox synchronization business logic.
@@ -32,6 +32,9 @@ class BaseIMAPAdapter(ABC):
             List of tuples: [(uid, raw_bytes, internaldate), ...]
         """
         pass
+
+
+BaseIncomingAdapter = BaseIMAPAdapter
 
 
 class StandardIMAPAdapter(BaseIMAPAdapter):

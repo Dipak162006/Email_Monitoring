@@ -20,6 +20,13 @@ from app.services.imap.exceptions import (
     IMAPServiceException,
 )
 from app.services.imap.parser import EmailParser
+from app.services.pop3.adapter import StandardPOP3Adapter
+from app.services.pop3.exceptions import (
+    POP3AuthenticationError,
+    POP3ConfigurationError,
+    POP3ConnectionError,
+    POP3ServiceException,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +37,21 @@ class EmailSyncService:
     """
 
     def __init__(self, imap_adapter: Optional[BaseIMAPAdapter] = None):
-        self.imap_adapter = imap_adapter or StandardIMAPAdapter()
+        self._custom_adapter = imap_adapter
+
+    def get_adapter(self, account: EmailAccount) -> BaseIMAPAdapter:
+        """Resolve the appropriate incoming transport adapter based on account configuration."""
+        if self._custom_adapter is not None:
+            return self._custom_adapter
+        protocol = getattr(account, "incoming_protocol", "IMAP") or "IMAP"
+        if protocol.upper() == "POP3":
+            return StandardPOP3Adapter()
+        return StandardIMAPAdapter()
+
+    @property
+    def imap_adapter(self) -> BaseIMAPAdapter:
+        """Backward-compatible property returning the configured or default IMAP adapter."""
+        return self._custom_adapter or StandardIMAPAdapter()
 
     async def sync_mailbox(
         self,
@@ -43,20 +64,28 @@ class EmailSyncService:
         
         Fetches messages, deduplicates against existing records in this account,
         inserts new incoming emails, updates last_synced_at, and reports counts.
+        Supports both IMAP and POP3 incoming protocols transparently.
         """
+        protocol = getattr(account, "incoming_protocol", "IMAP") or "IMAP"
+        protocol_label = "POP3" if protocol.upper() == "POP3" else "IMAP"
+
         # 1. Validate Account State & Configuration
         if not account.is_active:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email account is inactive and cannot be synchronized.",
             )
-        if not account.imap_host:
+        host = account.incoming_host or account.imap_host
+        if not host:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email account does not have an IMAP host configured.",
+                detail=f"Email account does not have an {protocol_label} host configured.",
             )
 
-        # Query existing synced IMAP UIDs for this account to prioritize unsynced messages
+        # For POP3, normalize folder to single inbox
+        effective_folder = "INBOX" if protocol.upper() == "POP3" else folder
+
+        # Query existing synced UIDs for this account to prioritize unsynced messages
         existing_uids_stmt = select(Email.imap_uid).where(
             Email.email_account_id == account.id,
             Email.imap_uid.is_not(None),
@@ -64,26 +93,35 @@ class EmailSyncService:
         existing_uids_res = await db.execute(existing_uids_stmt)
         existing_uids = set(existing_uids_res.scalars().all())
 
-        # 2. Fetch Messages via Adapter
+        # 2. Fetch Messages via Protocol Adapter
+        adapter = self.get_adapter(account)
         try:
-            raw_messages = await self.imap_adapter.fetch_messages(
+            raw_messages = await adapter.fetch_messages(
                 account=account,
-                folder=folder,
+                folder=effective_folder,
                 max_messages=max_messages,
                 existing_uids=existing_uids,
             )
-        except IMAPConfigurationError as cfg_err:
+        except (IMAPConfigurationError, POP3ConfigurationError) as cfg_err:
+            detail = getattr(cfg_err, "safe_message", str(cfg_err))
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=cfg_err.safe_message,
+                detail=detail,
             ) from cfg_err
-        except (IMAPAuthenticationError, IMAPConnectionError, IMAPFolderError, IMAPServiceException) as imap_err:
+        except (IMAPAuthenticationError, POP3AuthenticationError) as auth_err:
+            detail = getattr(auth_err, "safe_message", str(auth_err))
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=imap_err.safe_message,
-            ) from imap_err
+                detail=detail,
+            ) from auth_err
+        except (IMAPConnectionError, POP3ConnectionError, IMAPFolderError, IMAPServiceException, POP3ServiceException) as net_err:
+            detail = getattr(net_err, "safe_message", str(net_err))
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=detail,
+            ) from net_err
         except Exception as exc:
-            logger.error("Unexpected error during IMAP synchronization: %s", exc)
+            logger.error("Unexpected error during %s synchronization: %s", protocol_label, exc)
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="An unexpected error occurred during mailbox synchronization.",
@@ -293,7 +331,7 @@ class EmailSyncService:
         return EmailSyncResult(
             email_account_id=account.id,
             status=sync_status,
-            folder=folder,
+            folder=effective_folder,
             total_discovered=total_discovered,
             new_messages=new_messages,
             duplicates_skipped=duplicates_skipped,

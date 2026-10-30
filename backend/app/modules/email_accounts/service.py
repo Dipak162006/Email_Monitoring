@@ -7,7 +7,13 @@ from app.core.security import encrypt_credential
 from app.modules.companies.models import CompanyRole
 from app.modules.domains.models import Domain
 from app.modules.domains.schemas import normalize_domain_name
-from app.modules.email_accounts.models import EmailAccount, EmailAccountAccess, EmailProvider, SecurityMode
+from app.modules.email_accounts.models import (
+    EmailAccount,
+    EmailAccountAccess,
+    EmailProvider,
+    IncomingProtocol,
+    SecurityMode,
+)
 from app.modules.email_accounts.schemas import (
     EmailAccountAccessRead,
     EmailAccountCreate,
@@ -34,6 +40,7 @@ class EmailAccountService:
             smtp_security=SecurityMode(account.smtp_security) if account.smtp_security else None,
             smtp_username=account.smtp_username,
             has_smtp_password=bool(account.smtp_password_encrypted),
+            incoming_protocol=IncomingProtocol(account.incoming_protocol) if getattr(account, "incoming_protocol", None) else IncomingProtocol.IMAP,
             imap_host=account.imap_host,
             imap_port=account.imap_port,
             imap_security=SecurityMode(account.imap_security) if account.imap_security else None,
@@ -120,6 +127,7 @@ class EmailAccountService:
             smtp_security=account_in.smtp_security.value if account_in.smtp_security else None,
             smtp_username=account_in.smtp_username,
             smtp_password_encrypted=smtp_pw_encrypted,
+            incoming_protocol=account_in.incoming_protocol.value if account_in.incoming_protocol else IncomingProtocol.IMAP.value,
             imap_host=account_in.imap_host,
             imap_port=account_in.imap_port,
             imap_security=account_in.imap_security.value if account_in.imap_security else None,
@@ -180,6 +188,8 @@ class EmailAccountService:
         if account_in.smtp_password is not None:
             account.smtp_password_encrypted = encrypt_credential(account_in.smtp_password)
 
+        if account_in.incoming_protocol is not None:
+            account.incoming_protocol = account_in.incoming_protocol.value
         if account_in.imap_host is not None:
             account.imap_host = account_in.imap_host
         if account_in.imap_port is not None:

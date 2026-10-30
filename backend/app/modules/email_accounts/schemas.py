@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from app.modules.email_accounts.models import EmailProvider, SecurityMode
+from app.modules.email_accounts.models import EmailProvider, IncomingProtocol, SecurityMode
 
 
 class EmailAccountBase(BaseModel):
@@ -16,7 +16,11 @@ class EmailAccountBase(BaseModel):
     smtp_security: Optional[SecurityMode] = Field(default=SecurityMode.STARTTLS)
     smtp_username: Optional[str] = Field(default=None, max_length=255)
 
-    # IMAP Configuration
+    # Incoming Configuration (IMAP / POP3)
+    incoming_protocol: IncomingProtocol = Field(
+        default=IncomingProtocol.IMAP,
+        description="Incoming mail protocol: IMAP or POP3",
+    )
     imap_host: Optional[str] = Field(default=None, max_length=255)
     imap_port: Optional[int] = Field(default=993)
     imap_security: Optional[SecurityMode] = Field(default=SecurityMode.SSL)
@@ -28,7 +32,7 @@ class EmailAccountBase(BaseModel):
 class EmailAccountCreate(EmailAccountBase):
     """Payload for creating a new company email account."""
     smtp_password: Optional[str] = Field(default=None, description="Plaintext SMTP password (encrypted at rest)")
-    imap_password: Optional[str] = Field(default=None, description="Plaintext IMAP password (encrypted at rest)")
+    imap_password: Optional[str] = Field(default=None, description="Plaintext incoming IMAP/POP3 password (encrypted at rest)")
 
 
 class EmailAccountUpdate(BaseModel):
@@ -44,11 +48,12 @@ class EmailAccountUpdate(BaseModel):
     smtp_username: Optional[str] = None
     smtp_password: Optional[str] = Field(default=None, description="New SMTP password (will update encrypted store)")
 
+    incoming_protocol: Optional[IncomingProtocol] = None
     imap_host: Optional[str] = None
     imap_port: Optional[int] = None
     imap_security: Optional[SecurityMode] = None
     imap_username: Optional[str] = None
-    imap_password: Optional[str] = Field(default=None, description="New IMAP password (will update encrypted store)")
+    imap_password: Optional[str] = Field(default=None, description="New incoming IMAP/POP3 password (will update encrypted store)")
 
     is_active: Optional[bool] = None
 
@@ -69,12 +74,13 @@ class EmailAccountRead(BaseModel):
     smtp_username: Optional[str] = None
     has_smtp_password: bool = Field(description="Indicates whether an SMTP password is encrypted and stored")
 
-    # IMAP Metadata
+    # Incoming Metadata (IMAP / POP3)
+    incoming_protocol: IncomingProtocol = IncomingProtocol.IMAP
     imap_host: Optional[str] = None
     imap_port: Optional[int] = None
     imap_security: Optional[SecurityMode] = None
     imap_username: Optional[str] = None
-    has_imap_password: bool = Field(description="Indicates whether an IMAP password is encrypted and stored")
+    has_imap_password: bool = Field(description="Indicates whether an incoming password is encrypted and stored")
 
     is_active: bool
     last_synced_at: Optional[datetime] = None

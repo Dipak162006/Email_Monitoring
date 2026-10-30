@@ -95,6 +95,7 @@ export interface EmailThreadDetail {
 
 export type EmailProvider = "CUSTOM" | "GOOGLE" | "YAHOO" | "ZOHO";
 export type SecurityMode = "NONE" | "SSL" | "STARTTLS";
+export type IncomingProtocol = "IMAP" | "POP3";
 
 export interface EmailAccountItem {
   id: number;
@@ -108,6 +109,7 @@ export interface EmailAccountItem {
   smtp_security?: SecurityMode | null;
   smtp_username?: string | null;
   has_smtp_password: boolean;
+  incoming_protocol?: IncomingProtocol;
   imap_host?: string | null;
   imap_port?: number | null;
   imap_security?: SecurityMode | null;
@@ -129,6 +131,7 @@ export interface EmailAccountCreatePayload {
   smtp_security?: SecurityMode | null;
   smtp_username?: string | null;
   smtp_password?: string | null;
+  incoming_protocol?: IncomingProtocol;
   imap_host?: string | null;
   imap_port?: number | null;
   imap_security?: SecurityMode | null;
@@ -146,6 +149,7 @@ export interface EmailAccountUpdatePayload {
   smtp_security?: SecurityMode | null;
   smtp_username?: string | null;
   smtp_password?: string | null;
+  incoming_protocol?: IncomingProtocol;
   imap_host?: string | null;
   imap_port?: number | null;
   imap_security?: SecurityMode | null;

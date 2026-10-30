@@ -20,6 +20,12 @@ class EmailProvider(str, enum.Enum):
     CUSTOM = "CUSTOM"
 
 
+class IncomingProtocol(str, enum.Enum):
+    """Incoming mail protocol options."""
+    IMAP = "IMAP"
+    POP3 = "POP3"
+
+
 class SecurityMode(str, enum.Enum):
     """Transport layer security / encryption modes for SMTP and IMAP."""
     NONE = "NONE"
@@ -28,7 +34,7 @@ class SecurityMode(str, enum.Enum):
 
 
 class EmailAccount(Base):
-    """Company-owned email account configuration for sending (SMTP) and receiving (IMAP).
+    """Company-owned email account configuration for sending (SMTP) and receiving (IMAP/POP3).
     
     Email accounts are strictly company-owned and decoupled from application login identities.
     Sensitive credentials are encrypted at rest using AES-authenticated encryption.
@@ -61,7 +67,13 @@ class EmailAccount(Base):
     smtp_username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     smtp_password_encrypted: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
-    # IMAP Configuration (Incoming)
+    # Incoming Mail Configuration (IMAP / POP3)
+    incoming_protocol: Mapped[str] = mapped_column(
+        String(10),
+        default=IncomingProtocol.IMAP.value,
+        server_default="IMAP",
+        nullable=False,
+    )
     imap_host: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     imap_port: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     imap_security: Mapped[Optional[str]] = mapped_column(
@@ -110,6 +122,26 @@ class EmailAccount(Base):
         back_populates="email_account",
         cascade="all, delete-orphan",
     )
+
+    @property
+    def incoming_host(self) -> Optional[str]:
+        """Generic alias for incoming server host (IMAP or POP3)."""
+        return self.imap_host
+
+    @property
+    def incoming_port(self) -> Optional[int]:
+        """Generic alias for incoming server port."""
+        return self.imap_port
+
+    @property
+    def incoming_security(self) -> Optional[str]:
+        """Generic alias for incoming server security protocol."""
+        return self.imap_security
+
+    @property
+    def incoming_username(self) -> Optional[str]:
+        """Generic alias for incoming server username."""
+        return self.imap_username
 
     def __repr__(self) -> str:
         return f"<EmailAccount id={self.id} address='{self.email_address}' company_id={self.company_id}>"

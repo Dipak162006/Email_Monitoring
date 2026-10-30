@@ -20,6 +20,12 @@ from app.services.imap.exceptions import (
     IMAPFolderError,
     IMAPServiceException,
 )
+from app.services.pop3.exceptions import (
+    POP3AuthenticationError,
+    POP3ConfigurationError,
+    POP3ConnectionError,
+    POP3ServiceException,
+)
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -76,11 +82,11 @@ def is_retryable_exception(exc: Exception) -> bool:
         target = exc.__cause__
 
     # Fatal configuration or authentication errors must NEVER be retried
-    if isinstance(target, (IMAPAuthenticationError, IMAPConfigurationError, IMAPFolderError)):
+    if isinstance(target, (IMAPAuthenticationError, IMAPConfigurationError, IMAPFolderError, POP3AuthenticationError, POP3ConfigurationError)):
         return False
 
     # Connection and network timeouts are retryable
-    if isinstance(target, (IMAPConnectionError, ConnectionRefusedError, ConnectionResetError, TimeoutError, OSError)):
+    if isinstance(target, (IMAPConnectionError, POP3ConnectionError, ConnectionRefusedError, ConnectionResetError, TimeoutError, OSError)):
         return True
 
     # Inspect detail on generic HTTPExceptions
@@ -186,16 +192,23 @@ async def _async_sync_email_account(
                     "message": "Email account is inactive.",
                 }
 
-            if not account.imap_host:
-                logger.warning("Email account %d has no IMAP host configured.", account_id)
+            host = account.incoming_host or account.imap_host
+            protocol = getattr(account, "incoming_protocol", "IMAP") or "IMAP"
+            if not host:
+                logger.warning("Email account %d has no incoming server host configured.", account_id)
+                if protocol.upper() == "POP3":
+                    raise POP3ConfigurationError("Email account does not have a POP3 host configured.")
                 raise IMAPConfigurationError("Email account does not have an IMAP host configured.")
+
+            # For POP3, normalize to single inbox
+            effective_folder = "INBOX" if protocol.upper() == "POP3" else folder
 
             # 2. Delegate to existing EmailSyncService
             sync_service = EmailSyncService()
             sync_result = await sync_service.sync_mailbox(
                 db=db,
                 account=account,
-                folder=folder,
+                folder=effective_folder,
                 max_messages=max_messages,
             )
 

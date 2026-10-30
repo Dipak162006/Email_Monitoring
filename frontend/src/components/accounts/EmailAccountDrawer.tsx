@@ -19,6 +19,7 @@ import type {
   EmailAccountCreatePayload,
   EmailAccountUpdatePayload,
   EmailProvider,
+  IncomingProtocol,
   SecurityMode,
 } from "../../types/emails";
 import type { Domain } from "../../types/domains";
@@ -100,7 +101,8 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
     staleTime: 30000,
   });
 
-  // IMAP settings
+  // Incoming server settings (IMAP or POP3)
+  const [incomingProtocol, setIncomingProtocol] = useState<IncomingProtocol>("IMAP");
   const [imapHost, setImapHost] = useState("");
   const [imapPort, setImapPort] = useState<number>(993);
   const [imapSecurity, setImapSecurity] = useState<SecurityMode>("SSL");
@@ -135,6 +137,7 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
       setName(initialAccount.name || "");
       setEmailAddress(initialAccount.email_address || "");
       setDomainId(initialAccount.domain_id ?? null);
+      setIncomingProtocol(initialAccount.incoming_protocol || "IMAP");
       setImapHost(initialAccount.imap_host || "");
       setImapPort(initialAccount.imap_port || 993);
       setImapSecurity(initialAccount.imap_security || "SSL");
@@ -155,6 +158,7 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
       setName("");
       setEmailAddress("");
       setDomainId(null);
+      setIncomingProtocol("IMAP");
       setImapHost("");
       setImapPort(993);
       setImapSecurity("SSL");
@@ -180,6 +184,22 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
       if (defaults.smtpHost) setSmtpHost(defaults.smtpHost);
       if (defaults.smtpPort) setSmtpPort(defaults.smtpPort);
       if (defaults.smtpSecurity) setSmtpSecurity(defaults.smtpSecurity);
+    }
+  };
+
+  // Handle protocol change between IMAP and POP3
+  const handleProtocolChange = (newProtocol: IncomingProtocol) => {
+    setIncomingProtocol(newProtocol);
+    if (newProtocol === "POP3") {
+      if (imapPort === 993 || !imapPort) {
+        setImapPort(995);
+      }
+      setImapSecurity("SSL");
+    } else if (newProtocol === "IMAP") {
+      if (imapPort === 995) {
+        setImapPort(993);
+      }
+      setImapSecurity("SSL");
     }
   };
 
@@ -289,6 +309,7 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
           email_address: emailAddress.trim().toLowerCase(),
           provider,
           domain_id: domainId,
+          incoming_protocol: incomingProtocol,
           imap_host: imapHost.trim(),
           imap_port: Number(imapPort),
           imap_security: imapSecurity,
@@ -313,6 +334,7 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
           email_address: emailAddress.trim().toLowerCase(),
           provider,
           domain_id: domainId,
+          incoming_protocol: incomingProtocol,
           imap_host: imapHost.trim(),
           imap_port: Number(imapPort),
           imap_security: imapSecurity,
@@ -540,25 +562,60 @@ export const EmailAccountDrawer: React.FC<EmailAccountDrawerProps> = ({
               </div>
             </div>
 
-            {/* 2. INCOMING SERVER (IMAP) SECTION */}
+            {/* 2. INCOMING SERVER SECTION */}
             <div className="bg-gray-50/80 border border-gray-200 p-4 rounded-xl space-y-3.5">
               <div className="flex items-center justify-between text-gray-900 font-medium text-sm border-b border-gray-200/80 pb-2.5">
                 <div className="flex items-center gap-2">
                   <Download className="w-4 h-4 text-indigo-600" />
-                  <span className="font-semibold">Incoming Server (IMAP)</span>
+                  <span className="font-semibold">Incoming Server ({incomingProtocol})</span>
+                </div>
+                {/* Incoming Protocol Selector */}
+                <div className="flex items-center bg-gray-200/70 p-0.5 rounded-lg text-xs font-medium">
+                  <button
+                    type="button"
+                    onClick={() => handleProtocolChange("IMAP")}
+                    className={`px-2.5 py-1 rounded-md transition-all ${
+                      incomingProtocol === "IMAP"
+                        ? "bg-white text-indigo-600 shadow-xs font-semibold"
+                        : "text-gray-600 hover:text-gray-900"
+                    }`}
+                  >
+                    IMAP
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleProtocolChange("POP3")}
+                    className={`px-2.5 py-1 rounded-md transition-all ${
+                      incomingProtocol === "POP3"
+                        ? "bg-white text-indigo-600 shadow-xs font-semibold"
+                        : "text-gray-600 hover:text-gray-900"
+                    }`}
+                  >
+                    POP3
+                  </button>
                 </div>
               </div>
+
+              {incomingProtocol === "POP3" && (
+                <div className="p-2.5 bg-blue-50/80 border border-blue-200/80 rounded-lg text-[11px] text-blue-800 leading-relaxed">
+                  <p className="font-semibold text-blue-900 mb-0.5">POP3 Protocol Notice:</p>
+                  <p>
+                    POP3 downloads messages into PulseMail while safely preserving them on your server.
+                    Remote server-side folders, read/unread flags, and starred flags are managed locally in PulseMail and do not synchronize back to the server.
+                  </p>
+                </div>
+              )}
 
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-2">
                   <label className="block text-xs font-medium text-gray-600 mb-1">
-                    IMAP Host <span className="text-rose-500">*</span>
+                    {incomingProtocol} Host <span className="text-rose-500">*</span>
                   </label>
                   <input
                     type="text"
                     value={imapHost}
                     onChange={(e) => setImapHost(e.target.value)}
-                    placeholder="imap.mail.domain.com"
+                    placeholder={incomingProtocol === "POP3" ? "pop3.mail.domain.com" : "imap.mail.domain.com"}
                     className="w-full bg-white border border-gray-300 rounded-lg px-3 py-1.5 font-mono text-xs text-gray-900 outline-none shadow-xs focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                   />
                 </div>
