@@ -21,6 +21,17 @@ class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_in: int = Field(description="Token lifetime in seconds")
+    refresh_token: Optional[str] = Field(default=None, description="Refresh token for renewing session")
+
+
+class TokenRefreshRequest(BaseModel):
+    """Schema for requesting a new access token using a refresh token."""
+    refresh_token: str = Field(description="JWT refresh token")
+
+
+class LogoutRequest(BaseModel):
+    """Schema for logging out and revoking a refresh token."""
+    refresh_token: Optional[str] = Field(default=None, description="JWT refresh token to invalidate")
 
 
 class TokenPayload(BaseModel):

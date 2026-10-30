@@ -99,6 +99,7 @@ export interface HealthResponse {
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || "";
 const TOKEN_KEY = "email_mon_auth_token";
+const REFRESH_TOKEN_KEY = "email_mon_refresh_token";
 
 export const tokenStorage = {
   get: (): string | null => {
@@ -115,14 +116,86 @@ export const tokenStorage = {
       // Ignore storage errors in restricted contexts
     }
   },
+  getRefreshToken: (): string | null => {
+    try {
+      return localStorage.getItem(REFRESH_TOKEN_KEY);
+    } catch {
+      return null;
+    }
+  },
+  setRefreshToken: (token: string): void => {
+    try {
+      localStorage.setItem(REFRESH_TOKEN_KEY, token);
+    } catch {
+      // Ignore storage errors in restricted contexts
+    }
+  },
   clear: (): void => {
     try {
       localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(REFRESH_TOKEN_KEY);
     } catch {
       // Ignore storage errors in restricted contexts
     }
   },
 };
+
+let refreshPromise: Promise<string | null> | null = null;
+
+export async function refreshAccessToken(): Promise<string | null> {
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  const refreshToken = tokenStorage.getRefreshToken();
+  if (!refreshToken) {
+    handle401Unauthorized();
+    return null;
+  }
+
+  refreshPromise = (async () => {
+    try {
+      const url = `${API_BASE_URL}/api/v1/auth/refresh`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+
+      if (!response.ok) {
+        tokenStorage.clear();
+        handle401Unauthorized();
+        return null;
+      }
+
+      const data: Token = await response.json();
+      tokenStorage.set(data.access_token);
+      if (data.refresh_token) {
+        tokenStorage.setRefreshToken(data.refresh_token);
+      }
+      return data.access_token;
+    } catch {
+      tokenStorage.clear();
+      handle401Unauthorized();
+      return null;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
+}
+
+function isAuthEndpoint(endpoint: string): boolean {
+  return (
+    endpoint.includes("/auth/login") ||
+    endpoint.includes("/auth/register") ||
+    endpoint.includes("/auth/refresh") ||
+    endpoint.includes("/auth/logout")
+  );
+}
 
 export class RequestError extends Error {
   status: number;
@@ -170,7 +243,7 @@ function handle401Unauthorized(): void {
   }, 1000);
 }
 
-async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+async function request<T>(endpoint: string, options: RequestInit = {}, isRetry = false): Promise<T> {
   const url = endpoint.startsWith("http") ? endpoint : `${API_BASE_URL}${endpoint}`;
   const headers = new Headers(options.headers || {});
 
@@ -189,6 +262,16 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   });
 
   if (!response.ok) {
+    // Intercept 401 Unauthorized for expired tokens on protected endpoints and attempt silent refresh
+    if (response.status === 401 && !isRetry && !isAuthEndpoint(endpoint)) {
+      const newToken = await refreshAccessToken();
+      if (newToken) {
+        const retryHeaders = new Headers(options.headers || {});
+        retryHeaders.set("Authorization", `Bearer ${newToken}`);
+        return request<T>(endpoint, { ...options, headers: retryHeaders }, true);
+      }
+    }
+
     let errorDetail: unknown = null;
     let errorMessage = `HTTP Error ${response.status}: ${response.statusText}`;
 
@@ -207,7 +290,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     }
 
     // Intercept 401 Unauthorized for expired or invalid tokens on protected endpoints
-    if (response.status === 401 && !endpoint.includes("/auth/login") && !endpoint.includes("/auth/register")) {
+    if (response.status === 401 && !isAuthEndpoint(endpoint)) {
       handle401Unauthorized();
     }
 
@@ -261,6 +344,14 @@ export const authApi = {
   },
   changePassword: async (data: UserPasswordChangePayload): Promise<{ message: string }> => {
     return apiClient.post<{ message: string }>("/api/v1/auth/me/password", data);
+  },
+  refreshToken: async (refreshToken: string): Promise<Token> => {
+    return apiClient.post<Token>("/api/v1/auth/refresh", { refresh_token: refreshToken });
+  },
+  logout: async (refreshToken?: string | null): Promise<{ message: string }> => {
+    return apiClient.post<{ message: string }>("/api/v1/auth/logout", {
+      refresh_token: refreshToken || undefined,
+    });
   },
 };
 
@@ -372,11 +463,18 @@ export const emailsApi = {
   },
 
   downloadAttachment: async (emailId: number, attachmentId: number): Promise<Blob> => {
-    const token = tokenStorage.get();
+    let token = tokenStorage.get();
     const headers = new Headers();
     if (token) headers.set("Authorization", `Bearer ${token}`);
     const url = `${API_BASE_URL}/api/v1/emails/${emailId}/attachments/${attachmentId}/download`;
-    const res = await fetch(url, { headers });
+    let res = await fetch(url, { headers });
+    if (res.status === 401) {
+      const newToken = await refreshAccessToken();
+      if (newToken) {
+        headers.set("Authorization", `Bearer ${newToken}`);
+        res = await fetch(url, { headers });
+      }
+    }
     if (!res.ok) throw new Error("Failed to download attachment");
     return res.blob();
   },

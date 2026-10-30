@@ -9,7 +9,7 @@ export interface AuthContextType {
   isLoading: boolean;
   login: (credentials: LoginCredentials) => Promise<void>;
   register: (credentials: RegisterCredentials) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
 
@@ -35,7 +35,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refreshUser = useCallback(async () => {
     const currentToken = tokenStorage.get();
-    if (!currentToken) {
+    const currentRefreshToken = tokenStorage.getRefreshToken();
+    if (!currentToken && !currentRefreshToken) {
       setUser(null);
       setToken(null);
       setIsLoading(false);
@@ -45,9 +46,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const profile = await authApi.getMe();
       setUser(profile);
-      setToken(currentToken);
+      setToken(tokenStorage.get());
     } catch {
-      // Token expired or invalid
+      // Token expired or invalid and refresh failed
       tokenStorage.clear();
       setUser(null);
       setToken(null);
@@ -64,6 +65,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (credentials: LoginCredentials) => {
     const tokenRes = await authApi.login(credentials);
     tokenStorage.set(tokenRes.access_token);
+    if (tokenRes.refresh_token) {
+      tokenStorage.setRefreshToken(tokenRes.refresh_token);
+    }
     setToken(tokenRes.access_token);
     const profile = await authApi.getMe();
     setUser(profile);
@@ -78,10 +82,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   };
 
-  const logout = () => {
-    tokenStorage.clear();
-    setToken(null);
-    setUser(null);
+  const logout = async () => {
+    const refreshToken = tokenStorage.getRefreshToken();
+    try {
+      if (refreshToken) {
+        await authApi.logout(refreshToken);
+      }
+    } catch {
+      // Ignore network errors on logout so client-side state is always cleared
+    } finally {
+      tokenStorage.clear();
+      setToken(null);
+      setUser(null);
+    }
   };
 
   return (

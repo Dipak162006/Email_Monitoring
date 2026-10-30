@@ -3,6 +3,7 @@ Provides password hashing via bcrypt and JWT token generation/validation.
 """
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Union
+import uuid
 import bcrypt
 import jwt
 from app.core.config import settings
@@ -52,6 +53,35 @@ def create_access_token(
     return encoded_jwt
 
 
+def create_refresh_token(
+    subject: Union[str, Any],
+    expires_delta: Optional[timedelta] = None,
+    jti: Optional[str] = None,
+) -> str:
+    """Generate a signed JWT refresh token for session renewal."""
+    now = datetime.now(timezone.utc)
+    if expires_delta:
+        expire = now + expires_delta
+    else:
+        expire = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+
+    token_jti = jti or uuid.uuid4().hex
+    to_encode = {
+        "sub": str(subject),
+        "iat": int(now.timestamp()),
+        "exp": int(expire.timestamp()),
+        "type": "refresh",
+        "jti": token_jti,
+    }
+
+    encoded_jwt = jwt.encode(
+        to_encode,
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM,
+    )
+    return encoded_jwt
+
+
 def decode_access_token(token: str) -> dict:
     """Decode and validate a signed JWT token.
     
@@ -59,12 +89,33 @@ def decode_access_token(token: str) -> dict:
         jwt.ExpiredSignatureError: When the token expiration has passed.
         jwt.InvalidTokenError: When the signature or token structure is invalid.
     """
-    return jwt.decode(
+    payload = jwt.decode(
         token,
         settings.SECRET_KEY,
         algorithms=[settings.ALGORITHM],
         options={"require": ["sub", "exp", "iat"]},
     )
+    if payload.get("type") and payload.get("type") != "access":
+        raise jwt.InvalidTokenError("Invalid token type: expected access token")
+    return payload
+
+
+def decode_refresh_token(token: str) -> dict:
+    """Decode and validate a signed JWT refresh token.
+    
+    Raises:
+        jwt.ExpiredSignatureError: When the token expiration has passed.
+        jwt.InvalidTokenError: When the signature or token structure is invalid.
+    """
+    payload = jwt.decode(
+        token,
+        settings.SECRET_KEY,
+        algorithms=[settings.ALGORITHM],
+        options={"require": ["sub", "exp", "iat"]},
+    )
+    if payload.get("type") != "refresh":
+        raise jwt.InvalidTokenError("Invalid token type: expected refresh token")
+    return payload
 
 
 def _get_fernet():

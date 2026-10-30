@@ -1,13 +1,24 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
+import jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.security import create_access_token
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    decode_refresh_token,
+)
+from app.core.token_revocation import (
+    is_refresh_token_revoked,
+    revoke_refresh_token,
+)
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.models import User
 from app.modules.auth.schemas import (
+    LogoutRequest,
     MessageResponse,
     Token,
+    TokenRefreshRequest,
     UserLogin,
     UserPasswordChange,
     UserProfileUpdate,
@@ -65,13 +76,99 @@ async def login(
         )
 
     access_token = create_access_token(subject=user.email)
+    refresh_token = create_refresh_token(subject=user.email)
     expires_in_seconds = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
     return Token(
         access_token=access_token,
         token_type="bearer",
         expires_in=expires_in_seconds,
+        refresh_token=refresh_token,
     )
+
+
+@router.post(
+    "/refresh",
+    response_model=Token,
+    status_code=status.HTTP_200_OK,
+    summary="Refresh access token using a valid refresh token",
+)
+async def refresh_token(
+    refresh_in: TokenRefreshRequest,
+    db: AsyncSession = Depends(get_db),
+) -> Token:
+    """Validate a refresh token and issue a fresh access token and refresh token."""
+    try:
+        payload = decode_refresh_token(refresh_in.refresh_token)
+        user_email = payload.get("sub")
+        if not user_email:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Check whether the refresh token has already been revoked or rotated
+    if await is_refresh_token_revoked(refresh_in.refresh_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = await AuthService.get_user_by_email(db, email=user_email)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Inactive user account",
+        )
+
+    # Invalidate the current refresh token upon successful rotation
+    await revoke_refresh_token(refresh_in.refresh_token)
+
+    new_access_token = create_access_token(subject=user.email)
+    new_refresh_token = create_refresh_token(subject=user.email)
+    expires_in_seconds = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+
+    return Token(
+        access_token=new_access_token,
+        token_type="bearer",
+        expires_in=expires_in_seconds,
+        refresh_token=new_refresh_token,
+    )
+
+
+@router.post(
+    "/logout",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Log out and invalidate the refresh token",
+)
+async def logout(
+    logout_data: LogoutRequest = LogoutRequest(),
+) -> MessageResponse:
+    """Invalidate refresh token server-side so it cannot be used again."""
+    if logout_data and logout_data.refresh_token:
+        await revoke_refresh_token(logout_data.refresh_token)
+    return MessageResponse(message="Successfully logged out")
 
 
 @router.get(
