@@ -1,6 +1,8 @@
+import base64
 from email.message import EmailMessage
 import logging
 from pathlib import Path
+import re
 from typing import List, Optional, Sequence, Tuple
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import func, select
@@ -140,24 +142,33 @@ class AttachmentService:
         file_name: str,
         content_type: str,
         content_bytes: bytes,
+        disposition: str = "attachment",
+        content_id: Optional[str] = None,
     ) -> Optional[EmailAttachment]:
-        """Save an incoming attachment extracted from an IMAP email idempotently."""
+        """Save an incoming attachment extracted from an IMAP/POP3 email idempotently."""
         safe_name = AttachmentStorageService.sanitize_filename(file_name)
         file_size = len(content_bytes)
 
         # Idempotency check: verify if attachment already exists for this email
-        dup_stmt = select(EmailAttachment).where(
-            EmailAttachment.email_id == email_id,
-            EmailAttachment.file_name == safe_name,
-            EmailAttachment.file_size == file_size,
-        )
+        if content_id:
+            dup_stmt = select(EmailAttachment).where(
+                EmailAttachment.email_id == email_id,
+                EmailAttachment.content_id == content_id,
+            )
+        else:
+            dup_stmt = select(EmailAttachment).where(
+                EmailAttachment.email_id == email_id,
+                EmailAttachment.file_name == safe_name,
+                EmailAttachment.file_size == file_size,
+            )
         dup_res = await db.execute(dup_stmt)
         existing = dup_res.scalars().first()
         if existing:
             logger.info(
-                "Attachment '%s' (size=%d) already exists on email id=%d; skipping duplicate creation.",
+                "Attachment '%s' (size=%d, cid=%s) already exists on email id=%d; skipping duplicate creation.",
                 safe_name,
                 file_size,
+                content_id,
                 email_id,
             )
             return existing
@@ -185,12 +196,16 @@ class AttachmentService:
             content_type=c_type,
             file_size=file_size,
             storage_path=rel_path,
+            disposition=disposition,
+            content_id=content_id,
         )
         db.add(attachment)
         logger.info(
-            "Created incoming attachment '%s' (size=%d bytes, path=%s) for email id=%d",
+            "Created incoming attachment '%s' (size=%d bytes, disposition=%s, cid=%s, path=%s) for email id=%d",
             safe_name,
             file_size,
+            disposition,
+            content_id,
             rel_path,
             email_id,
         )
@@ -221,8 +236,13 @@ class AttachmentService:
         email_id: int,
         company_id: Optional[int] = None,
         require_draft: bool = False,
+        include_inline: bool = False,
     ) -> Tuple[List[EmailAttachment], int]:
-        """List all attachments for an authorized email message (draft, sent, or received)."""
+        """List all attachments for an authorized email message (draft, sent, or received).
+        
+        By default, inline attachments (disposition='inline') such as logos, signature graphics,
+        and tracking pixels are excluded from the user-facing attachment list.
+        """
         email = await db.get(Email, email_id)
         not_found_detail = "Draft not found." if require_draft else "Email not found."
         if not email:
@@ -274,10 +294,67 @@ class AttachmentService:
                 detail="You do not have permission to access attachments for this email account.",
             )
 
-        stmt = select(EmailAttachment).where(EmailAttachment.email_id == email_id).order_by(EmailAttachment.created_at.asc())
+        stmt = select(EmailAttachment).where(EmailAttachment.email_id == email_id)
+        if not include_inline:
+            stmt = stmt.where(EmailAttachment.disposition != "inline")
+        stmt = stmt.order_by(EmailAttachment.created_at.asc())
         res = await db.execute(stmt)
         items = list(res.scalars().all())
         return items, len(items)
+
+    @classmethod
+    async def resolve_cids_in_html(
+        cls,
+        db: AsyncSession,
+        email_id: int,
+        body_html: Optional[str],
+    ) -> Optional[str]:
+        """Safely resolve cid: references in HTML email body to base64 data URIs.
+        
+        Preserves original raw HTML in the database while allowing browser sandboxes
+        to cleanly display inline images (logos, signatures, embedded diagrams).
+        """
+        if not body_html or "cid:" not in body_html.lower():
+            return body_html
+
+        stmt = select(EmailAttachment).where(
+            EmailAttachment.email_id == email_id,
+            (EmailAttachment.content_id.isnot(None)) | (EmailAttachment.disposition == "inline"),
+        )
+        res = await db.execute(stmt)
+        attachments = list(res.scalars().all())
+        if not attachments:
+            return body_html
+
+        resolved_html = body_html
+        for att in attachments:
+            cids_to_match = []
+            if att.content_id:
+                cids_to_match.append(att.content_id.strip().strip("<>"))
+            if att.file_name:
+                cids_to_match.append(att.file_name)
+
+            matched = any(c.lower() in resolved_html.lower() for c in cids_to_match)
+            if not matched:
+                continue
+
+            try:
+                target_path = AttachmentStorageService.resolve_storage_path(att.storage_path)
+                if not target_path.is_file():
+                    continue
+                file_bytes = target_path.read_bytes()
+                b64_str = base64.b64encode(file_bytes).decode("ascii")
+                mime = att.content_type or "image/png"
+                data_uri = f"data:{mime};base64,{b64_str}"
+
+                for c in cids_to_match:
+                    # Replace cid:cid_name and cid:<cid_name>
+                    pattern = re.compile(rf"cid:(?:<)?{re.escape(c)}(?:>)?", re.IGNORECASE)
+                    resolved_html = pattern.sub(data_uri, resolved_html)
+            except Exception as exc:
+                logger.warning("Failed to resolve CID '%s' for email %d: %s", att.content_id, email_id, exc)
+
+        return resolved_html
 
     @classmethod
     async def get_attachment(
@@ -755,7 +832,10 @@ class AttachmentService:
         # 3. Query source attachments with shared row lock to serialize against concurrent deletions
         src_stmt = (
             select(EmailAttachment)
-            .where(EmailAttachment.email_id == source_email_id)
+            .where(
+                EmailAttachment.email_id == source_email_id,
+                EmailAttachment.disposition != "inline",
+            )
             .order_by(EmailAttachment.id.asc())
             .with_for_update(read=True)
         )

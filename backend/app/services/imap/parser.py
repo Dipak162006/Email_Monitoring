@@ -20,6 +20,7 @@ class ParsedAttachment:
     content_bytes: bytes
     content_id: Optional[str] = None
     is_inline: bool = False
+    has_explicit_attachment: bool = False
 
 
 @dataclass
@@ -340,6 +341,30 @@ class EmailParser:
         }
 
         if msg.is_multipart():
+            # Identify parts that are related non-root subparts of multipart/related containers
+            related_part_ids = set()
+            for sub in msg.walk():
+                if sub.is_multipart() and sub.get_content_type().lower() == "multipart/related":
+                    start_param = sub.get_param("start")
+                    start_cid = start_param.strip().strip("<>") if start_param else None
+                    subpayload = sub.get_payload()
+                    if isinstance(subpayload, list):
+                        root_part = None
+                        if start_cid:
+                            for child in subpayload:
+                                child_cid = (child.get("Content-ID") or "").strip().strip("<>")
+                                if child_cid == start_cid:
+                                    root_part = child
+                                    break
+                        if not root_part and len(subpayload) > 0:
+                            root_part = subpayload[0]
+
+                        for child in subpayload:
+                            if child is not root_part:
+                                for leaf in (child.walk() if child.is_multipart() else [child]):
+                                    if not leaf.is_multipart():
+                                        related_part_ids.add(id(leaf))
+
             for part in msg.walk():
                 if part.is_multipart():
                     continue
@@ -355,20 +380,59 @@ class EmailParser:
 
                 decoded_filename = cls.decode_header_str(raw_filename) if raw_filename else None
                 disposition_lower = content_disposition.lower()
+                has_attachment_disposition = "attachment" in disposition_lower
+                has_inline_disposition = "inline" in disposition_lower
 
-                # Determine if this part is an attachment
+                content_id = part.get("Content-ID")
+                cleaned_cid = content_id.strip().strip("<>") if content_id else None
+                is_related_subpart = id(part) in related_part_ids
+
+                # 5a. Prioritize primary text and HTML body extraction
+                # Never classify text/html or text/plain as an attachment just because name/filename is present,
+                # unless Content-Disposition explicitly indicates "attachment".
+                if content_type in ("text/html", "text/x-amp-html", "text/watch-html") and body_html is None and not has_attachment_disposition:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        charset = part.get_content_charset() or "utf-8"
+                        try:
+                            body_html = payload.decode(charset, errors="replace")
+                        except (LookupError, UnicodeDecodeError):
+                            body_html = payload.decode("utf-8", errors="replace")
+                    continue
+
+                if content_type == "text/plain" and body_text is None and not has_attachment_disposition:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        charset = part.get_content_charset() or "utf-8"
+                        try:
+                            body_text = payload.decode(charset, errors="replace")
+                        except (LookupError, UnicodeDecodeError):
+                            body_text = payload.decode("utf-8", errors="replace")
+                    continue
+
+                # 5b. Determine if this part is an attachment or inline asset
                 is_attachment = False
-                if "attachment" in disposition_lower or bool(decoded_filename):
+                if has_attachment_disposition:
+                    is_attachment = True
+                elif is_related_subpart:
+                    is_attachment = True
+                elif bool(cleaned_cid):
                     is_attachment = True
                 elif content_type not in ("text/plain", "text/html", "text/x-amp-html", "text/watch-html", "message/rfc822"):
+                    is_attachment = True
+                elif bool(decoded_filename):
                     is_attachment = True
 
                 if is_attachment:
                     payload = part.get_payload(decode=True)
                     if payload and len(payload) > 0:
-                        content_id = part.get("Content-ID")
-                        cleaned_cid = content_id.strip().strip("<>") if content_id else None
-                        is_inline = "inline" in disposition_lower or (bool(cleaned_cid) and "attachment" not in disposition_lower)
+                        is_inline = False
+                        if has_inline_disposition:
+                            is_inline = True
+                        elif is_related_subpart:
+                            is_inline = True
+                        elif bool(cleaned_cid) and not has_attachment_disposition:
+                            is_inline = True
 
                         final_filename = decoded_filename
                         if not final_filename:
@@ -386,26 +450,9 @@ class EmailParser:
                                 content_bytes=payload,
                                 content_id=cleaned_cid,
                                 is_inline=is_inline,
+                                has_explicit_attachment=has_attachment_disposition,
                             )
                         )
-                else:
-                    if content_type == "text/plain" and body_text is None:
-                        payload = part.get_payload(decode=True)
-                        if payload:
-                            charset = part.get_content_charset() or "utf-8"
-                            try:
-                                body_text = payload.decode(charset, errors="replace")
-                            except (LookupError, UnicodeDecodeError):
-                                body_text = payload.decode("utf-8", errors="replace")
-
-                    elif content_type == "text/html" and body_html is None:
-                        payload = part.get_payload(decode=True)
-                        if payload:
-                            charset = part.get_content_charset() or "utf-8"
-                            try:
-                                body_html = payload.decode(charset, errors="replace")
-                            except (LookupError, UnicodeDecodeError):
-                                body_html = payload.decode("utf-8", errors="replace")
         else:
             content_type = msg.get_content_type().lower()
             content_disposition = str(msg.get("Content-Disposition") or "")
@@ -424,6 +471,7 @@ class EmailParser:
                             content_bytes=payload,
                             content_id=None,
                             is_inline="inline" in disposition_lower,
+                            has_explicit_attachment="attachment" in disposition_lower,
                         )
                     )
             else:
@@ -439,6 +487,27 @@ class EmailParser:
                     body_html = decoded_body
                 else:
                     body_text = decoded_body
+
+        # 5c. Post-pass: correlate attachments with HTML body for CID and inline classification
+        if body_html:
+            body_html_lower = body_html.lower()
+            for att in attachments:
+                if not att.is_inline:
+                    if att.content_id and att.content_id.lower() in body_html_lower:
+                        att.is_inline = True
+                    elif att.filename and f"cid:{att.filename.lower()}" in body_html_lower:
+                        att.is_inline = True
+
+        # Classify tracking pixels and miniature spacer images as inline (unless explicitly attached)
+        for att in attachments:
+            if not att.is_inline and not att.has_explicit_attachment and att.content_type.startswith("image/"):
+                if len(att.content_bytes) <= 120 and (not att.filename or any(k in att.filename.lower() for k in ("pixel", "spacer", "track", "blank"))):
+                    att.is_inline = True
+                elif att.filename.lower() in (
+                    "spacer.gif", "pixel.gif", "blank.gif", "track.gif",
+                    "tracker.gif", "spacer.png", "pixel.png"
+                ):
+                    att.is_inline = True
 
         # 6. Detect Bounce & Auto-Reply Indicators
         (

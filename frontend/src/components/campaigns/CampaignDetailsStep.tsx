@@ -51,6 +51,7 @@ export const CampaignDetailsStep: React.FC<CampaignDetailsStepProps> = ({
 
   const [intervalUnit, setIntervalUnit] = useState<"seconds" | "minutes">(initialUnit);
   const [intervalNum, setIntervalNum] = useState<number>(initialValue);
+  const [isSubjectFocused, setIsSubjectFocused] = useState(false);
 
   // Sync internal state when parent props change (e.g. draft edit pre-population)
   useEffect(() => {
@@ -66,6 +67,7 @@ export const CampaignDetailsStep: React.FC<CampaignDetailsStepProps> = ({
   }, [sendIntervalSeconds]);
 
   const handleInsertFirstName = () => {
+    setIsSubjectFocused(true);
     const trimmed = subject.trimEnd();
     const newSubject = trimmed ? `${trimmed} {{first_name}}` : "{{first_name}}";
     onSubjectChange(newSubject);
@@ -173,12 +175,18 @@ export const CampaignDetailsStep: React.FC<CampaignDetailsStepProps> = ({
                 <div className="relative">
                   <input
                     id="campaign-name"
+                    name="pulsemail_camp_topic"
                     ref={nameInputRef}
                     type="text"
                     value={name}
                     maxLength={80}
                     onChange={handleNameInputChange}
                     placeholder="e.g. Product Launch — October"
+                    autoComplete="one-time-code"
+                    autoCorrect="off"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    data-form-type="other"
                     aria-required="true"
                     aria-invalid={Boolean(nameError)}
                     aria-describedby={
@@ -236,11 +244,20 @@ export const CampaignDetailsStep: React.FC<CampaignDetailsStepProps> = ({
                 <div className="relative">
                   <input
                     id="campaign-subject"
+                    name="pulsemail_camp_headline"
                     ref={subjectInputRef}
                     type="text"
+                    readOnly={!isSubjectFocused}
+                    onFocus={() => setIsSubjectFocused(true)}
                     value={subject}
                     onChange={(e) => onSubjectChange(e.target.value)}
                     placeholder="e.g. Introducing our new product line"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck={true}
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    data-form-type="other"
                     aria-required="true"
                     aria-invalid={Boolean(subjectError)}
                     aria-describedby={

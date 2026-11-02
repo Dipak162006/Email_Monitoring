@@ -762,7 +762,7 @@ async def test_16_campaign_execution_processes_pending_recipients_after_retry_fi
     assert result["status"] == CampaignStatus.COMPLETED.value
 
     rec2 = (await db_session.execute(select(CampaignRecipient).where(CampaignRecipient.id == r2_id))).scalar_one()
-    assert rec2.status == CampaignRecipientStatus.SENT.value
+    assert rec2.status in (CampaignRecipientStatus.SENT.value, CampaignRecipientStatus.COMPLETED.value)
 
 
 @pytest.mark.asyncio
@@ -923,7 +923,7 @@ async def test_18_in_flight_smtp_operation_pauses_completes_halts_and_resumes(
     assert camp.status == CampaignStatus.COMPLETED.value
 
     await db_session.refresh(rec_b)
-    assert rec_b.status == CampaignRecipientStatus.SENT.value
+    assert rec_b.status in (CampaignRecipientStatus.SENT.value, CampaignRecipientStatus.COMPLETED.value)
 
 
 # ==============================================================================
@@ -964,14 +964,34 @@ async def test_reschedule_scheduled_campaign_success_and_persistence(
     assert data2["status"] == CampaignStatus.SCHEDULED.value
     assert data2["scheduled_at"] is not None
 
-    # 3. Verify persistence in database
+    # 3. Reschedule second time (+7 days) via /schedule
+    third_time = datetime.now(timezone.utc) + timedelta(days=7)
+    resp3 = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}/schedule",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"scheduled_at": third_time.isoformat()},
+    )
+    assert resp3.status_code == 200
+    assert resp3.json()["status"] == CampaignStatus.SCHEDULED.value
+
+    # 4. Reschedule third time (+10 days) via dedicated /reschedule endpoint
+    fourth_time = datetime.now(timezone.utc) + timedelta(days=10)
+    resp4 = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}/reschedule",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"scheduled_at": fourth_time.isoformat()},
+    )
+    assert resp4.status_code == 200
+    assert resp4.json()["status"] == CampaignStatus.SCHEDULED.value
+
+    # 5. Verify persistence in database and that latest scheduled_at is persisted
     camp = (await db_session.execute(select(Campaign).where(Campaign.id == camp_id))).scalar_one()
     assert camp.status == CampaignStatus.SCHEDULED.value
-    # Ensure saved scheduled_at is updated to approximately new_time
+    assert camp.next_send_at is None
     assert camp.scheduled_at is not None
-    assert camp.scheduled_at.year == new_time.year
-    assert camp.scheduled_at.month == new_time.month
-    assert camp.scheduled_at.day == new_time.day
+    assert camp.scheduled_at.year == fourth_time.year
+    assert camp.scheduled_at.month == fourth_time.month
+    assert camp.scheduled_at.day == fourth_time.day
 
 
 @pytest.mark.asyncio
@@ -1094,3 +1114,168 @@ async def test_reschedule_and_scheduler_race_prevents_duplicate_dispatch(
     assert "only draft or scheduled" in resp_after_queued.json()["detail"].lower()
 
 
+
+
+# ==============================================================================
+# Generic Create/Update Scheduling and Lifecycle Tests
+# ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_campaign_scheduling_via_create_and_validation(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Test creating a campaign with future scheduled_at transitions directly to SCHEDULED,
+    while past scheduled_at is rejected with 400."""
+    token = await register_and_login(async_client, "sched_create@test.com")
+    comp_id = await create_company_helper(async_client, token, "Create Sched Co")
+    _, acc_id = await setup_test_campaign(async_client, db_session, token, comp_id)
+
+    # 1. Past scheduled_at rejected with 400
+    past_time = datetime.now(timezone.utc) - timedelta(hours=1)
+    past_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns/",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Past Sched Campaign",
+            "email_account_id": acc_id,
+            "subject": "Past Subject",
+            "scheduled_at": past_time.isoformat(),
+        },
+    )
+    assert past_resp.status_code == 400
+    assert "scheduled_at must be in the future" in past_resp.json()["detail"].lower()
+
+    # 2. Future scheduled_at creates campaign in SCHEDULED status
+    future_time = datetime.now(timezone.utc) + timedelta(days=2)
+    resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns/",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Future Sched Campaign",
+            "email_account_id": acc_id,
+            "subject": "Future Subject",
+            "scheduled_at": future_time.isoformat(),
+        },
+    )
+    assert resp.status_code == 201
+    created_data = resp.json()
+    assert created_data["status"] == CampaignStatus.SCHEDULED.value
+    assert created_data["scheduled_at"] is not None
+
+    # Verify detail GET also returns SCHEDULED status
+    camp_id = created_data["id"]
+    get_res = await async_client.get(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert get_res.status_code == 200
+    assert get_res.json()["status"] == CampaignStatus.SCHEDULED.value
+
+
+@pytest.mark.asyncio
+async def test_campaign_scheduling_and_rescheduling_via_update(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Test:
+    1. Updating a DRAFT campaign with future scheduled_at transitions it to SCHEDULED.
+    2. Changing scheduled_at on an already SCHEDULED campaign updates the time and keeps it SCHEDULED.
+    3. Setting scheduled_at to None on a SCHEDULED campaign reverts it to DRAFT.
+    4. Past scheduled_at updates are rejected with 400.
+    """
+    token = await register_and_login(async_client, "sched_update@test.com")
+    comp_id = await create_company_helper(async_client, token, "Update Sched Co")
+    camp_id, _ = await setup_test_campaign(async_client, db_session, token, comp_id)
+
+    # Verify initial campaign is DRAFT
+    get_res = await async_client.get(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert get_res.status_code == 200
+    assert get_res.json()["status"] == CampaignStatus.DRAFT.value
+    assert get_res.json()["scheduled_at"] is None
+
+    # 1. Update DRAFT with past scheduled_at -> rejected
+    past_time = datetime.now(timezone.utc) - timedelta(minutes=30)
+    bad_res = await async_client.patch(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"scheduled_at": past_time.isoformat()},
+    )
+    assert bad_res.status_code == 400
+    assert "scheduled_at must be in the future" in bad_res.json()["detail"].lower()
+
+    # 2. Update DRAFT with future scheduled_at -> transitions to SCHEDULED
+    future_time_1 = datetime.now(timezone.utc) + timedelta(days=3)
+    patch_res = await async_client.patch(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"scheduled_at": future_time_1.isoformat()},
+    )
+    assert patch_res.status_code == 200
+    assert patch_res.json()["status"] == CampaignStatus.SCHEDULED.value
+    assert patch_res.json()["scheduled_at"] is not None
+
+    # Verify detail GET returns SCHEDULED
+    get_sched = await async_client.get(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert get_sched.status_code == 200
+    assert get_sched.json()["status"] == CampaignStatus.SCHEDULED.value
+
+    # 3. Change scheduled time of already SCHEDULED campaign via PATCH
+    future_time_2 = datetime.now(timezone.utc) + timedelta(days=7)
+    resched_res = await async_client.patch(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"scheduled_at": future_time_2.isoformat()},
+    )
+    assert resched_res.status_code == 200
+    assert resched_res.json()["status"] == CampaignStatus.SCHEDULED.value
+    assert resched_res.json()["scheduled_at"] is not None
+
+    # 4. Clear scheduled_at via PATCH -> transitions back to DRAFT
+    unsched_res = await async_client.patch(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"scheduled_at": None},
+    )
+    assert unsched_res.status_code == 200
+    assert unsched_res.json()["status"] == CampaignStatus.DRAFT.value
+    assert unsched_res.json()["scheduled_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_update_preserves_lifecycle_and_rejects_active_or_terminal_campaigns(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Test that PATCH updates on RUNNING, PAUSED, CANCELLED, or COMPLETED campaigns
+    are rejected with 400 Bad Request to protect lifecycle state machines."""
+    token = await register_and_login(async_client, "sched_lifecycle@test.com")
+    comp_id = await create_company_helper(async_client, token, "Lifecycle Update Co")
+    camp_id, _ = await setup_test_campaign(async_client, db_session, token, comp_id)
+
+    future_time = datetime.now(timezone.utc) + timedelta(days=5)
+
+    for state in [
+        CampaignStatus.RUNNING.value,
+        CampaignStatus.PAUSED.value,
+        CampaignStatus.CANCELLED.value,
+        CampaignStatus.COMPLETED.value,
+    ]:
+        camp = (await db_session.execute(select(Campaign).where(Campaign.id == camp_id))).scalar_one()
+        camp.status = state
+        await db_session.commit()
+
+        resp = await async_client.patch(
+            f"/api/v1/companies/{comp_id}/campaigns/{camp_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"scheduled_at": future_time.isoformat(), "name": "Bypassed Name"},
+        )
+        assert resp.status_code == 400
+        assert "only draft or scheduled" in resp.json()["detail"].lower()

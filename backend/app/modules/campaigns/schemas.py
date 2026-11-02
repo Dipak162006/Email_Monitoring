@@ -174,6 +174,10 @@ class CampaignCreate(BaseModel):
     subject: str = Field(default="", max_length=998, description="Email subject line")
     body_text: Optional[str] = Field(default=None, description="Plaintext email body")
     body_html: Optional[str] = Field(default=None, description="HTML email body")
+    scheduled_at: Optional[datetime] = Field(
+        default=None,
+        description="Optional scheduled launch time (UTC)",
+    )
     send_interval_seconds: int = Field(
         default=0,
         ge=0,

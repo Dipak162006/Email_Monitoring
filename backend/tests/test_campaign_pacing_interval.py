@@ -315,3 +315,67 @@ async def test_recover_due_paced_campaigns(async_client: AsyncClient, db_session
         assert recovered[0]["campaign_id"] == camp_id
         assert recovered[0]["status"] == "ENQUEUED"
         assert mock_delay.called
+
+
+@pytest.mark.anyio
+async def test_paced_delivery_with_default_recipient_status(async_client: AsyncClient, db_session: AsyncSession):
+    """Verify that recipients created without explicit status receive the default PENDING status,
+    and paced delivery properly detects remaining recipients and schedules continuation without stopping."""
+    token = await register_and_login(async_client, "paced_defaults@test.com", "Defaults User")
+    company_id = await create_company_helper(async_client, token, "Defaults Org")
+    camp_id, _ = await setup_delivery_campaign(async_client, db_session, token, company_id)
+
+    # Set 60-second sending interval
+    await async_client.patch(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"send_interval_seconds": 60},
+    )
+
+    # Add recipients using model defaults (omitting status)
+    async with TestAsyncSessionLocal() as db:
+        r1 = CampaignRecipient(campaign_id=camp_id, email="default_r1@test.com", first_name="Def1")
+        r2 = CampaignRecipient(campaign_id=camp_id, email="default_r2@test.com", first_name="Def2")
+        db.add_all([r1, r2])
+        await db.commit()
+        await db.refresh(r1)
+        await db.refresh(r2)
+        assert r1.status == CampaignRecipientStatus.PENDING.value
+        assert r2.status == CampaignRecipientStatus.PENDING.value
+        r1_id = r1.id
+        r2_id = r2.id
+
+    await queue_campaign_helper(db_session, camp_id)
+
+    t0 = datetime(2026, 10, 13, 10, 0, 0, tzinfo=timezone.utc)
+
+    # First send at t0
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync"), \
+         patch("app.workers.campaign_tasks.dispatch_campaign_task.apply_async") as mock_apply_async:
+        res1 = await CampaignDeliveryService.execute_campaign(
+            campaign_id=camp_id,
+            company_id=company_id,
+            now_utc=t0,
+        )
+
+        assert res1["status"] == "RUNNING"
+        assert res1["sent_count"] == 1
+        assert res1["remaining_pending"] == 1
+        assert mock_apply_async.called
+
+    # Check recovery also detects default-status recipients
+    t_past = t0 + timedelta(seconds=60)
+    async with TestAsyncSessionLocal() as db:
+        camp = await db.scalar(select(Campaign).where(Campaign.id == camp_id))
+        camp.next_send_at = t_past
+        await db.commit()
+
+    with patch("app.workers.campaign_tasks.dispatch_campaign_task.delay") as mock_delay:
+        t_now = t0 + timedelta(seconds=120)
+        recovered = await CampaignSchedulingService.recover_due_paced_campaigns(
+            now_utc=t_now,
+        )
+        assert len(recovered) == 1
+        assert recovered[0]["campaign_id"] == camp_id
+        assert recovered[0]["pending_recipients"] == 1
+        assert mock_delay.called

@@ -162,7 +162,7 @@ async def get_campaign_analytics(
     "/{campaign_id}",
     response_model=CampaignRead,
     status_code=status.HTTP_200_OK,
-    summary="Update a draft campaign (Admin/Owner only)",
+    summary="Update an editable campaign (Admin/Owner only)",
 )
 async def update_campaign(
     company_id: int,
@@ -173,7 +173,7 @@ async def update_campaign(
 ) -> CampaignRead:
     """Update editable fields of a campaign.
     
-    Only campaigns in DRAFT status may be updated.
+    Only campaigns in DRAFT or SCHEDULED status may be updated.
     Requires OWNER or ADMIN role.
     """
     return await CampaignService.update_campaign(
@@ -273,6 +273,41 @@ async def schedule_campaign(
         company_id=company_id,
         campaign_id=campaign_id,
         scheduled_at=scheduled_at,
+    )
+
+
+@router.post(
+    "/{campaign_id}/reschedule",
+    response_model=CampaignRead,
+    status_code=status.HTTP_200_OK,
+    summary="Reschedule an eligible campaign to a new future time (Admin/Owner only)",
+)
+async def reschedule_campaign(
+    company_id: int,
+    campaign_id: int,
+    schedule_in: CampaignScheduleRequest,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRead:
+    """Reschedule an existing scheduled campaign to a new future execution time.
+
+    Supports repeated rescheduling of eligible campaigns.
+    """
+    campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+
+    await verify_user_can_send_from_account(
+        db=db,
+        current_user=current_user,
+        account_id=campaign.email_account_id,
+        company_id=company_id,
+    )
+
+    return await CampaignService.schedule_or_send_now(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+        scheduled_at=schedule_in.scheduled_at,
     )
 
 

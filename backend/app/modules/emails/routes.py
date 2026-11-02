@@ -2,8 +2,10 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
+from app.modules.emails.models import EmailAttachment
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.models import User
 from app.modules.companies.dependencies import get_company_membership
@@ -668,7 +670,16 @@ async def get_email_by_id(
         current_user=current_user,
         email_id=email_id,
     )
-    return EmailRead.model_validate(email_record)
+    resolved_html = await AttachmentService.resolve_cids_in_html(db, email_record.id, email_record.body_html)
+    att_cnt_stmt = select(func.count(EmailAttachment.id)).where(
+        EmailAttachment.email_id == email_id,
+        EmailAttachment.disposition != "inline",
+    )
+    cnt_res = await db.execute(att_cnt_stmt)
+    att_count = cnt_res.scalar() or 0
+    return EmailRead.model_validate(email_record).model_copy(
+        update={"body_html": resolved_html, "attachment_count": att_count}
+    )
 
 
 @router.get(
@@ -694,7 +705,16 @@ async def get_company_email_by_id(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Email does not belong to the specified company.",
         )
-    return EmailRead.model_validate(email_record)
+    resolved_html = await AttachmentService.resolve_cids_in_html(db, email_record.id, email_record.body_html)
+    att_cnt_stmt = select(func.count(EmailAttachment.id)).where(
+        EmailAttachment.email_id == email_id,
+        EmailAttachment.disposition != "inline",
+    )
+    cnt_res = await db.execute(att_cnt_stmt)
+    att_count = cnt_res.scalar() or 0
+    return EmailRead.model_validate(email_record).model_copy(
+        update={"body_html": resolved_html, "attachment_count": att_count}
+    )
 
 
 @router.patch(
@@ -1125,7 +1145,17 @@ async def get_thread_by_id(
             detail="You do not have access to this conversation thread.",
         )
 
-    return EmailThreadDetail.model_validate(thread)
+    detail = EmailThreadDetail.model_validate(thread)
+    if detail.emails:
+        resolved_emails = []
+        for em in detail.emails:
+            if em.body_html and "cid:" in em.body_html.lower():
+                resolved_html = await AttachmentService.resolve_cids_in_html(db, em.id, em.body_html)
+                resolved_emails.append(em.model_copy(update={"body_html": resolved_html}))
+            else:
+                resolved_emails.append(em)
+        detail = detail.model_copy(update={"emails": resolved_emails})
+    return detail
 
 
 @router.get(
@@ -2386,6 +2416,7 @@ async def delete_draft_attachment(
 async def list_email_attachments(
     email_id: int,
     company_id: Optional[int] = None,
+    include_inline: bool = False,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> EmailAttachmentListResponse:
@@ -2395,6 +2426,7 @@ async def list_email_attachments(
         current_user=current_user,
         email_id=email_id,
         company_id=company_id,
+        include_inline=include_inline,
     )
     return EmailAttachmentListResponse(
         attachments=[EmailAttachmentRead.model_validate(i) for i in items],

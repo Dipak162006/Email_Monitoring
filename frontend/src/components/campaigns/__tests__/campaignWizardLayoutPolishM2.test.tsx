@@ -261,6 +261,7 @@ describe("Milestone M2 — PulseMail Campaign Wizard Layout & Review Polish", ()
     // Returned to Step 3 Sequence Editor
     expect(screen.getByText("Sequence Steps")).toBeDefined();
     expect(screen.getByText("Initial Outreach")).toBeDefined();
-    expect(screen.getByText("Step 2: Follow-up #1")).toBeDefined();
+    expect(screen.getByText("Step 1: Initial Outreach")).toBeDefined();
+    expect(screen.getByText("Follow-Up Step #1 (Step 2)")).toBeDefined();
   });
 });

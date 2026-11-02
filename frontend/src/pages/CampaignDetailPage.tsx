@@ -44,6 +44,7 @@ import type {
   Campaign,
   CampaignDetail,
   CampaignPreflightResponse,
+  SendingWindowConfig,
 } from "../types/campaign";
 import { CampaignStatusBadge } from "../components/campaigns/CampaignStatusBadge";
 import {
@@ -76,6 +77,12 @@ function formatSendInterval(seconds?: number | null): string {
     return `${mins} ${mins === 1 ? "minute" : "minutes"}`;
   }
   return `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
+}
+
+function formatSendingWindow(window?: SendingWindowConfig | null): string {
+  if (!window?.enabled) return "Unrestricted (24/7)";
+  const range = `${window.start_time} - ${window.end_time}`;
+  return window.timezone ? `${range} (${window.timezone})` : range;
 }
 
 export const CampaignDetailPage: React.FC = () => {
@@ -165,42 +172,55 @@ export const CampaignDetailPage: React.FC = () => {
     });
   };
 
-  // Follow-up Steps list
+  // Follow-up Steps list (always sorted by step_number ascending, preserving inactive steps)
   const followupSteps = useMemo(() => {
     if (!campaign) return [];
-    if (campaign.followup_steps && campaign.followup_steps.length > 0) {
-      return campaign.followup_steps;
-    }
-    if (campaign.steps && campaign.steps.length > 1) {
-      return campaign.steps.filter((s) => s.step_number >= 2 && s.is_active !== false);
-    }
-    return [];
+    const raw =
+      campaign.followup_steps && campaign.followup_steps.length > 0
+        ? campaign.followup_steps
+        : (campaign.steps || []).filter((s) => s.step_number >= 2);
+    return [...raw].sort((a, b) => a.step_number - b.step_number);
   }, [campaign]);
 
   const totalStepsCount = 1 + followupSteps.length;
 
-  // Active step selected for email preview
+  // Step 1 item helper
+  const step1Item = useMemo(() => {
+    if (!campaign) return null;
+    const step1 = campaign.steps?.find((s) => s.step_number === 1);
+    return {
+      step_number: 1,
+      subject: campaign.subject || step1?.subject || "",
+      body_html: campaign.body_html ?? step1?.body_html ?? null,
+      body_text: campaign.body_text ?? step1?.body_text ?? null,
+      delay_hours: 0,
+      is_active: step1?.is_active ?? true,
+    };
+  }, [campaign]);
+
+  // Persisted Step 1 content excerpt
+  const step1Excerpt = useMemo(() => {
+    if (!step1Item) return "No content provided.";
+    if (step1Item.body_text && step1Item.body_text.trim()) {
+      return step1Item.body_text.trim();
+    }
+    if (step1Item.body_html && step1Item.body_html.trim()) {
+      const stripped = step1Item.body_html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      if (stripped) return stripped;
+    }
+    return "No content provided.";
+  }, [step1Item]);
+
+  // Active step selected for email preview (never synthesizes phantom steps)
   const activeStepItem = useMemo(() => {
     if (!campaign) return null;
     if (selectedStepNumber === 1) {
-      return {
-        step_number: 1,
-        subject: campaign.subject || "",
-        body_html: campaign.body_html || null,
-        body_text: campaign.body_text || null,
-        delay_hours: 0,
-      };
+      return step1Item;
     }
     const found = followupSteps.find((s) => s.step_number === selectedStepNumber);
     if (found) return found;
-    return {
-      step_number: selectedStepNumber,
-      subject: `Re: ${campaign.subject || "Campaign"}`,
-      body_html: null,
-      body_text: null,
-      delay_hours: 24,
-    };
-  }, [campaign, selectedStepNumber, followupSteps]);
+    return step1Item;
+  }, [campaign, selectedStepNumber, followupSteps, step1Item]);
 
   // Safe Sanitized HTML for active email preview
   const sanitizedActiveHtml = useMemo(() => {
@@ -319,6 +339,11 @@ export const CampaignDetailPage: React.FC = () => {
   const scheduleMutation = useMutation({
     mutationFn: (scheduledAtIso: string) => {
       if (!currentCompanyId || !campaignIdNum) throw new Error("Missing parameters");
+      if (campaign?.status === "SCHEDULED") {
+        return campaignsApi.rescheduleCampaign(currentCompanyId, campaignIdNum, {
+          scheduled_at: scheduledAtIso,
+        });
+      }
       return campaignsApi.scheduleCampaign(currentCompanyId, campaignIdNum, {
         scheduled_at: scheduledAtIso,
       });
@@ -326,7 +351,12 @@ export const CampaignDetailPage: React.FC = () => {
     onSuccess: (updated) => {
       invalidateQueries();
       setActionModalState((prev) => ({ ...prev, isOpen: false }));
-      showToast(`Campaign scheduled for ${formatDate(updated.scheduled_at)}.`);
+      const isRescheduled = campaign?.status === "SCHEDULED";
+      showToast(
+        isRescheduled
+          ? `Campaign rescheduled for ${formatDate(updated.scheduled_at)}.`
+          : `Campaign scheduled for ${formatDate(updated.scheduled_at)}.`
+      );
     },
     onError: (err: unknown) => {
       const msg =
@@ -722,6 +752,14 @@ export const CampaignDetailPage: React.FC = () => {
                   <Send className="h-3.5 w-3.5" />
                   <span>Launch Now</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={handleOpenCancelModal}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-50 border border-rose-200 hover:bg-rose-100 text-rose-700 text-xs font-semibold transition-colors shadow-2xs cursor-pointer"
+                >
+                  <XCircle className="h-3.5 w-3.5" />
+                  <span>Stop Campaign</span>
+                </button>
               </>
             )}
 
@@ -977,11 +1015,17 @@ export const CampaignDetailPage: React.FC = () => {
                   <div className="flex items-center justify-between text-xs text-slate-500">
                     <span>Sending Window</span>
                     <span className="font-medium text-slate-800" data-testid="detail-sending-window">
-                      {campaign.sending_window?.enabled
-                        ? `${campaign.sending_window.start_time} - ${campaign.sending_window.end_time}`
-                        : "Unrestricted (24/7)"}
+                      {formatSendingWindow(campaign.sending_window)}
                     </span>
                   </div>
+                  {campaign.sending_window?.enabled && campaign.sending_window.timezone && (
+                    <div className="flex items-center justify-between text-xs text-slate-500">
+                      <span>Timezone</span>
+                      <span className="font-medium text-slate-800" data-testid="detail-timezone">
+                        {campaign.sending_window.timezone}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -1147,14 +1191,25 @@ export const CampaignDetailPage: React.FC = () => {
                         <span className="text-[10px] font-semibold text-emerald-600 flex items-center gap-0.5">
                           <Zap className="h-2.5 w-2.5 fill-emerald-600" /> Immediate
                         </span>
+                        {step1Item?.is_active === false ? (
+                          <span className="text-[10px] font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200" data-testid="step-1-status">
+                            Inactive
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100" data-testid="step-1-status">
+                            Active
+                          </span>
+                        )}
                       </div>
                     </div>
                     <p className="text-xs font-semibold text-slate-800 truncate">
                       <span>Subject: </span>
-                      <span className="font-semibold text-slate-800">{campaign.subject || "No subject set"}</span>
+                      <span className="font-semibold text-slate-800">
+                        {step1Item?.subject || "No subject set"}
+                      </span>
                     </p>
                     <p className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
-                      Initial outreach message dispatched immediately upon sequence launch.
+                      {step1Excerpt}
                     </p>
                   </div>
                 </div>
@@ -1199,6 +1254,15 @@ export const CampaignDetailPage: React.FC = () => {
                               <Clock className="h-2.5 w-2.5 text-slate-400" />
                               <span>Waits {delayText} if no reply</span>
                             </span>
+                            {step.is_active === false ? (
+                              <span className="text-[10px] font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200" data-testid={`step-${step.step_number}-status`}>
+                                Inactive
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100" data-testid={`step-${step.step_number}-status`}>
+                                Active
+                              </span>
+                            )}
                           </div>
                         </div>
                         <p className="text-xs font-semibold text-slate-800 truncate">
@@ -1625,10 +1689,16 @@ export const CampaignDetailPage: React.FC = () => {
               <p className="text-xs sm:text-sm font-semibold text-slate-900 truncate">
                 {campaign.scheduled_at ? "Scheduled Dispatch" : isDraft ? "Manual Dispatch" : campaign.status}
               </p>
-              <p className="text-xs text-slate-500">Requires final review before queue ingestion.</p>
+              <p className="text-xs text-slate-500">
+                {campaign.scheduled_at
+                  ? `Execution set for ${formatDate(campaign.scheduled_at)}`
+                  : isDraft
+                  ? "Requires final review before queue ingestion."
+                  : `Campaign in ${campaign.status} lifecycle`}
+              </p>
               <div className="pt-1 flex items-center justify-between text-xs text-slate-500">
                 <span>Interval: {formatSendInterval(campaign.send_interval_seconds)}</span>
-                <span>Window: {campaign.sending_window?.enabled ? "Scheduled" : "Unrestricted (24/7)"}</span>
+                <span data-testid="sequence-sending-window">Window: {formatSendingWindow(campaign.sending_window)}</span>
               </div>
             </div>
 
@@ -1710,16 +1780,29 @@ export const CampaignDetailPage: React.FC = () => {
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-bold text-xs text-slate-900">Initial Outreach</span>
-                      <span className="text-[10px] font-semibold text-emerald-600 flex items-center gap-0.5">
-                        <Zap className="h-2.5 w-2.5 fill-emerald-600" /> Immediate
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-semibold text-emerald-600 flex items-center gap-0.5">
+                          <Zap className="h-2.5 w-2.5 fill-emerald-600" /> Immediate
+                        </span>
+                        {step1Item?.is_active === false ? (
+                          <span className="text-[10px] font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                            Inactive
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100">
+                            Active
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <p className="text-xs font-semibold text-slate-800 truncate">
                       <span>Subject: </span>
-                      <span className="font-semibold text-slate-800">{campaign.subject || "No subject set"}</span>
+                      <span className="font-semibold text-slate-800">
+                        {step1Item?.subject || "No subject set"}
+                      </span>
                     </p>
                     <p className="text-[11px] text-slate-500 line-clamp-3 leading-relaxed">
-                      Initial outreach message dispatched immediately upon sequence launch.
+                      {step1Excerpt}
                     </p>
                   </div>
                 </div>
@@ -1757,9 +1840,20 @@ export const CampaignDetailPage: React.FC = () => {
                           <span className="font-bold text-xs text-slate-900">
                             Follow-Up #{idx + 1} (Step {step.step_number})
                           </span>
-                          <span className="text-[10px] text-slate-600 font-medium bg-white px-2 py-0.5 rounded border border-slate-200">
-                            Waits {delayText} if no reply
-                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-slate-600 font-medium bg-white px-2 py-0.5 rounded border border-slate-200">
+                              Waits {delayText} if no reply
+                            </span>
+                            {step.is_active === false ? (
+                              <span className="text-[10px] font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                                Inactive
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100">
+                                Active
+                              </span>
+                            )}
+                          </div>
                         </div>
                         <p className="text-xs font-semibold text-slate-800 truncate">
                           Subject: {step.subject || `Re: ${campaign.subject || "Campaign"}`}
@@ -2226,8 +2320,9 @@ export const CampaignDetailPage: React.FC = () => {
                   {(analytics?.steps && analytics.steps.length > 0 ? analytics.steps : [
                     {
                       step_number: 1,
-                      subject: campaign.subject,
+                      subject: step1Item?.subject || campaign.subject,
                       delay_hours: 0,
+                      is_active: step1Item?.is_active ?? true,
                       targeted_count: totalTarget,
                       sent_count: sentCount,
                       replied_count: repliedCount,
@@ -2239,8 +2334,9 @@ export const CampaignDetailPage: React.FC = () => {
                     },
                     ...followupSteps.map((s, idx) => ({
                       step_number: s.step_number || idx + 2,
-                      subject: s.subject || `Re: ${campaign.subject}`,
+                      subject: s.subject || `Step ${s.step_number || idx + 2}`,
                       delay_hours: s.delay_hours,
+                      is_active: s.is_active ?? true,
                       targeted_count: totalTarget,
                       sent_count: 0,
                       replied_count: 0,
@@ -2253,6 +2349,12 @@ export const CampaignDetailPage: React.FC = () => {
                   ]).map((stepItem: any, idx: number) => {
                     const stepNum = stepItem.step_number || idx + 1;
                     const stepName = stepNum === 1 ? "Initial Outreach" : `Follow-Up #${stepNum - 1}`;
+                    const stepActive =
+                      stepItem.is_active !== undefined
+                        ? stepItem.is_active !== false
+                        : stepNum === 1
+                        ? step1Item?.is_active !== false
+                        : followupSteps.find((f) => f.step_number === stepNum)?.is_active !== false;
                     const delRate = Math.round(stepItem.delivery_rate || 0);
                     const bncRate = Math.round(stepItem.bounce_rate || 0);
                     const failRate = totalTarget > 0 ? Math.round(((stepItem.failed_count || 0) / totalTarget) * 100) : 0;
@@ -2274,16 +2376,23 @@ export const CampaignDetailPage: React.FC = () => {
                               </span>
                             ) : (
                               <span className="text-[10px] text-slate-500 font-medium bg-slate-100 px-1.5 py-0.2 rounded">
-                                Waits {stepItem.delay_hours ? `${stepItem.delay_hours}h` : "1h"}
+                                Waits {stepItem.delay_hours !== undefined ? `${stepItem.delay_hours}h` : "1h"}
                               </span>
                             )}
                           </div>
                         </td>
                         <td className="py-3 px-3">
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200/60">
-                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-                            <span>{campaign.status === "DRAFT" ? "Pending" : campaign.status}</span>
-                          </span>
+                          {stepActive ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 select-none">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                              <span>{campaign.status === "DRAFT" ? "Pending" : "Active"}</span>
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-neutral-100 text-neutral-600 border border-neutral-200 select-none">
+                              <span className="w-1.5 h-1.5 rounded-full bg-neutral-400" />
+                              <span>Inactive</span>
+                            </span>
+                          )}
                         </td>
                         <td className="py-3 px-3 text-center font-medium">{stepItem.targeted_count ?? totalTarget}</td>
                         <td className="py-3 px-3 text-center font-medium">{stepItem.sent_count ?? 0}</td>

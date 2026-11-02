@@ -15,6 +15,7 @@ import {
   Loader2,
   Archive,
   RotateCcw,
+  XCircle,
 } from "lucide-react";
 import type { Campaign } from "../../types/campaign";
 import type { AuthorizedEmailAccount } from "../../types/emails";
@@ -140,6 +141,7 @@ export const CampaignTableRow: React.FC<CampaignTableRowProps> = ({
   onView,
   onEdit,
   onManageRecipients,
+  onCancel,
   onArchive,
   onRestore,
   onDelete,
@@ -159,6 +161,7 @@ export const CampaignTableRow: React.FC<CampaignTableRowProps> = ({
   const status = (campaign.status || "").toUpperCase();
   const isDraft = status === "DRAFT";
   const isArchived = status === "ARCHIVED";
+  const isCancellable = ["SCHEDULED", "QUEUED", "RUNNING", "PAUSED"].includes(status);
   const isArchivable = ["DRAFT", "COMPLETED", "CANCELLED", "FAILED"].includes(status);
   const isDeletable = ["DRAFT", "COMPLETED", "CANCELLED", "FAILED", "ARCHIVED"].includes(status);
 
@@ -307,7 +310,21 @@ export const CampaignTableRow: React.FC<CampaignTableRowProps> = ({
                 </Tooltip>
               )}
 
-              {/* 4. Archive Campaign */}
+              {/* 4. Stop / Cancel Campaign */}
+              {isCancellable && onCancel && (
+                <Tooltip content={status === "SCHEDULED" ? "Stop scheduled campaign" : "Cancel campaign"} side="top">
+                  <button
+                    type="button"
+                    onClick={() => onCancel(campaign)}
+                    aria-label={status === "SCHEDULED" ? "Stop scheduled campaign" : "Cancel campaign"}
+                    className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors focus:outline-none focus:ring-1 focus:ring-rose-500 cursor-pointer"
+                  >
+                    <XCircle className="h-4 w-4" />
+                  </button>
+                </Tooltip>
+              )}
+
+              {/* 5. Archive Campaign */}
               {isArchivable && onArchive && (
                 <Tooltip content="Archive campaign" side="top">
                   <button

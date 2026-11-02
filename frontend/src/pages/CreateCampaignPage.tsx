@@ -188,16 +188,19 @@ export function CreateCampaignPage({
   useEffect(() => {
     if (existingCampaign && !hasInitializedFromExistingRef.current) {
       if (existingCampaign.status === "DRAFT") {
+        const step1 = existingCampaign.steps?.find((s) => s.step_number === 1);
         setName(existingCampaign.name);
-        setSubject(existingCampaign.subject || "");
+        setSubject(existingCampaign.subject || step1?.subject || "");
         if (existingCampaign.email_account_id) {
           setSelectedEmailAccountId(existingCampaign.email_account_id);
         }
-        if (existingCampaign.body_html !== undefined && existingCampaign.body_html !== null) {
-          setBodyHtml(existingCampaign.body_html);
+        const effectiveHtml = existingCampaign.body_html ?? step1?.body_html;
+        if (effectiveHtml !== undefined && effectiveHtml !== null) {
+          setBodyHtml(effectiveHtml);
         }
-        if (existingCampaign.body_text !== undefined && existingCampaign.body_text !== null) {
-          setBodyText(existingCampaign.body_text);
+        const effectiveText = existingCampaign.body_text ?? step1?.body_text;
+        if (effectiveText !== undefined && effectiveText !== null) {
+          setBodyText(effectiveText);
         }
         if (existingCampaign.attachments) {
           setAttachments(existingCampaign.attachments);
@@ -552,9 +555,10 @@ export function CreateCampaignPage({
 
     try {
       const updatedCampaign = await campaignsApi.importDraft(currentCompanyId, targetCampId, draftId);
-      setSubject(updatedCampaign.subject || "");
-      setBodyHtml(updatedCampaign.body_html || "");
-      setBodyText(updatedCampaign.body_text || "");
+      const step1 = updatedCampaign.steps?.find((s) => s.step_number === 1);
+      setSubject(updatedCampaign.subject || step1?.subject || "");
+      setBodyHtml(updatedCampaign.body_html || step1?.body_html || "");
+      setBodyText(updatedCampaign.body_text || step1?.body_text || "");
       if (updatedCampaign.attachments) {
         setAttachments(updatedCampaign.attachments);
       }
@@ -570,7 +574,12 @@ export function CreateCampaignPage({
   };
 
   const handleSelectTemplate = (template: EmailTemplateItem) => {
-    if (template.subject) {
+    // Only adopt template subject if the campaign does not already have a subject configured,
+    // and never if the template subject is an email address.
+    const isEmailLike = Boolean(
+      template.subject && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(template.subject.trim())
+    );
+    if (template.subject && !subject.trim() && !isEmailLike) {
       setSubject(template.subject);
     }
     if (template.body_html) {
@@ -590,32 +599,7 @@ export function CreateCampaignPage({
     showToast("Template applied.", "info");
   };
 
-  const handleSelectSignature = (signature: EmailSignatureItem) => {
-    const rawSigHtml =
-      signature.body_html ||
-      (signature.body_text ? `<p>${signature.body_text.replace(/\n/g, "<br/>")}</p>` : "");
-    const cleanSigHtml = rawSigHtml
-      ? DOMPurify.sanitize(rawSigHtml, { ADD_ATTR: ["target"] })
-      : "";
-    const cleanSigText = (
-      signature.body_text ||
-      cleanSigHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ")
-    ).trim();
-
-    setBodyHtml((prevHtml) => {
-      if (cleanSigHtml && prevHtml.includes(cleanSigHtml)) {
-        return prevHtml;
-      }
-      return prevHtml ? `${prevHtml}<br/><br/>${cleanSigHtml}` : cleanSigHtml;
-    });
-
-    setBodyText((prevText) => {
-      if (cleanSigText && prevText && prevText.includes(cleanSigText)) {
-        return prevText;
-      }
-      return prevText ? `${prevText}\n\n${cleanSigText}` : cleanSigText;
-    });
-
+  const handleSelectSignature = (_signature: EmailSignatureItem) => {
     setIsDirty(true);
     showToast("Signature inserted.", "info");
   };

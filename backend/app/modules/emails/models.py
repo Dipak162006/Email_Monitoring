@@ -363,6 +363,8 @@ class EmailAttachment(Base):
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)
     storage_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    disposition: Mapped[str] = mapped_column(String(50), default="attachment", server_default="attachment", nullable=False)
+    content_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

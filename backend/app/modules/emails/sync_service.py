@@ -190,6 +190,8 @@ class EmailSyncService:
                             file_name=att.filename,
                             content_type=att.content_type,
                             content_bytes=att.content_bytes,
+                            disposition="inline" if att.is_inline else "attachment",
+                            content_id=att.content_id,
                         )
                 continue
 
@@ -300,6 +302,8 @@ class EmailSyncService:
                         file_name=att.filename,
                         content_type=att.content_type,
                         content_bytes=att.content_bytes,
+                        disposition="inline" if att.is_inline else "attachment",
+                        content_id=att.content_id,
                     )
 
             new_messages += 1

@@ -149,6 +149,24 @@ class CampaignService:
             email_account_id=campaign_in.email_account_id,
         )
 
+        now_utc = datetime.now(timezone.utc)
+        initial_status = CampaignStatus.DRAFT.value
+        validated_scheduled_at = None
+
+        if campaign_in.scheduled_at is not None:
+            target_time = (
+                campaign_in.scheduled_at
+                if campaign_in.scheduled_at.tzinfo
+                else campaign_in.scheduled_at.replace(tzinfo=timezone.utc)
+            )
+            if target_time <= now_utc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="scheduled_at must be in the future.",
+                )
+            validated_scheduled_at = target_time
+            initial_status = CampaignStatus.SCHEDULED.value
+
         campaign = Campaign(
             company_id=company_id,
             email_account_id=campaign_in.email_account_id,
@@ -156,8 +174,9 @@ class CampaignService:
             subject=campaign_in.subject,
             body_text=campaign_in.body_text,
             body_html=campaign_in.body_html,
+            scheduled_at=validated_scheduled_at,
             send_interval_seconds=campaign_in.send_interval_seconds,
-            status=CampaignStatus.DRAFT.value,
+            status=initial_status,
             created_by_user_id=creator_user_id,
             sending_window=campaign_in.sending_window.model_dump() if campaign_in.sending_window else None,
         )
@@ -180,8 +199,8 @@ class CampaignService:
         if campaign_in.followup_steps:
             for idx, f_step in enumerate(campaign_in.followup_steps, start=2):
                 subj = (f_step.subject or "").strip()
-                if not subj:
-                    subj = f"Re: {campaign.subject}"[:255] if campaign.subject else "Follow-up"
+                if not subj or (subj.startswith("Re: ") and "@" in subj and "@" not in (campaign.subject or "")):
+                    subj = ""
                 step_item = CampaignStep(
                     campaign_id=campaign.id,
                     step_number=idx,
@@ -194,8 +213,9 @@ class CampaignService:
                 )
                 db.add(step_item)
 
+        campaign_id = campaign.id
         await db.commit()
-        return await CampaignService.get_campaign(db, company_id, campaign.id)
+        return await CampaignService.get_campaign(db, company_id, campaign_id)
 
     @staticmethod
     async def get_campaign(
@@ -282,16 +302,31 @@ class CampaignService:
     ) -> Campaign:
         """Update campaign configuration fields.
         
-        Only campaigns in DRAFT status may be modified.
+        Only campaigns in DRAFT or SCHEDULED status may be modified.
         If email_account_id is changed, validates company ownership and active state.
         Direct updates to status or lifecycle timestamps are rejected.
         """
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        stmt = (
+            select(Campaign)
+            .where(
+                Campaign.id == campaign_id,
+                Campaign.company_id == company_id,
+            )
+            .with_for_update()
+        )
+        result = await db.execute(stmt)
+        campaign = result.scalar_one_or_none()
 
-        if campaign.status != CampaignStatus.DRAFT.value:
+        if not campaign:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Campaign not found.",
+            )
+
+        if campaign.status not in {CampaignStatus.DRAFT.value, CampaignStatus.SCHEDULED.value}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot edit campaign with status '{campaign.status}'. Only DRAFT campaigns can be edited.",
+                detail=f"Cannot edit campaign with status '{campaign.status}'. Only DRAFT or SCHEDULED campaigns can be edited.",
             )
 
         update_data = campaign_update.model_dump(exclude_unset=True)
@@ -304,6 +339,27 @@ class CampaignService:
                 company_id=company_id,
                 email_account_id=update_data["email_account_id"],
             )
+
+        # Handle scheduled_at and status transition
+        if "scheduled_at" in update_data:
+            sched_val = update_data.pop("scheduled_at")
+            if sched_val is not None:
+                now_utc = datetime.now(timezone.utc)
+                target_time = sched_val if sched_val.tzinfo else sched_val.replace(tzinfo=timezone.utc)
+                if target_time <= now_utc:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="scheduled_at must be in the future.",
+                    )
+                campaign.scheduled_at = target_time
+                campaign.status = CampaignStatus.SCHEDULED.value
+                campaign.next_send_at = None
+                campaign.started_at = None
+                campaign.completed_at = None
+            else:
+                campaign.scheduled_at = None
+                if campaign.status == CampaignStatus.SCHEDULED.value:
+                    campaign.status = CampaignStatus.DRAFT.value
 
         for field, value in update_data.items():
             setattr(campaign, field, value)
@@ -318,10 +374,16 @@ class CampaignService:
             if step_1:
                 if "subject" in update_data and update_data["subject"] is not None:
                     step_1.subject = update_data["subject"]
+                elif campaign.subject and not step_1.subject:
+                    step_1.subject = campaign.subject
                 if "body_text" in update_data:
                     step_1.body_text = update_data["body_text"]
+                elif campaign.body_text is not None and step_1.body_text is None:
+                    step_1.body_text = campaign.body_text
                 if "body_html" in update_data:
                     step_1.body_html = update_data["body_html"]
+                elif campaign.body_html is not None and step_1.body_html is None:
+                    step_1.body_html = campaign.body_html
             else:
                 new_step_1 = CampaignStep(
                     campaign_id=campaign.id,
@@ -346,8 +408,8 @@ class CampaignService:
             if followup_steps_in:
                 for idx, f_step in enumerate(followup_steps_in, start=2):
                     subj = (f_step.get("subject") or "").strip()
-                    if not subj:
-                        subj = f"Re: {campaign.subject}"[:255] if campaign.subject else "Follow-up"
+                    if not subj or (subj.startswith("Re: ") and "@" in subj and "@" not in (campaign.subject or "")):
+                        subj = ""
                     step_item = CampaignStep(
                         campaign_id=campaign.id,
                         step_number=idx,
@@ -360,8 +422,10 @@ class CampaignService:
                     )
                     db.add(step_item)
 
+        campaign_id = campaign.id
         await db.commit()
-        return await CampaignService.get_campaign(db, company_id, campaign.id)
+        db.expire(campaign, ["steps"])
+        return await CampaignService.get_campaign(db, company_id, campaign_id)
 
     @staticmethod
     async def delete_campaign(
@@ -487,6 +551,9 @@ class CampaignService:
                 )
             campaign.scheduled_at = target_time
             campaign.status = CampaignStatus.SCHEDULED.value
+            campaign.next_send_at = None
+            campaign.started_at = None
+            campaign.completed_at = None
         else:
             # If already in SCHEDULED, scheduled_at cannot be omitted to reschedule
             if campaign.status == CampaignStatus.SCHEDULED.value:
@@ -600,18 +667,21 @@ class CampaignService:
             )
         campaign = await CampaignService.transition_state(db, company_id, campaign_id, CampaignStatus.CANCELLED)
         
-        # Safely transition any pending/active recipients to STOPPED without touching already stopped or completed recipients
+        # Safely transition any pending/active/sent recipients to STOPPED and clear pending follow-ups
         recip_stmt = select(CampaignRecipient).where(
             CampaignRecipient.campaign_id == campaign_id,
             CampaignRecipient.status.in_([
                 CampaignRecipientStatus.ACTIVE.value,
                 CampaignRecipientStatus.PENDING.value,
+                CampaignRecipientStatus.SENT.value,
             ]),
         )
         recips_res = await db.execute(recip_stmt)
         for recip in recips_res.scalars().all():
-            recip.status = CampaignRecipientStatus.STOPPED.value
-            recip.stopped_reason = CampaignRecipientStopReason.CAMPAIGN_CANCELLED.value
+            recip.next_step_due_at = None
+            if recip.status != CampaignRecipientStatus.COMPLETED.value:
+                recip.status = CampaignRecipientStatus.STOPPED.value
+                recip.stopped_reason = CampaignRecipientStopReason.CAMPAIGN_CANCELLED.value
 
         await db.commit()
         return campaign
@@ -797,7 +867,9 @@ class CampaignService:
         email_account = campaign.__dict__.get("email_account")
         recipients = campaign.__dict__.get("recipients")
         attachments = campaign.__dict__.get("attachments") or []
-        steps_models = campaign.__dict__.get("steps") or []
+        steps_models = campaign.__dict__.get("steps")
+        if steps_models is None:
+            steps_models = getattr(campaign, "steps", None) or []
 
         counts = status_counts or {}
         final_count = (
@@ -807,17 +879,40 @@ class CampaignService:
         )
 
         sorted_steps = sorted(steps_models, key=lambda s: s.step_number)
-        steps_read = [CampaignStepRead.model_validate(s) for s in sorted_steps]
-        followup_steps_read = [s for s in steps_read if s.step_number >= 2 and s.is_active]
+        step_1_model = next((s for s in sorted_steps if s.step_number == 1), None)
+
+        effective_subject = campaign.subject or (step_1_model.subject if step_1_model else "")
+        effective_body_text = campaign.body_text or (step_1_model.body_text if step_1_model else None)
+        effective_body_html = campaign.body_html or (step_1_model.body_html if step_1_model else None)
+
+        steps_read = []
+        for s in sorted_steps:
+            sr = CampaignStepRead.model_validate(s)
+            if sr.step_number == 1:
+                sr = sr.model_copy(
+                    update={
+                        "subject": effective_subject or sr.subject,
+                        "body_text": effective_body_text if effective_body_text is not None else sr.body_text,
+                        "body_html": effective_body_html if effective_body_html is not None else sr.body_html,
+                    }
+                )
+            elif sr.step_number >= 2:
+                resolved_subj = sr.subject
+                if not resolved_subj or resolved_subj == "Follow-up" or (resolved_subj.startswith("Re: ") and ("@" in resolved_subj and "@" not in effective_subject)):
+                    resolved_subj = f"Re: {effective_subject}"[:255] if effective_subject else "Follow-up"
+                sr = sr.model_copy(update={"subject": resolved_subj})
+            steps_read.append(sr)
+
+        followup_steps_read = [s for s in steps_read if s.step_number >= 2]
 
         return CampaignDetailRead(
             id=campaign.id,
             company_id=campaign.company_id,
             email_account_id=campaign.email_account_id,
             name=campaign.name,
-            subject=campaign.subject,
-            body_text=campaign.body_text,
-            body_html=campaign.body_html,
+            subject=effective_subject,
+            body_text=effective_body_text,
+            body_html=effective_body_html,
             status=campaign.status,
             scheduled_at=campaign.scheduled_at,
             started_at=campaign.started_at,
@@ -841,6 +936,7 @@ class CampaignService:
             attachments=[CampaignAttachmentRead.model_validate(a) for a in attachments],
             steps=steps_read,
             followup_steps=followup_steps_read,
+            sending_window=getattr(campaign, "sending_window", None),
         )
 
     @staticmethod

@@ -116,13 +116,25 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
   initialStepNumber,
 }) => {
   // Selected Step State (1 = Initial Outreach, 2..10 = Follow-ups)
-  const [selectedStepNumber, setSelectedStepNumber] = useState<number>(
-    initialStepNumber !== undefined
-      ? initialStepNumber
-      : followupSteps && followupSteps.length > 0
-      ? 2
-      : 1
-  );
+  const [selectedStepNumber, setSelectedStepNumber] = useState<number>(() => {
+    if (initialStepNumber !== undefined && Number.isFinite(initialStepNumber)) {
+      const maxStep = (followupSteps?.length ?? 0) + 1;
+      return Math.min(Math.max(1, initialStepNumber), Math.max(1, maxStep));
+    }
+    return 1;
+  });
+
+  const prevInitialStepNumberRef = useRef(initialStepNumber);
+  useEffect(() => {
+    if (
+      initialStepNumber !== undefined &&
+      initialStepNumber !== prevInitialStepNumberRef.current
+    ) {
+      prevInitialStepNumberRef.current = initialStepNumber;
+      const maxStep = (followupSteps?.length ?? 0) + 1;
+      setSelectedStepNumber(Math.min(Math.max(1, initialStepNumber), Math.max(1, maxStep)));
+    }
+  }, [initialStepNumber, followupSteps?.length]);
 
   // Keep selection valid if steps change
   const clampedStepNumber = Math.min(
@@ -147,6 +159,7 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
   const [testSendSuccess, setTestSendSuccess] = useState(false);
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
 
+  const [isSubjectFocused, setIsSubjectFocused] = useState(false);
   // View mode tab for the active step ("edit" vs "preview")
   const [activeTab, setActiveTab] = useState<"edit" | "preview">("edit");
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -466,7 +479,10 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
     if (onSelectTemplate) {
       onSelectTemplate(template);
     } else {
-      if (template.subject) {
+      const isEmailLike = Boolean(
+        template.subject && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(template.subject.trim())
+      );
+      if (template.subject && (!isInitialStep || !subject.trim()) && !isEmailLike) {
         handleActiveSubjectChange(template.subject);
       }
       if (template.body_html) {
@@ -497,14 +513,26 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
       rawSigHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ")
     ).trim();
 
-    const isAlreadyInHtml = Boolean(cleanSigHtml && currentBodyHtml.includes(cleanSigHtml));
-    const isAlreadyInText = Boolean(cleanSigText && currentBodyText && currentBodyText.includes(cleanSigText));
+    const normalizeForCheck = (str: string) =>
+      str.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
 
-    if (!isAlreadyInHtml && !isAlreadyInText && (cleanSigHtml || cleanSigText)) {
+    const normalizedSigText = normalizeForCheck(cleanSigText || cleanSigHtml);
+    const normalizedBodyHtml = normalizeForCheck(currentBodyHtml);
+    const normalizedBodyText = normalizeForCheck(currentBodyText);
+
+    const isAlreadyInBody = Boolean(
+      normalizedSigText &&
+      (normalizedBodyHtml.includes(normalizedSigText) || normalizedBodyText.includes(normalizedSigText))
+    );
+
+    if (!isAlreadyInBody && (cleanSigHtml || cleanSigText)) {
       const updatedHtml = currentBodyHtml ? `${currentBodyHtml}<br/><br/>${cleanSigHtml}` : cleanSigHtml;
       const updatedText = currentBodyText ? `${currentBodyText}\n\n${cleanSigText}` : cleanSigText;
-      handleActiveBodyChange(updatedHtml, updatedText);
-      richEditorRef.current?.setHtml(updatedHtml);
+      if (richEditorRef.current) {
+        richEditorRef.current.setHtml(updatedHtml);
+      } else {
+        handleActiveBodyChange(updatedHtml, updatedText);
+      }
     }
 
     if (onSelectSignature) {
@@ -1125,7 +1153,10 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
                 </span>
                 <button
                   type="button"
-                  onClick={() => handleActiveSubjectChange(`${currentSubject} {{first_name}}`.trim())}
+                  onClick={() => {
+                    setIsSubjectFocused(true);
+                    handleActiveSubjectChange(`${currentSubject} {{first_name}}`.trim());
+                  }}
                   className="text-xs font-semibold text-indigo-600 hover:text-indigo-700 transition-colors flex items-center gap-1 cursor-pointer"
                 >
                   <Plus className="h-3.5 w-3.5" />
@@ -1136,7 +1167,10 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
 
             <input
               id="step-subject-input"
+              name="pulsemail_step_headline"
               type="text"
+              readOnly={!isSubjectFocused}
+              onFocus={() => setIsSubjectFocused(true)}
               value={currentSubject}
               onChange={(e) => handleActiveSubjectChange(e.target.value)}
               placeholder={
@@ -1144,6 +1178,12 @@ export const CampaignContentStep: React.FC<CampaignContentStepProps> = ({
                   ? "e.g. Exclusive invite for {{first_name}}"
                   : `Re: ${subject || "Campaign Subject"}`
               }
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={true}
+              data-lpignore="true"
+              data-1p-ignore="true"
+              data-form-type="other"
               className="w-full px-3.5 py-2.5 rounded-lg border border-slate-200 bg-slate-50/40 hover:bg-white focus:bg-white text-sm text-slate-900 font-medium focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-all shadow-2xs"
             />
 

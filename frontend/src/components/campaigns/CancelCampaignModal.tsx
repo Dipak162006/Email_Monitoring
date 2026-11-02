@@ -43,9 +43,15 @@ export const CancelCampaignModal: React.FC<CancelCampaignModalProps> = ({
 
   switch (mode) {
     case "cancel":
-      title = `Cancel ${campaign.status === "SCHEDULED" ? "Scheduled " : ""}Campaign?`;
-      description = `The campaign "${campaign.name}" will halt all pending deliveries and transition permanently to CANCELLED. This action cannot be undone.`;
-      confirmButtonText = "Cancel Campaign";
+      if (campaign.status === "SCHEDULED") {
+        title = "Stop Scheduled Campaign?";
+        description = `Are you sure you want to stop this scheduled campaign? The scheduled execution of "${campaign.name}" will be cancelled, and no outreach emails will be dispatched. Campaign content, recipients, and sequence settings will be preserved.`;
+        confirmButtonText = "Stop Scheduled Campaign";
+      } else {
+        title = "Cancel Campaign?";
+        description = `The campaign "${campaign.name}" will halt all pending deliveries and transition permanently to CANCELLED. This action cannot be undone.`;
+        confirmButtonText = "Cancel Campaign";
+      }
       break;
     case "delete":
       title = `Delete ${campaign.status === "DRAFT" ? "Draft " : campaign.status === "ARCHIVED" ? "Archived " : ""}Campaign?`;

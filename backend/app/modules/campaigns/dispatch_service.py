@@ -122,7 +122,10 @@ class CampaignDispatchService:
         # 5. Mark pre-suppressed recipients as SUPPRESSED upon dispatch
         recip_stmt = select(CampaignRecipient).where(
             CampaignRecipient.campaign_id == campaign.id,
-            CampaignRecipient.status == CampaignRecipientStatus.PENDING.value,
+            CampaignRecipient.status.in_([
+                CampaignRecipientStatus.PENDING.value,
+                CampaignRecipientStatus.ACTIVE.value,
+            ]),
         )
         recip_res = await db.execute(recip_stmt)
         pending_recips = list(recip_res.scalars().all())
@@ -250,7 +253,10 @@ class CampaignDispatchService:
         # Mark pre-suppressed recipients as SUPPRESSED upon dispatch
         recip_stmt = select(CampaignRecipient).where(
             CampaignRecipient.campaign_id == campaign.id,
-            CampaignRecipient.status == CampaignRecipientStatus.PENDING.value,
+            CampaignRecipient.status.in_([
+                CampaignRecipientStatus.PENDING.value,
+                CampaignRecipientStatus.ACTIVE.value,
+            ]),
         )
         recip_res = await db.execute(recip_stmt)
         pending_recips = list(recip_res.scalars().all())

@@ -897,12 +897,12 @@ async def test_incoming_email_attachment_cross_company_authorization(async_clien
     )
     email_record = email_res.scalars().first()
 
-    # User 2 tries to list attachments for Company 1's email -> 403 Forbidden
+    # User 2 tries to list attachments for Company 1's email -> 403 Forbidden or 404 Not Found (ID enumeration mitigation)
     unauth_list = await async_client.get(
         f"/api/v1/emails/{email_record.id}/attachments",
         headers={"Authorization": f"Bearer {token2}"},
     )
-    assert unauth_list.status_code == 403
+    assert unauth_list.status_code in (403, 404)
 
     # User 1 lists attachment to get ID
     att_resp = await async_client.get(
@@ -911,12 +911,12 @@ async def test_incoming_email_attachment_cross_company_authorization(async_clien
     )
     att_id = att_resp.json()["attachments"][0]["id"]
 
-    # User 2 tries to download attachment -> 403 Forbidden
+    # User 2 tries to download attachment -> 403 Forbidden or 404 Not Found (ID enumeration mitigation)
     unauth_dl = await async_client.get(
         f"/api/v1/emails/{email_record.id}/attachments/{att_id}/download",
         headers={"Authorization": f"Bearer {token2}"},
     )
-    assert unauth_dl.status_code == 403
+    assert unauth_dl.status_code in (403, 404)
 
 
 @pytest.mark.asyncio

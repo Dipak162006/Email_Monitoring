@@ -262,6 +262,238 @@ async def test_get_campaign_detail(async_client: AsyncClient):
     assert detail["failed_count"] == 0
     assert detail["bounced_count"] == 0
     assert detail["suppressed_count"] == 0
+    assert detail["sending_window"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_campaign_detail_sending_window(async_client: AsyncClient):
+    """Test retrieving campaign detail schema correctly returns the configured sending_window."""
+    token = await register_and_login(async_client, "win_detail_owner@co.com", "Window Owner")
+    company_id = await create_company_helper(async_client, token, "Window Co")
+    account_id = await create_email_account_helper(async_client, token, company_id, "send_win@detail.com", "Sender Box")
+
+    window_config = {
+        "enabled": True,
+        "timezone": "America/New_York",
+        "days": [1, 2, 3, 4, 5],
+        "start_time": "09:00",
+        "end_time": "17:00",
+    }
+
+    create_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Window Detail Campaign",
+            "email_account_id": account_id,
+            "subject": "Window Detail Subject",
+            "sending_window": window_config,
+        },
+    )
+    assert create_resp.status_code == 201
+    camp_id = create_resp.json()["id"]
+
+    resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    detail = resp.json()
+    assert detail["id"] == camp_id
+    assert detail["name"] == "Window Detail Campaign"
+    assert detail["sending_window"] is not None
+    assert detail["sending_window"]["enabled"] is True
+    assert detail["sending_window"]["timezone"] == "America/New_York"
+    assert detail["sending_window"]["days"] == [1, 2, 3, 4, 5]
+    assert detail["sending_window"]["start_time"] == "09:00"
+    assert detail["sending_window"]["end_time"] == "17:00"
+
+
+@pytest.mark.asyncio
+async def test_campaign_followup_steps_serialization(async_client: AsyncClient):
+    """Test that campaign create, detail, update, and list endpoints accurately serialize persisted follow-up steps."""
+    token = await register_and_login(async_client, "followup_owner@co.com", "Followup Owner")
+    company_id = await create_company_helper(async_client, token, "Followup Co")
+    account_id = await create_email_account_helper(async_client, token, company_id, "followup@detail.com", "Followup Box")
+
+    followup_steps_in = [
+        {
+            "step_number": 2,
+            "delay_hours": 48,
+            "subject": "Quick check-in #1",
+            "body_text": "Did you see my previous email?",
+            "body_html": "<p>Did you see my previous email?</p>",
+            "target_tags": ["lead", "active"],
+            "is_active": True,
+        },
+        {
+            "step_number": 3,
+            "delay_hours": 96,
+            "subject": "Final closing note",
+            "body_text": "Closing the loop here.",
+            "body_html": "<p>Closing the loop here.</p>",
+            "target_tags": [],
+            "is_active": False,
+        },
+    ]
+
+    # 1. Create campaign with follow-up steps
+    create_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Multi-Step Campaign",
+            "email_account_id": account_id,
+            "subject": "Initial Pitch",
+            "body_text": "Initial Body Text",
+            "body_html": "<p>Initial Body HTML</p>",
+            "followup_steps": followup_steps_in,
+        },
+    )
+    assert create_resp.status_code == 201
+    created_data = create_resp.json()
+    camp_id = created_data["id"]
+
+    # Verify create response serializes follow-up steps accurately
+    assert len(created_data["followup_steps"]) == 2
+    assert created_data["followup_steps"][0]["step_number"] == 2
+    assert created_data["followup_steps"][0]["delay_hours"] == 48
+    assert created_data["followup_steps"][0]["subject"] == "Quick check-in #1"
+    assert created_data["followup_steps"][0]["body_text"] == "Did you see my previous email?"
+    assert created_data["followup_steps"][0]["body_html"] == "<p>Did you see my previous email?</p>"
+    assert created_data["followup_steps"][0]["target_tags"] == ["lead", "active"]
+    assert created_data["followup_steps"][0]["is_active"] is True
+
+    assert created_data["followup_steps"][1]["step_number"] == 3
+    assert created_data["followup_steps"][1]["delay_hours"] == 96
+    assert created_data["followup_steps"][1]["subject"] == "Final closing note"
+    assert created_data["followup_steps"][1]["is_active"] is False
+
+    # Steps list includes Step 1 plus follow-up steps without duplication
+    assert len(created_data["steps"]) == 3
+    assert created_data["steps"][0]["step_number"] == 1
+    assert created_data["steps"][0]["subject"] == "Initial Pitch"
+
+    # 2. Get campaign detail
+    detail_resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert detail_resp.status_code == 200
+    detail_data = detail_resp.json()
+    assert len(detail_data["followup_steps"]) == 2
+    assert detail_data["followup_steps"][0]["step_number"] == 2
+    assert detail_data["followup_steps"][0]["subject"] == "Quick check-in #1"
+    assert detail_data["followup_steps"][0]["delay_hours"] == 48
+    assert detail_data["followup_steps"][0]["body_text"] == "Did you see my previous email?"
+    assert detail_data["followup_steps"][0]["body_html"] == "<p>Did you see my previous email?</p>"
+    assert detail_data["followup_steps"][1]["step_number"] == 3
+    assert detail_data["followup_steps"][1]["is_active"] is False
+    assert len(detail_data["steps"]) == 3
+
+    # 3. Update campaign follow-up steps
+    updated_followup_in = [
+        {
+            "step_number": 2,
+            "delay_hours": 72,
+            "subject": "Updated single bump",
+            "body_text": "Single follow-up body",
+            "body_html": "<p>Single follow-up body</p>",
+            "target_tags": ["vip"],
+            "is_active": True,
+        }
+    ]
+    patch_resp = await async_client.patch(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"followup_steps": updated_followup_in},
+    )
+    assert patch_resp.status_code == 200
+    patched_data = patch_resp.json()
+    assert len(patched_data["followup_steps"]) == 1
+    assert patched_data["followup_steps"][0]["step_number"] == 2
+    assert patched_data["followup_steps"][0]["delay_hours"] == 72
+    assert patched_data["followup_steps"][0]["subject"] == "Updated single bump"
+
+    # 4. List campaigns verifies followup_steps serialization
+    list_resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert list_resp.status_code == 200
+    campaign_list = list_resp.json()
+    found = next((c for c in campaign_list if c["id"] == camp_id), None)
+    assert found is not None
+    assert len(found["followup_steps"]) == 1
+    assert found["followup_steps"][0]["step_number"] == 2
+
+
+@pytest.mark.asyncio
+async def test_campaign_step_1_content_synchronization_and_persistence(async_client: AsyncClient):
+    """Test that Step 1 content is fully synchronized and preserved across create, update, and detail retrieval."""
+    token = await register_and_login(async_client, "step1_sync_owner@co.com", "Step1 Sync Owner")
+    company_id = await create_company_helper(async_client, token, "Step1 Sync Co")
+    account_id = await create_email_account_helper(async_client, token, company_id, "step1@detail.com", "Step1 Box")
+
+    create_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Testing_Campaign 1",
+            "email_account_id": account_id,
+            "subject": "Initial Custom Subject Line",
+            "body_html": "<p>Hello <strong>World</strong></p>",
+            "body_text": "Hello World",
+        },
+    )
+    assert create_resp.status_code == 201
+    camp = create_resp.json()
+    camp_id = camp["id"]
+    assert camp["subject"] == "Initial Custom Subject Line"
+    assert camp["body_html"] == "<p>Hello <strong>World</strong></p>"
+    assert camp["body_text"] == "Hello World"
+    assert len(camp["steps"]) == 1
+    assert camp["steps"][0]["step_number"] == 1
+    assert camp["steps"][0]["subject"] == "Initial Custom Subject Line"
+    assert camp["steps"][0]["body_html"] == "<p>Hello <strong>World</strong></p>"
+
+    # Detail GET verifies consistent synchronization
+    detail_resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert detail_resp.status_code == 200
+    detail = detail_resp.json()
+    assert detail["subject"] == "Initial Custom Subject Line"
+    assert detail["body_html"] == "<p>Hello <strong>World</strong></p>"
+    assert detail["steps"][0]["subject"] == "Initial Custom Subject Line"
+    assert detail["steps"][0]["body_html"] == "<p>Hello <strong>World</strong></p>"
+
+    # Update subject and body
+    patch_resp = await async_client.patch(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "subject": "Updated Authoritative Subject Line",
+            "body_html": "<p>Updated Body Content</p>",
+        },
+    )
+    assert patch_resp.status_code == 200
+    patched = patch_resp.json()
+    assert patched["subject"] == "Updated Authoritative Subject Line"
+    assert patched["body_html"] == "<p>Updated Body Content</p>"
+
+    # Verify detail reflects updated Step 1 without data corruption
+    detail_resp2 = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert detail_resp2.status_code == 200
+    detail2 = detail_resp2.json()
+    assert detail2["subject"] == "Updated Authoritative Subject Line"
+    assert detail2["body_html"] == "<p>Updated Body Content</p>"
+    assert detail2["steps"][0]["subject"] == "Updated Authoritative Subject Line"
+    assert detail2["steps"][0]["body_html"] == "<p>Updated Body Content</p>"
 
 
 @pytest.mark.asyncio
@@ -809,6 +1041,77 @@ async def test_pause_resume_cancel_endpoints(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp_cancel_again.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_cancel_scheduled_campaign_stops_execution_and_prevents_dispatch(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Test cancelling a SCHEDULED campaign stops execution, transitions recipients to STOPPED, and prevents dispatch."""
+    from datetime import timedelta
+    from app.modules.campaigns.models import CampaignRecipient, CampaignRecipientStatus, CampaignRecipientStopReason
+    from app.modules.campaigns.scheduling_service import CampaignSchedulingService
+
+    token = await register_and_login(async_client, "sched_cancel_owner@co.com", "Sched Cancel Owner")
+    company_id = await create_company_helper(async_client, token, "Sched Cancel Co")
+    account_id = await create_email_account_helper(async_client, token, company_id)
+
+    # 1. Create draft campaign
+    camp_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Scheduled Campaign to Cancel", "email_account_id": account_id, "subject": "Important Meeting"},
+    )
+    assert camp_resp.status_code == 201
+    camp_id = camp_resp.json()["id"]
+
+    # 2. Add recipient
+    recip_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "lead@customer.com", "first_name": "Lead"},
+    )
+    assert recip_resp.status_code == 201
+
+    # 3. Schedule the campaign for the future
+    future_time = datetime.now(timezone.utc) + timedelta(hours=2)
+    sched_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/schedule",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"scheduled_at": future_time.isoformat()},
+    )
+    assert sched_resp.status_code == 200
+    assert sched_resp.json()["status"] == "SCHEDULED"
+
+    # 4. Cancel the SCHEDULED campaign via API
+    cancel_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/cancel",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert cancel_resp.status_code == 200
+    data = cancel_resp.json()
+    assert data["status"] == "CANCELLED"
+    assert data["subject"] == "Important Meeting"
+
+    # 5. Verify database state
+    camp_obj = (await db_session.execute(select(Campaign).where(Campaign.id == camp_id))).scalar_one()
+    assert camp_obj.status == CampaignStatus.CANCELLED.value
+    assert camp_obj.next_send_at is None
+    assert camp_obj.subject == "Important Meeting"
+
+    recip_stmt = select(CampaignRecipient).where(CampaignRecipient.campaign_id == camp_id)
+    recip = (await db_session.execute(recip_stmt)).scalar_one()
+    assert recip.status == CampaignRecipientStatus.STOPPED.value
+    assert recip.stopped_reason == CampaignRecipientStopReason.CAMPAIGN_CANCELLED.value
+
+    # 6. Verify Celery scheduler skips cancelled campaign even when scheduled_at arrives
+    dispatch_results = await CampaignSchedulingService.dispatch_due_campaigns(
+        now_utc=future_time + timedelta(minutes=5)
+    )
+    dispatched_ids = [r.get("campaign_id") for r in dispatch_results if r.get("status") == "DISPATCHED"]
+    assert camp_id not in dispatched_ids
+
 
 
 @pytest.mark.asyncio

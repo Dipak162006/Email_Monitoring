@@ -70,10 +70,18 @@ export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({
     };
   }, [email, onClose]);
 
-  // Fetch attachments
+  // Fetch attachments (excluding inline CID images by default)
   const { data: attachmentsData } = useQuery({
-    queryKey: ["email-attachments", email?.id],
-    queryFn: () => (email ? emailsApi.getAttachments(email.id) : Promise.resolve({ attachments: [], total: 0 })),
+    queryKey: ["email-attachments", email?.company_id, email?.id],
+    queryFn: () => (email ? emailsApi.getAttachments(email.id, email.company_id ?? undefined) : Promise.resolve({ attachments: [], total: 0 })),
+    enabled: !!email?.id,
+    staleTime: 60000,
+  });
+
+  // Fetch full email details (including CID resolution for HTML body)
+  const { data: fullEmail } = useQuery({
+    queryKey: ["email-detail", email?.company_id, email?.id],
+    queryFn: () => (email ? emailsApi.getEmailById(email.id, email.company_id ?? undefined) : Promise.resolve(null)),
     enabled: !!email?.id,
     staleTime: 60000,
   });
@@ -81,6 +89,8 @@ export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({
   if (!email) {
     return null;
   }
+
+  const activeEmail = fullEmail || email;
 
   return createPortal(
     <>
@@ -101,14 +111,14 @@ export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({
             <span className="px-2.5 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200/80 text-xs font-semibold shrink-0">
               Live Inspect
             </span>
-            <span className="font-mono text-slate-500 text-xs truncate" title={email.message_id || `ID: MSG-${email.id}`}>
-              {email.message_id ? `ID: ${email.message_id.slice(0, 24)}...` : `ID: MSG-${email.id}`}
+            <span className="font-mono text-slate-500 text-xs truncate" title={activeEmail.message_id || `ID: MSG-${activeEmail.id}`}>
+              {activeEmail.message_id ? `ID: ${activeEmail.message_id.slice(0, 24)}...` : `ID: MSG-${activeEmail.id}`}
             </span>
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
             <Link
-              to={`/emails/${email.id}`}
+              to={`/emails/${activeEmail.id}`}
               className="p-1.5 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-200/60 transition-colors"
               title="Full Screen View"
               aria-label="Full screen view"
@@ -132,25 +142,25 @@ export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({
           {/* Subject & Meta Header */}
           <div className="flex flex-col space-y-2">
             <h2 className="text-xl font-bold text-slate-900 tracking-tight leading-snug break-words">
-              {email.subject || "(No Subject)"}
+              {activeEmail.subject || "(No Subject)"}
             </h2>
 
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <div className="flex items-center gap-2 min-w-0">
-                <span className="font-semibold text-slate-900 truncate">{email.sender}</span>
+                <span className="font-semibold text-slate-900 truncate">{activeEmail.sender}</span>
               </div>
 
               <div className="flex items-center gap-1.5 text-slate-400 font-mono text-xs shrink-0">
                 <Clock className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                <span>{formatEmailTime(email.sent_at || email.received_at || email.created_at)}</span>
+                <span>{formatEmailTime(activeEmail.sent_at || activeEmail.received_at || activeEmail.created_at)}</span>
               </div>
             </div>
 
-            {email.recipients && email.recipients.length > 0 && (
+            {activeEmail.recipients && activeEmail.recipients.length > 0 && (
               <div className="flex items-center gap-1.5 text-xs text-slate-500">
                 <Users className="h-3.5 w-3.5 text-slate-400 shrink-0" />
                 <span className="font-medium text-slate-700">To:</span>
-                <span className="truncate">{email.recipients.join(", ")}</span>
+                <span className="truncate">{activeEmail.recipients.join(", ")}</span>
               </div>
             )}
           </div>
@@ -165,27 +175,27 @@ export const EmailDetailDrawer: React.FC<EmailDetailDrawerProps> = ({
               </span>
             </div>
             <div className="text-[11px] leading-relaxed text-slate-600 space-y-1">
-              <div className="truncate">Return-Path: &lt;{email.sender}&gt;</div>
-              <div className="truncate">Received-SPF: Pass (account #{email.email_account_id} • company #{email.company_id})</div>
-              <div className="truncate">X-PulseMail-Ingest-Status: {email.status} [{email.direction}]</div>
+              <div className="truncate">Return-Path: &lt;{activeEmail.sender}&gt;</div>
+              <div className="truncate">Received-SPF: Pass (account #{activeEmail.email_account_id} • company #{activeEmail.company_id})</div>
+              <div className="truncate">X-PulseMail-Ingest-Status: {activeEmail.status} [{activeEmail.direction}]</div>
             </div>
           </div>
 
           {/* Email Body Viewer */}
           <EmailBodyViewer
-            html={email.body_html}
-            text={email.body_text}
-            defaultMode={email.body_html ? "html" : "text"}
+            html={activeEmail.body_html}
+            text={activeEmail.body_text}
+            defaultMode={activeEmail.body_html ? "html" : "text"}
           />
 
           {/* Attachments Area */}
           {attachmentsData?.attachments && attachmentsData.attachments.length > 0 && (
-            <AttachmentList emailId={email.id} attachments={attachmentsData.attachments} />
+            <AttachmentList emailId={activeEmail.id} attachments={attachmentsData.attachments} />
           )}
 
           {/* Conversation Thread History */}
-          {email.thread_id && (
-            <EmailConversation threadId={email.thread_id} currentEmailId={email.id} />
+          {activeEmail.thread_id && (
+            <EmailConversation threadId={activeEmail.thread_id} currentEmailId={activeEmail.id} />
           )}
         </div>
 

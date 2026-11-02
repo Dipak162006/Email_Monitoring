@@ -190,7 +190,10 @@ class EmailMailboxService:
             email_ids = [e.id for e in emails]
             att_count_stmt = (
                 select(EmailAttachment.email_id, func.count(EmailAttachment.id).label("cnt"))
-                .where(EmailAttachment.email_id.in_(email_ids))
+                .where(
+                    EmailAttachment.email_id.in_(email_ids),
+                    EmailAttachment.disposition != "inline",
+                )
                 .group_by(EmailAttachment.email_id)
             )
             att_res = await db.execute(att_count_stmt)

@@ -395,19 +395,7 @@ class EmailService:
 
             # Associate validated attachments with the resulting sent Email
             for att in validated_attachments:
-                if att.email_id and att.email_id != email_record.id:
-                    new_att = EmailAttachment(
-                        company_id=att.company_id,
-                        email_account_id=att.email_account_id,
-                        email_id=email_record.id,
-                        file_name=att.file_name,
-                        content_type=att.content_type,
-                        file_size=att.file_size,
-                        storage_path=att.storage_path,
-                    )
-                    db.add(new_att)
-                else:
-                    att.email_id = email_record.id
+                att.email_id = email_record.id
 
             for c_att in campaign_attachments:
                 recip_att = EmailAttachment(

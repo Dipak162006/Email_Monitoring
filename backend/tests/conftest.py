@@ -108,6 +108,9 @@ async def clean_database():
     async with test_async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.execute(text("ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS incoming_protocol VARCHAR(10) DEFAULT 'IMAP' NOT NULL;"))
+        await conn.execute(text("ALTER TABLE email_attachments ADD COLUMN IF NOT EXISTS disposition VARCHAR(50) DEFAULT 'attachment' NOT NULL;"))
+        await conn.execute(text("ALTER TABLE email_attachments ADD COLUMN IF NOT EXISTS content_id VARCHAR(255);"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_email_attachments_content_id ON email_attachments (content_id);"))
         await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments, campaigns, campaign_steps, campaign_recipients, campaign_deliveries, suppression_list, campaign_attachments RESTART IDENTITY CASCADE;"))
     yield
     async with test_async_engine.begin() as conn:

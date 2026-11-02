@@ -319,7 +319,7 @@ class CampaignPreflightService:
                 norm_email = r.email.strip().lower()
                 if norm_email in suppressed_set or r.status == CampaignRecipientStatus.SUPPRESSED.value:
                     suppressed_recipient_count += 1
-                elif r.status != CampaignRecipientStatus.PENDING.value:
+                elif r.status not in (CampaignRecipientStatus.PENDING.value, CampaignRecipientStatus.ACTIVE.value):
                     # Non-pending recipients (e.g. SENT, FAILED, BOUNCED) are excluded from eligibility
                     pass
                 else:

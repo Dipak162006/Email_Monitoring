@@ -262,7 +262,11 @@ class CampaignSchedulingService:
                 pending_cnt = await db.scalar(
                     select(func.count(CampaignRecipient.id)).where(
                         CampaignRecipient.campaign_id == camp_id,
-                        CampaignRecipient.status == CampaignRecipientStatus.PENDING.value,
+                        CampaignRecipient.status.in_([
+                            CampaignRecipientStatus.PENDING.value,
+                            CampaignRecipientStatus.ACTIVE.value,
+                        ]),
+                        CampaignRecipient.current_step_number == 0,
                     )
                 ) or 0
                 if pending_cnt > 0:

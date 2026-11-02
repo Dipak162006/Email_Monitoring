@@ -714,7 +714,11 @@ class CampaignDeliveryService:
             async with db_factory() as db:
                 rem_stmt = select(func.count(CampaignRecipient.id)).where(
                     CampaignRecipient.campaign_id == campaign_id,
-                    CampaignRecipient.status == CampaignRecipientStatus.PENDING.value,
+                    CampaignRecipient.status.in_([
+                        CampaignRecipientStatus.PENDING.value,
+                        CampaignRecipientStatus.ACTIVE.value,
+                    ]),
+                    CampaignRecipient.current_step_number == 0,
                 )
                 remaining_pending = await db.scalar(rem_stmt) or 0
 
@@ -792,12 +796,16 @@ class CampaignDeliveryService:
                     "skipped_count": skipped_count,
                 }
 
-            # If there are still pending recipients (e.g. campaign was paused during loop and resumed),
+            # If there are still pending/active recipients (e.g. campaign was paused during loop and resumed),
             # preserve status and do not mark COMPLETED/FAILED.
             remaining_pending = await db.scalar(
                 select(func.count(CampaignRecipient.id)).where(
                     CampaignRecipient.campaign_id == campaign_id,
-                    CampaignRecipient.status == CampaignRecipientStatus.PENDING.value,
+                    CampaignRecipient.status.in_([
+                        CampaignRecipientStatus.PENDING.value,
+                        CampaignRecipientStatus.ACTIVE.value,
+                    ]),
+                    CampaignRecipient.current_step_number == 0,
                 )
             ) or 0
             if remaining_pending > 0:
@@ -852,6 +860,66 @@ class CampaignDeliveryService:
                     "active_sending": active_sending,
                 }
 
+            # Check for scheduled follow-ups or pending sequence work before completing
+            scheduled_followups = await db.scalar(
+                select(func.count(CampaignRecipient.id)).where(
+                    CampaignRecipient.campaign_id == campaign_id,
+                    CampaignRecipient.next_step_due_at.is_not(None),
+                    CampaignRecipient.stopped_reason.is_(None),
+                )
+            ) or 0
+
+            # Check if the campaign has active follow-up steps (step_number >= 2)
+            active_followup_steps_count = await db.scalar(
+                select(func.count(CampaignStep.id)).where(
+                    CampaignStep.campaign_id == campaign_id,
+                    CampaignStep.step_number >= 2,
+                    CampaignStep.is_active == True,
+                )
+            ) or 0
+
+            eligible_for_followups = 0
+            if active_followup_steps_count > 0:
+                max_step = await db.scalar(
+                    select(func.max(CampaignStep.step_number)).where(
+                        CampaignStep.campaign_id == campaign_id,
+                        CampaignStep.is_active == True,
+                    )
+                ) or 1
+
+                eligible_for_followups = await db.scalar(
+                    select(func.count(CampaignRecipient.id)).where(
+                        CampaignRecipient.campaign_id == campaign_id,
+                        CampaignRecipient.status.in_([
+                            CampaignRecipientStatus.SENT.value,
+                            CampaignRecipientStatus.ACTIVE.value,
+                        ]),
+                        CampaignRecipient.stopped_reason.is_(None),
+                        CampaignRecipient.replied_at.is_(None),
+                        CampaignRecipient.current_step_number < max_step,
+                    )
+                ) or 0
+
+            if scheduled_followups > 0 or eligible_for_followups > 0:
+                logger.info(
+                    "Campaign %d has %d scheduled follow-ups and %d recipients eligible for future steps. Preserving status '%s' without marking COMPLETED.",
+                    campaign_id,
+                    scheduled_followups,
+                    eligible_for_followups,
+                    campaign.status,
+                )
+                return {
+                    "status": campaign.status,
+                    "campaign_id": campaign_id,
+                    "company_id": company_id,
+                    "total_recipients": len(pending_recipients),
+                    "sent_count": sent_count,
+                    "failed_count": failed_count,
+                    "skipped_count": skipped_count,
+                    "scheduled_followups": scheduled_followups,
+                    "eligible_for_followups": eligible_for_followups,
+                }
+
             total_sent = await db.scalar(
                 select(func.count(CampaignDelivery.id)).where(
                     CampaignDelivery.campaign_id == campaign_id,
@@ -872,6 +940,22 @@ class CampaignDeliveryService:
                 target_status=target_status,
             )
             final_status = campaign.status
+
+            if target_status == CampaignStatus.COMPLETED:
+                # Mark finished recipients as COMPLETED
+                recip_stmt = select(CampaignRecipient).where(
+                    CampaignRecipient.campaign_id == campaign_id,
+                    CampaignRecipient.status.in_([
+                        CampaignRecipientStatus.SENT.value,
+                        CampaignRecipientStatus.ACTIVE.value,
+                    ]),
+                    CampaignRecipient.stopped_reason.is_(None),
+                    CampaignRecipient.next_step_due_at.is_(None),
+                )
+                recips_res = await db.execute(recip_stmt)
+                for recip in recips_res.scalars().all():
+                    recip.status = CampaignRecipientStatus.COMPLETED.value
+
             await db.commit()
 
             logger.info(
@@ -947,7 +1031,10 @@ class CampaignDeliveryService:
                 CampaignDelivery.campaign_id == campaign_id,
                 CampaignDelivery.status == CampaignDeliveryStatus.SENDING.value,
                 CampaignDelivery.attempt_count == 1,
-                CampaignRecipient.status == CampaignRecipientStatus.PENDING.value,
+                CampaignRecipient.status.in_([
+                    CampaignRecipientStatus.PENDING.value,
+                    CampaignRecipientStatus.ACTIVE.value,
+                ]),
             )
         )
         count = await db.scalar(stmt) or 0
@@ -1889,7 +1976,140 @@ class CampaignDeliveryService:
                             "error": deliv_obj.error_message,
                         })
 
+        # Step 3: Check and finalize completion for any affected campaigns that have finished all follow-up steps
+        affected_campaign_ids = {r[1] for r in due_recipients_data}
+        for c_id in affected_campaign_ids:
+            try:
+                await cls.check_and_finalize_campaign_completion(
+                    campaign_id=c_id,
+                    db_factory=db_factory,
+                )
+            except Exception as comp_err:
+                logger.warning(
+                    "Error checking completion for campaign %d: %s",
+                    c_id,
+                    comp_err,
+                )
+
         return results
+
+    @classmethod
+    async def check_and_finalize_campaign_completion(
+        cls,
+        campaign_id: int,
+        db_factory: Optional[Any] = None,
+    ) -> Optional[str]:
+        """Check whether all initial and follow-up work has completed for a campaign,
+        and if so, transition it to COMPLETED.
+
+        Preserves PAUSED, CANCELLED, or FAILED status without overwriting.
+        """
+        if db_factory is None:
+            from app.workers.tasks import get_worker_db
+            db_factory = get_worker_db
+
+        async with db_factory() as db:
+            campaign = await db.get(Campaign, campaign_id)
+            if not campaign:
+                return None
+
+            # Only RUNNING campaigns can naturally complete
+            if campaign.status != CampaignStatus.RUNNING.value:
+                return campaign.status
+
+            # 1. Check for remaining initial recipients
+            remaining_pending = await db.scalar(
+                select(func.count(CampaignRecipient.id)).where(
+                    CampaignRecipient.campaign_id == campaign_id,
+                    CampaignRecipient.status.in_([
+                        CampaignRecipientStatus.PENDING.value,
+                        CampaignRecipientStatus.ACTIVE.value,
+                    ]),
+                    CampaignRecipient.current_step_number == 0,
+                )
+            ) or 0
+            if remaining_pending > 0:
+                return campaign.status
+
+            # 2. Check for active deliveries in SENDING status
+            active_sending = await db.scalar(
+                select(func.count(CampaignDelivery.id)).where(
+                    CampaignDelivery.campaign_id == campaign_id,
+                    CampaignDelivery.status == CampaignDeliveryStatus.SENDING.value,
+                )
+            ) or 0
+            if active_sending > 0:
+                return campaign.status
+
+            # 3. Check for recipients with scheduled follow-ups
+            scheduled_followups = await db.scalar(
+                select(func.count(CampaignRecipient.id)).where(
+                    CampaignRecipient.campaign_id == campaign_id,
+                    CampaignRecipient.next_step_due_at.is_not(None),
+                    CampaignRecipient.stopped_reason.is_(None),
+                )
+            ) or 0
+            if scheduled_followups > 0:
+                return campaign.status
+
+            # 4. Check for recipients eligible for active follow-up steps
+            max_step = await db.scalar(
+                select(func.max(CampaignStep.step_number)).where(
+                    CampaignStep.campaign_id == campaign_id,
+                    CampaignStep.is_active == True,
+                )
+            ) or 1
+
+            if max_step >= 2:
+                eligible_for_followups = await db.scalar(
+                    select(func.count(CampaignRecipient.id)).where(
+                        CampaignRecipient.campaign_id == campaign_id,
+                        CampaignRecipient.status.in_([
+                            CampaignRecipientStatus.SENT.value,
+                            CampaignRecipientStatus.ACTIVE.value,
+                        ]),
+                        CampaignRecipient.stopped_reason.is_(None),
+                        CampaignRecipient.replied_at.is_(None),
+                        CampaignRecipient.current_step_number < max_step,
+                    )
+                ) or 0
+                if eligible_for_followups > 0:
+                    return campaign.status
+
+            # Check if any sends succeeded
+            total_sent = await db.scalar(
+                select(func.count(CampaignDelivery.id)).where(
+                    CampaignDelivery.campaign_id == campaign_id,
+                    CampaignDelivery.status == CampaignDeliveryStatus.SENT.value,
+                )
+            ) or 0
+
+            target_status = CampaignStatus.COMPLETED if total_sent > 0 else CampaignStatus.FAILED
+
+            # Mark finished recipients as COMPLETED
+            if target_status == CampaignStatus.COMPLETED:
+                recip_stmt = select(CampaignRecipient).where(
+                    CampaignRecipient.campaign_id == campaign_id,
+                    CampaignRecipient.status.in_([
+                        CampaignRecipientStatus.SENT.value,
+                        CampaignRecipientStatus.ACTIVE.value,
+                    ]),
+                    CampaignRecipient.stopped_reason.is_(None),
+                    CampaignRecipient.next_step_due_at.is_(None),
+                )
+                recips_res = await db.execute(recip_stmt)
+                for recip in recips_res.scalars().all():
+                    recip.status = CampaignRecipientStatus.COMPLETED.value
+
+            campaign = await CampaignService.transition_state(
+                db=db,
+                company_id=campaign.company_id,
+                campaign_id=campaign_id,
+                target_status=target_status,
+            )
+            await db.commit()
+            logger.info("Campaign %d has finished all work. Transitioned to %s.", campaign_id, target_status.value)
+            return campaign.status
 
 
 

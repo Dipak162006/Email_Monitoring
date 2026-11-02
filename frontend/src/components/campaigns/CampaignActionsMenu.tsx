@@ -325,7 +325,7 @@ export const CampaignActionsMenu: React.FC<CampaignActionsMenuProps> = ({
                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-rose-50 text-xs text-rose-600 transition-colors"
                   >
                     <XCircle className="h-3.5 w-3.5 text-rose-500" />
-                    <span>Cancel Campaign</span>
+                    <span>{status === "SCHEDULED" ? "Stop Campaign" : "Cancel Campaign"}</span>
                   </button>
                 </>
               )}

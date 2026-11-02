@@ -69,6 +69,8 @@ export interface AttachmentItem {
   file_name: string;
   content_type: string;
   file_size: number;
+  disposition?: string;
+  content_id?: string | null;
   created_at: string;
   updated_at: string;
 }

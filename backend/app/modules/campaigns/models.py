@@ -181,6 +181,19 @@ class Campaign(Base):
         lazy="selectin",
     )
 
+    @property
+    def followup_steps(self) -> List["CampaignStep"]:
+        """Return persisted follow-up steps (step_number >= 2) ordered by step_number.
+        
+        Safely inspects loaded steps without triggering unsafe asynchronous lazy loads.
+        """
+        steps_val = self.__dict__.get("steps")
+        if steps_val is None:
+            steps_val = getattr(self, "steps", None)
+        if steps_val:
+            return [s for s in sorted(steps_val, key=lambda s: s.step_number) if s.step_number >= 2]
+        return []
+
     def __repr__(self) -> str:
         return f"<Campaign id={self.id} company_id={self.company_id} name='{self.name}' status='{self.status}'>"
 
@@ -246,7 +259,8 @@ class CampaignRecipient(Base):
 
     status: Mapped[str] = mapped_column(
         String(50),
-        default=CampaignRecipientStatus.ACTIVE.value,
+        default=CampaignRecipientStatus.PENDING.value,
+        server_default="PENDING",
         nullable=False,
         index=True,
     )

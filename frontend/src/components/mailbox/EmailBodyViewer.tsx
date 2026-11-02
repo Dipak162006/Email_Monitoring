@@ -20,6 +20,54 @@ function cleanPreheaderChars(text: string): string {
 }
 
 /**
+ * Normalizes non-standard image width/height attributes (e.g. width="auto", height="40px")
+ * into valid HTML5 attributes and inline style rules so button images and icons retain
+ * their intended dimensions rather than expanding to intrinsic image sizes.
+ */
+function normalizeImageDimensions(htmlStr: string): string {
+  if (!htmlStr) return "";
+  return htmlStr.replace(/<img\b([^>]*?)>/gi, (_match, attrs) => {
+    let newAttrs = attrs;
+    const styles: string[] = [];
+
+    // Normalize height="(\d+)px"
+    newAttrs = newAttrs.replace(/height\s*=\s*["'](\d+)px["']/gi, (_m: string, num: string) => {
+      styles.push(`height: ${num}px !important`);
+      return `height="${num}"`;
+    });
+
+    // Normalize height="auto"
+    newAttrs = newAttrs.replace(/height\s*=\s*["']auto["']/gi, () => {
+      styles.push("height: auto !important");
+      return "";
+    });
+
+    // Normalize width="(\d+)px"
+    newAttrs = newAttrs.replace(/width\s*=\s*["'](\d+)px["']/gi, (_m: string, num: string) => {
+      styles.push(`width: ${num}px !important`);
+      return `width="${num}"`;
+    });
+
+    // Normalize width="auto"
+    newAttrs = newAttrs.replace(/width\s*=\s*["']auto["']/gi, () => {
+      styles.push("width: auto !important");
+      return "";
+    });
+
+    if (styles.length > 0) {
+      const extraStyleStr = styles.join("; ") + ";";
+      if (/style\s*=\s*["']/i.test(newAttrs)) {
+        newAttrs = newAttrs.replace(/style\s*=\s*["']([^"']*)["']/i, (_s: string, sVal: string) => `${sVal.trim().replace(/;?$/, ";")} ${extraStyleStr}`);
+      } else {
+        newAttrs += ` style="${extraStyleStr}"`;
+      }
+    }
+
+    return `<img${newAttrs}>`;
+  });
+}
+
+/**
  * Convert plain text with URLs and emails into clean, accessible interactive React elements.
  */
 function renderFormattedPlainText(rawText: string) {
@@ -138,8 +186,10 @@ export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
   const preparedDocHtml = useMemo(() => {
     if (!html) return "";
 
+    const normalized = normalizeImageDimensions(html);
+
     // Sanitize with whole-document preservation so <head> and <style> tags (media queries, responsive hiding) are preserved
-    const sanitized = DOMPurify.sanitize(html, {
+    const sanitized = DOMPurify.sanitize(normalized, {
       WHOLE_DOCUMENT: true,
       ADD_TAGS: [
         "style",
@@ -209,6 +259,7 @@ export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
     const baselineHead = `
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
   <base target="_blank">
   <style id="pulsemail-baseline-reset">
     /* Gmail/Standard Webmail Baseline Styles */
@@ -247,6 +298,8 @@ export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
     }
     img {
       max-width: 100%;
+    }
+    img:not([height]) {
       height: auto;
     }
     table {
@@ -533,6 +586,7 @@ export const EmailBodyViewer: React.FC<EmailBodyViewerProps> = ({
               title="Email Message Body"
               scrolling="no"
               sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin"
+              referrerPolicy="no-referrer"
               srcDoc={preparedDocHtml}
               onLoad={setupIframeDocument}
               className={`w-full border-0 block transition-opacity duration-200 ${

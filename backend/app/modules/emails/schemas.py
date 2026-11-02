@@ -630,6 +630,8 @@ class EmailAttachmentRead(BaseModel):
     file_name: str
     content_type: str
     file_size: int
+    disposition: str = "attachment"
+    content_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

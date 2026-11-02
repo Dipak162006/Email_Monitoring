@@ -1015,6 +1015,17 @@ export const campaignsApi = {
     );
   },
 
+  rescheduleCampaign: async (
+    companyId: number,
+    campaignId: number,
+    payload: CampaignSchedulePayload
+  ): Promise<Campaign> => {
+    return apiClient.post<Campaign>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/reschedule`,
+      payload
+    );
+  },
+
   pauseCampaign: async (
     companyId: number,
     campaignId: number
