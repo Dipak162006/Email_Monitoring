@@ -81,6 +81,16 @@ export function CampaignsPage() {
     staleTime: 60000,
   });
 
+  // 1b. Fetch company-wide status summary for KPI cards (independent of pagination/filter)
+  const { data: campaignSummary, isLoading: isSummaryLoading } = useQuery({
+    queryKey: ["campaignsSummary", currentCompanyId],
+    queryFn: () => {
+      if (!currentCompanyId) return null;
+      return campaignsApi.getCampaignsSummary(currentCompanyId);
+    },
+    enabled: Boolean(currentCompanyId),
+  });
+
   // 2. Fetch company campaigns using backend pagination & status filter
   const {
     data: loadedCampaigns = [],
@@ -161,6 +171,7 @@ export function CampaignsPage() {
   // Mutations
   const invalidateCampaigns = () => {
     queryClient.invalidateQueries({ queryKey: ["campaigns", currentCompanyId] });
+    queryClient.invalidateQueries({ queryKey: ["campaignsSummary", currentCompanyId] });
   };
 
   // 1. Pause Campaign
@@ -435,7 +446,11 @@ export function CampaignsPage() {
         <>
           {/* KPI / Summary Cards Area */}
           {showSummaryCards && (
-            <CampaignSummaryCards campaigns={loadedCampaigns} isLoading={isLoading} />
+            <CampaignSummaryCards
+              summary={campaignSummary}
+              campaigns={loadedCampaigns}
+              isLoading={isSummaryLoading || isLoading}
+            />
           )}
 
           {/* Toolbar (Search & Filters) */}

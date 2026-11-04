@@ -1,7 +1,7 @@
 from app.modules.campaigns.window_service import SendingWindowConfig
 from datetime import datetime
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.sanitizer import sanitize_html
@@ -321,6 +321,17 @@ class CampaignRead(BaseModel):
 
 
 
+class CampaignSummaryCountsRead(BaseModel):
+    """Company-wide campaign counts grouped by status for KPI summary cards."""
+    total_count: int = 0
+    active_count: int = 0
+    scheduled_count: int = 0
+    draft_count: int = 0
+    completed_count: int = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class CampaignDetailRead(CampaignRead):
     """Extended response schema for single-campaign retrieval."""
     email_account_name: Optional[str] = None
@@ -333,6 +344,9 @@ class CampaignDetailRead(CampaignRead):
     replied_count: int = 0
     followup_scheduled_count: int = 0
     followup_sent_count: int = 0
+    initial_sent_count: int = 0
+    total_sent_count: int = 0
+    unique_replied_count: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -629,9 +643,20 @@ class CampaignStepAnalytics(BaseModel):
     skipped_count: int = Field(..., description="Number of deliveries SKIPPED due to manual action or tag non-match")
     replied_count: int = Field(..., description="Number of recipients whose reply was elicited by this step")
     pending_count: int = Field(..., description="Number of recipients queued or waiting to receive this step")
-    delivery_rate: float = Field(..., description="Percentage of targeted recipients sent (sent_count / targeted_count * 100)")
+    delivered_count: int = Field(default=0, description="Estimated net delivered count (sent_count - bounced_count); actual mailbox receipt is not tracked")
+    delivery_rate: float = Field(..., description="Estimated net delivery rate percentage ((sent_count - bounced_count) / sent_count * 100)")
     reply_rate: float = Field(..., description="Percentage of sent recipients who replied (replied_count / sent_count * 100)")
     bounce_rate: float = Field(..., description="Percentage of sent recipients who bounced (bounced_count / sent_count * 100)")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignDeliveryTrendPoint(BaseModel):
+    """Daily delivery volume and outcome data point derived from actual delivery records."""
+    date: str = Field(..., description="Date of dispatch in YYYY-MM-DD format")
+    sent_count: int = Field(default=0, description="Number of emails dispatched on this date")
+    bounced_count: int = Field(default=0, description="Number of deliveries marked bounced on this date")
+    replied_count: int = Field(default=0, description="Number of unique replying recipients recorded on this date")
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -643,10 +668,73 @@ class CampaignAnalyticsResponse(BaseModel):
     campaign_status: str = Field(..., description="Lifecycle status of the campaign")
     total_recipients: int = Field(..., description="Total recipients attached to the campaign")
     total_steps: int = Field(..., description="Total steps configured for the campaign")
+    initial_sent_count: int = Field(default=0, description="Total initial (Step 1) emails sent")
+    followup_sent_count: int = Field(default=0, description="Total follow-up (Step 2+) emails sent")
+    total_sent_count: int = Field(default=0, description="Total emails sent across all steps (initial + follow-up)")
+    unique_replied_count: int = Field(default=0, description="Total unique recipients who replied to the campaign")
     steps: List[CampaignStepAnalytics] = Field(default_factory=list, description="Ordered per-step funnel analytics")
+    delivery_trend: List["CampaignDeliveryTrendPoint"] = Field(
+        default_factory=list,
+        description="Chronological daily delivery activity aggregated from persisted delivery records",
+    )
     omitted_metrics_notice: Optional[str] = Field(
         default="Open and click tracking metrics are omitted because the system does not record tracking pixels or link wraps.",
         description="Explanation for why open and click tracking metrics cannot be derived from stored data",
     )
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignDrilldownSummary(BaseModel):
+    """Summary status counts for the unified drill-down page."""
+    recipients_count: int = 0
+    sent_count: int = 0
+    replies_count: int = 0
+    bounced_count: int = 0
+    failed_count: int = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignEmailsDrilldownItem(BaseModel):
+    """Single record representing a recipient, sent email, reply, bounce, or failed delivery."""
+    id: Union[int, str]
+    recipient_id: Optional[int] = None
+    delivery_id: Optional[int] = None
+    email_id: Optional[int] = None
+    thread_id: Optional[int] = None
+    email: Optional[str] = None
+    recipient_name: Optional[str] = None
+    sender: Optional[str] = None
+    recipient: Optional[str] = None
+    status: Optional[str] = None
+    stopped_reason: Optional[str] = None
+    step_number: Optional[int] = None
+    subject: Optional[str] = None
+    sent_at: Optional[datetime] = None
+    received_at: Optional[datetime] = None
+    bounced_at: Optional[datetime] = None
+    bounce_type: Optional[str] = None
+    error_message: Optional[str] = None
+    attempt_count: Optional[int] = None
+    is_suppressed: Optional[bool] = None
+    suppression_reason: Optional[str] = None
+    can_retry: Optional[bool] = None
+    created_at: Optional[datetime] = None
+    next_step_due_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignEmailsDrilldownResponse(BaseModel):
+    """Paginated drill-down response for Campaign Emails page."""
+    campaign_id: int
+    campaign_name: str
+    selected_status: str
+    summary: CampaignDrilldownSummary
+    total: int
+    limit: int
+    offset: int
+    items: List[CampaignEmailsDrilldownItem]
 
     model_config = ConfigDict(from_attributes=True)

@@ -586,6 +586,14 @@ class CampaignRecipientService:
 
         await db.commit()
         await db.refresh(recipient)
+
+        # Check and finalize completion if all campaign work is done
+        try:
+            from app.modules.campaigns.delivery_service import CampaignDeliveryService
+            await CampaignDeliveryService.check_and_finalize_campaign_completion(campaign_id, db=db)
+        except Exception as exc:
+            logger.warning("Error checking completion for campaign %d after manual stop: %s", campaign_id, exc)
+
         return recipient
 
     @staticmethod
@@ -726,6 +734,14 @@ class CampaignRecipientService:
 
         await db.commit()
         await db.refresh(recipient)
+
+        if not subseq_step:
+            try:
+                from app.modules.campaigns.delivery_service import CampaignDeliveryService
+                await CampaignDeliveryService.check_and_finalize_campaign_completion(campaign_id, db=db)
+            except Exception as exc:
+                logger.warning("Error checking completion for campaign %d after skip: %s", campaign_id, exc)
+
         return recipient
 
     @staticmethod

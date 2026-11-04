@@ -148,7 +148,7 @@ export const CampaignStepAnalyticsFunnel: React.FC<CampaignStepAnalyticsFunnelPr
               {/* Conversion Rate Badges */}
               <div className="flex flex-wrap items-center gap-3 pt-1">
                 <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200/70 text-emerald-800 text-xs">
-                  <span className="font-semibold text-emerald-900">Delivery Rate:</span>
+                  <span className="font-semibold text-emerald-900" title="Estimated from successful SMTP dispatch minus detected bounces; actual mailbox receipt is not tracked.">Net Delivery Rate:</span>
                   <span className="font-bold" data-testid={`delivery-rate-${step.step_number}`}>
                     {step.delivery_rate}%
                   </span>

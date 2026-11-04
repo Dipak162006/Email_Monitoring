@@ -4,7 +4,7 @@ from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 from typing import Any, Dict, List, Optional
 
-from app.core.sanitizer import sanitize_html
+from app.core.sanitizer import prepare_email_html_for_delivery, sanitize_html
 from app.modules.email_accounts.models import EmailAccount
 
 
@@ -48,7 +48,8 @@ class EmailTransportRequest:
         has_text = bool(self.body_text and self.body_text.strip())
         has_html = bool(self.body_html and self.body_html.strip())
         if has_html:
-            final_html = sanitize_html(self.body_html) or self.body_html
+            sanitized = sanitize_html(self.body_html) or self.body_html
+            final_html = prepare_email_html_for_delivery(sanitized)
             if has_text:
                 msg.set_content(self.body_text)
                 msg.add_alternative(final_html, subtype="html")

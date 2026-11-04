@@ -193,25 +193,33 @@ class EmailMonitoringService:
                 candidate_ids.append(clean_ref)
 
         sender_email = parseaddr(parsed.sender)[1].strip().lower() if parsed.sender else ""
+        if not sender_email:
+            return 0
+
+        # An incoming email originating from the company's own mailbox or campaign sender cannot be a recipient reply
+        acc_email = (account.email_address or "").strip().lower()
+        if sender_email == acc_email:
+            return 0
 
         conditions = []
         if candidate_ids:
             conditions.append(CampaignDelivery.message_id.in_(candidate_ids))
-        if is_reply_to_outgoing and thread_id is not None and sender_email:
-            conditions.append(
-                (CampaignDelivery.thread_id == thread_id)
-                & (func.lower(CampaignRecipient.email) == sender_email)
-            )
+        if is_reply_to_outgoing and thread_id is not None:
+            conditions.append(CampaignDelivery.thread_id == thread_id)
 
         if not conditions:
             return 0
 
+        from app.modules.email_accounts.models import EmailAccount
         stmt = (
             select(CampaignRecipient, CampaignDelivery)
             .join(CampaignRecipient, CampaignDelivery.recipient_id == CampaignRecipient.id)
             .join(Campaign, CampaignDelivery.campaign_id == Campaign.id)
+            .join(EmailAccount, Campaign.email_account_id == EmailAccount.id)
             .where(
                 Campaign.company_id == account.company_id,
+                func.lower(CampaignRecipient.email) == sender_email,
+                func.lower(EmailAccount.email_address) != sender_email,
                 or_(*conditions),
             )
         )
@@ -233,7 +241,7 @@ class EmailMonitoringService:
                 recipient.replied_at = reply_ts
             recipient.stopped_reason = CampaignRecipientStopReason.REPLIED.value
             recipient.next_step_due_at = None
-            if recipient.status == CampaignRecipientStatus.ACTIVE.value:
+            if recipient.status in (CampaignRecipientStatus.ACTIVE.value, CampaignRecipientStatus.SENT.value):
                 recipient.status = CampaignRecipientStatus.STOPPED.value
             matched_count += 1
             logger.info(
@@ -245,6 +253,13 @@ class EmailMonitoringService:
 
         if matched_count > 0:
             await db.flush()
+            from app.modules.campaigns.delivery_service import CampaignDeliveryService
+            camp_ids = {recipient.campaign_id for recipient, _ in rows}
+            for c_id in camp_ids:
+                try:
+                    await CampaignDeliveryService.check_and_finalize_campaign_completion(c_id, db=db)
+                except Exception as comp_err:
+                    logger.warning("Error checking completion for campaign %d on reply match: %s", c_id, comp_err)
 
         return matched_count
 

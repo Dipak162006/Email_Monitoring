@@ -2,13 +2,23 @@ import React from "react";
 import { Zap, Clock, FileEdit, CheckCircle2 } from "lucide-react";
 import type { Campaign } from "../../types/campaign";
 
+export interface CampaignSummaryData {
+  total_count?: number;
+  active_count: number;
+  scheduled_count: number;
+  draft_count: number;
+  completed_count: number;
+}
+
 interface CampaignSummaryCardsProps {
-  campaigns: Campaign[];
+  campaigns?: Campaign[];
+  summary?: CampaignSummaryData | null;
   isLoading?: boolean;
 }
 
 export const CampaignSummaryCards: React.FC<CampaignSummaryCardsProps> = ({
-  campaigns,
+  campaigns = [],
+  summary,
   isLoading = false,
 }) => {
   if (isLoading) {
@@ -31,21 +41,29 @@ export const CampaignSummaryCards: React.FC<CampaignSummaryCardsProps> = ({
     );
   }
 
-  const activeCount = campaigns.filter(
-    (c) => c.status === "RUNNING" || c.status === "QUEUED"
-  ).length;
+  const activeCount = summary
+    ? summary.active_count
+    : (campaigns || []).filter(
+        (c) => c.status === "RUNNING" || c.status === "QUEUED"
+      ).length;
 
-  const scheduledCount = campaigns.filter(
-    (c) => c.status === "SCHEDULED"
-  ).length;
+  const scheduledCount = summary
+    ? summary.scheduled_count
+    : (campaigns || []).filter(
+        (c) => c.status === "SCHEDULED"
+      ).length;
 
-  const draftCount = campaigns.filter(
-    (c) => c.status === "DRAFT"
-  ).length;
+  const draftCount = summary
+    ? summary.draft_count
+    : (campaigns || []).filter(
+        (c) => c.status === "DRAFT"
+      ).length;
 
-  const completedCount = campaigns.filter(
-    (c) => c.status === "COMPLETED"
-  ).length;
+  const completedCount = summary
+    ? summary.completed_count
+    : (campaigns || []).filter(
+        (c) => c.status === "COMPLETED"
+      ).length;
 
   const cards = [
     {

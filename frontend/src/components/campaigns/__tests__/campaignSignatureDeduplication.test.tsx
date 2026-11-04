@@ -13,7 +13,9 @@ const mockAccounts: AuthorizedEmailAccount[] = [
     company_id: 10,
     email_address: "sender@example.com",
     name: "Sender Account",
+    provider: "GMAIL",
     is_active: true,
+    is_sync_enabled: true,
     is_verified: true,
   },
 ];

@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useMemo, useContext } from "react";
-import DOMPurify from "dompurify";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, AlertCircle, Info, ArrowLeft, RefreshCw } from "lucide-react";

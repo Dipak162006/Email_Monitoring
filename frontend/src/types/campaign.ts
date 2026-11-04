@@ -89,6 +89,9 @@ export interface CampaignDetail extends Campaign {
   replied_count?: number;
   followup_scheduled_count?: number;
   followup_sent_count?: number;
+  initial_sent_count?: number;
+  total_sent_count?: number;
+  unique_replied_count?: number;
 }
 
 export interface CampaignCreatePayload {
@@ -155,6 +158,7 @@ export interface CampaignRecipient {
   stopped_reason?: string | null;
   replied_at?: string | null;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface CampaignRecipientReschedulePayload {
@@ -300,9 +304,17 @@ export interface CampaignStepAnalytics {
   skipped_count: number;
   replied_count: number;
   pending_count: number;
+  delivered_count?: number;
   delivery_rate: number;
   reply_rate: number;
   bounce_rate: number;
+}
+
+export interface CampaignDeliveryTrendPoint {
+  date: string;
+  sent_count: number;
+  bounced_count: number;
+  replied_count: number;
 }
 
 export interface CampaignAnalyticsResponse {
@@ -311,6 +323,60 @@ export interface CampaignAnalyticsResponse {
   campaign_status: CampaignStatus;
   total_recipients: number;
   total_steps: number;
+  initial_sent_count?: number;
+  followup_sent_count?: number;
+  total_sent_count?: number;
+  unique_replied_count?: number;
   steps: CampaignStepAnalytics[];
   omitted_metrics_notice?: string;
+  delivery_trend?: CampaignDeliveryTrendPoint[];
+}
+
+
+export interface CampaignDrilldownSummary {
+  recipients_count: number;
+  sent_count: number;
+  replies_count: number;
+  bounced_count: number;
+  failed_count: number;
+}
+
+export interface CampaignEmailsDrilldownItem {
+  id: number | string;
+  recipient_id?: number | null;
+  delivery_id?: number | null;
+  email_id?: number | null;
+  thread_id?: number | null;
+  email?: string | null;
+  recipient_name?: string | null;
+  sender?: string | null;
+  recipient?: string | null;
+  status?: string | null;
+  stopped_reason?: string | null;
+  step_number?: number | null;
+  subject?: string | null;
+  sent_at?: string | null;
+  received_at?: string | null;
+  bounced_at?: string | null;
+  bounce_type?: string | null;
+  error_message?: string | null;
+  attempt_count?: number | null;
+  last_attempt_at?: string | null;
+  replied_at?: string | null;
+  is_suppressed?: boolean | null;
+  suppression_reason?: string | null;
+  can_retry?: boolean | null;
+  created_at?: string | null;
+  next_step_due_at?: string | null;
+}
+
+export interface CampaignEmailsDrilldownResponse {
+  campaign_id: number;
+  campaign_name: string;
+  selected_status: "recipients" | "sent" | "replies" | "bounced" | "failed" | string;
+  summary: CampaignDrilldownSummary;
+  total: number;
+  limit: number;
+  offset: number;
+  items: CampaignEmailsDrilldownItem[];
 }

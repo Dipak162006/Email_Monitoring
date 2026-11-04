@@ -53,6 +53,7 @@ import type {
   Campaign,
   CampaignDetail,
   CampaignAnalyticsResponse,
+  CampaignEmailsDrilldownResponse,
   CampaignCreatePayload,
   CampaignUpdatePayload,
   CampaignSchedulePayload,
@@ -938,6 +939,18 @@ export const campaignsApi = {
     );
   },
 
+  getCampaignsSummary: async (
+    companyId: number
+  ): Promise<{
+    total_count: number;
+    active_count: number;
+    scheduled_count: number;
+    draft_count: number;
+    completed_count: number;
+  }> => {
+    return apiClient.get(`/api/v1/companies/${companyId}/campaigns/summary`);
+  },
+
   getCampaign: async (
     companyId: number,
     campaignId: number
@@ -953,6 +966,31 @@ export const campaignsApi = {
   ): Promise<CampaignAnalyticsResponse> => {
     return apiClient.get<CampaignAnalyticsResponse>(
       `/api/v1/companies/${companyId}/campaigns/${campaignId}/analytics`
+    );
+  },
+
+  getCampaignEmailsDrilldown: async (
+    companyId: number,
+    campaignId: number,
+    params?: {
+      status?: string;
+      search?: string;
+      limit?: number;
+      offset?: number;
+      sort_by?: string;
+      sort_order?: string;
+    }
+  ): Promise<CampaignEmailsDrilldownResponse> => {
+    const searchParams = new URLSearchParams();
+    if (params?.status) searchParams.set("status", params.status);
+    if (params?.search) searchParams.set("search", params.search);
+    if (params?.limit !== undefined) searchParams.set("limit", String(params.limit));
+    if (params?.offset !== undefined) searchParams.set("offset", String(params.offset));
+    if (params?.sort_by) searchParams.set("sort_by", params.sort_by);
+    if (params?.sort_order) searchParams.set("sort_order", params.sort_order);
+    const qs = searchParams.toString();
+    return apiClient.get<CampaignEmailsDrilldownResponse>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/emails${qs ? `?${qs}` : ""}`
     );
   },
 

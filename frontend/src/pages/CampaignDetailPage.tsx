@@ -593,12 +593,21 @@ export const CampaignDetailPage: React.FC = () => {
       ? campaign.pending_count
       : Math.max(0, totalTarget - sentCount - bouncedCount - failedCount - suppressedCount);
 
-  const sentRate = totalTarget > 0 ? Math.round((sentCount / totalTarget) * 100) : 0;
-  const replyRate = sentCount > 0 ? Math.round((repliedCount / sentCount) * 100) : 0;
-  const bounceRate = totalTarget > 0 ? Math.round((bouncedCount / totalTarget) * 100) : 0;
-  const failedRate = totalTarget > 0 ? Math.round((failedCount / totalTarget) * 100) : 0;
+  const initialSentCount = analytics?.initial_sent_count ?? campaign.initial_sent_count ?? sentCount;
+  const followupSentCount = analytics?.followup_sent_count ?? campaign.followup_sent_count ?? 0;
+  const totalSentCount = analytics?.total_sent_count ?? campaign.total_sent_count ?? (initialSentCount + followupSentCount);
+  const uniqueRepliedCount = analytics?.unique_replied_count ?? campaign.unique_replied_count ?? repliedCount;
 
-  const processedCount = sentCount + bouncedCount + suppressedCount + failedCount;
+  const sentRate = totalTarget > 0 ? Math.round((initialSentCount / totalTarget) * 100) : 0;
+  const replyRate = initialSentCount > 0 ? Math.round((uniqueRepliedCount / initialSentCount) * 100) : 0;
+  const bounceRate = totalSentCount > 0 ? Math.round((bouncedCount / totalSentCount) * 100) : 0;
+  const failedRate = totalSentCount > 0 ? Math.round((failedCount / totalSentCount) * 100) : 0;
+
+  const step1Analytics = analytics?.steps?.find((s) => s.step_number === 1);
+  const initialBounced = step1Analytics?.bounced_count ?? Math.min(bouncedCount, Math.max(0, totalTarget - initialSentCount));
+  const initialFailed = step1Analytics?.failed_count ?? Math.min(failedCount, Math.max(0, totalTarget - initialSentCount - initialBounced));
+  const initialSuppressed = Math.min(suppressedCount, Math.max(0, totalTarget - initialSentCount - initialBounced - initialFailed));
+  const processedCount = initialSentCount + initialBounced + initialSuppressed + initialFailed;
   const completionPercent = totalTarget > 0 ? Math.min(100, Math.round((processedCount / totalTarget) * 100)) : 0;
 
   return (
@@ -1088,10 +1097,10 @@ export const CampaignDetailPage: React.FC = () => {
                 <div className="grid grid-cols-2 gap-2 mt-2.5">
                   <div className="bg-slate-50/70 p-2 rounded-lg border border-slate-100">
                     <div className="flex items-center justify-between text-slate-400">
-                      <span className="text-[10px] font-medium text-slate-500">Sent</span>
+                      <span className="text-[10px] font-medium text-slate-500">Initial Sent</span>
                       <Send className="h-3 w-3 text-emerald-500" />
                     </div>
-                    <p className="text-sm font-bold text-slate-900 mt-0.5">{sentCount}</p>
+                    <p className="text-sm font-bold text-slate-900 mt-0.5">{initialSentCount}</p>
                   </div>
 
                   <div className="bg-slate-50/70 p-2 rounded-lg border border-slate-100">
@@ -1475,41 +1484,61 @@ export const CampaignDetailPage: React.FC = () => {
 
               {/* 5-Tile Status Metric Strip */}
               <div className="grid grid-cols-5 gap-2 text-center">
-                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
-                  <Users className="h-3.5 w-3.5 text-indigo-500 mx-auto mb-1" />
-                  <p className="text-sm sm:text-base font-bold text-slate-900">{totalTarget}</p>
+                <Link
+                  to={`/campaigns/${campaign.id}/emails?status=recipients`}
+                  className="bg-slate-50/70 hover:bg-indigo-50/60 hover:border-indigo-200 transition-all duration-150 p-2.5 rounded-lg border border-slate-100 block cursor-pointer group"
+                  title="View all campaign recipients"
+                >
+                  <Users className="h-3.5 w-3.5 text-indigo-500 mx-auto mb-1 group-hover:scale-110 transition-transform" />
+                  <p className="text-sm sm:text-base font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">{totalTarget}</p>
                   <p className="text-[10px] text-slate-500">Recipients</p>
-                </div>
+                </Link>
 
-                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
-                  <Send className="h-3.5 w-3.5 text-emerald-500 mx-auto mb-1" />
-                  <p className="text-sm sm:text-base font-bold text-slate-900" data-testid="telemetry-sent">
-                    {sentCount}
+                <Link
+                  to={`/campaigns/${campaign.id}/emails?status=sent`}
+                  className="bg-slate-50/70 hover:bg-emerald-50/60 hover:border-emerald-200 transition-all duration-150 p-2.5 rounded-lg border border-slate-100 block cursor-pointer group"
+                  title="View successfully sent emails"
+                >
+                  <Send className="h-3.5 w-3.5 text-emerald-500 mx-auto mb-1 group-hover:scale-110 transition-transform" />
+                  <p className="text-sm sm:text-base font-bold text-slate-900 group-hover:text-emerald-600 transition-colors" data-testid="telemetry-sent">
+                    {totalSentCount}
                   </p>
-                  <p className="text-[10px] text-slate-500">Sent {sentRate}%</p>
-                </div>
+                  <p className="text-[10px] text-slate-500">Delivered Emails</p>
+                </Link>
 
-                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
-                  <Reply className="h-3.5 w-3.5 text-indigo-600 mx-auto mb-1" />
-                  <p className="text-sm sm:text-base font-bold text-slate-900">{repliedCount}</p>
+                <Link
+                  to={`/campaigns/${campaign.id}/emails?status=replies`}
+                  className="bg-slate-50/70 hover:bg-indigo-50/60 hover:border-indigo-200 transition-all duration-150 p-2.5 rounded-lg border border-slate-100 block cursor-pointer group"
+                  title="View incoming replies"
+                >
+                  <Reply className="h-3.5 w-3.5 text-indigo-600 mx-auto mb-1 group-hover:scale-110 transition-transform" />
+                  <p className="text-sm sm:text-base font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">{uniqueRepliedCount}</p>
                   <p className="text-[10px] text-slate-500">Replies {replyRate}%</p>
-                </div>
+                </Link>
 
-                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
-                  <AlertTriangle className="h-3.5 w-3.5 text-rose-500 mx-auto mb-1" />
-                  <p className="text-sm sm:text-base font-bold text-slate-900" data-testid="telemetry-bounced">
+                <Link
+                  to={`/campaigns/${campaign.id}/emails?status=bounced`}
+                  className="bg-slate-50/70 hover:bg-rose-50/60 hover:border-rose-200 transition-all duration-150 p-2.5 rounded-lg border border-slate-100 block cursor-pointer group"
+                  title="View bounced recipients"
+                >
+                  <AlertTriangle className="h-3.5 w-3.5 text-rose-500 mx-auto mb-1 group-hover:scale-110 transition-transform" />
+                  <p className="text-sm sm:text-base font-bold text-slate-900 group-hover:text-rose-600 transition-colors" data-testid="telemetry-bounced">
                     {bouncedCount}
                   </p>
                   <p className="text-[10px] text-slate-500">Bounced {bounceRate}%</p>
-                </div>
+                </Link>
 
-                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
-                  <AlertCircle className="h-3.5 w-3.5 text-amber-500 mx-auto mb-1" />
-                  <p className="text-sm sm:text-base font-bold text-slate-900" data-testid="telemetry-failed">
+                <Link
+                  to={`/campaigns/${campaign.id}/emails?status=failed`}
+                  className="bg-slate-50/70 hover:bg-amber-50/60 hover:border-amber-200 transition-all duration-150 p-2.5 rounded-lg border border-slate-100 block cursor-pointer group"
+                  title="View failed deliveries"
+                >
+                  <AlertCircle className="h-3.5 w-3.5 text-amber-500 mx-auto mb-1 group-hover:scale-110 transition-transform" />
+                  <p className="text-sm sm:text-base font-bold text-slate-900 group-hover:text-amber-600 transition-colors" data-testid="telemetry-failed">
                     {failedCount}
                   </p>
                   <p className="text-[10px] text-slate-500">Failed {failedRate}%</p>
-                </div>
+                </Link>
               </div>
 
               {/* Hidden Telemetry Counters for Test Coverage */}
@@ -1521,7 +1550,12 @@ export const CampaignDetailPage: React.FC = () => {
               {/* Visual Progress Bar */}
               <div className="pt-1 space-y-1.5">
                 <div className="flex items-center justify-between text-xs text-slate-500">
-                  <span>Dispatch Completion</span>
+                  <span
+                    className="cursor-help flex items-center gap-1"
+                    title="Initial Audience Processing: Measures processing of the initial recipient audience (dispatched, suppressed, or failed), not total multi-step sequence delivery."
+                  >
+                    <span>Initial Dispatch Completion</span>
+                  </span>
                   <span className="font-semibold text-indigo-600">{completionPercent}%</span>
                 </div>
                 <div
@@ -1533,16 +1567,24 @@ export const CampaignDetailPage: React.FC = () => {
                   aria-valuemax={100}
                 >
                   <div
-                    className="bg-emerald-500 h-full transition-all duration-300"
-                    style={{ width: `${totalTarget > 0 ? (sentCount / totalTarget) * 100 : 0}%` }}
+                    className="bg-emerald-500 h-full transition-all duration-300 shrink-0"
+                    style={{ width: `${totalTarget > 0 ? (initialSentCount / totalTarget) * 100 : 0}%` }}
+                    title={`Sent: ${initialSentCount}`}
                   />
                   <div
-                    className="bg-rose-500 h-full transition-all duration-300"
-                    style={{ width: `${totalTarget > 0 ? (bouncedCount / totalTarget) * 100 : 0}%` }}
+                    className="bg-rose-500 h-full transition-all duration-300 shrink-0"
+                    style={{ width: `${totalTarget > 0 ? (initialBounced / totalTarget) * 100 : 0}%` }}
+                    title={`Bounced: ${initialBounced}`}
                   />
                   <div
-                    className="bg-amber-500 h-full transition-all duration-300"
-                    style={{ width: `${totalTarget > 0 ? (failedCount / totalTarget) * 100 : 0}%` }}
+                    className="bg-amber-500 h-full transition-all duration-300 shrink-0"
+                    style={{ width: `${totalTarget > 0 ? (initialFailed / totalTarget) * 100 : 0}%` }}
+                    title={`Failed: ${initialFailed}`}
+                  />
+                  <div
+                    className="bg-slate-400 h-full transition-all duration-300 shrink-0"
+                    style={{ width: `${totalTarget > 0 ? (initialSuppressed / totalTarget) * 100 : 0}%` }}
+                    title={`Suppressed: ${initialSuppressed}`}
                   />
                 </div>
               </div>
@@ -2044,23 +2086,23 @@ export const CampaignDetailPage: React.FC = () => {
           ========================================================================= */}
       {currentTab === "analytics" && (
         <div className="space-y-4 sm:space-y-5">
-          {/* Row 1: 5 KPI Metric Cards */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
-            {/* Total Recipients */}
+          {/* Row 1: 6 KPI Metric Cards */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-3.5">
+            {/* Unique Recipients */}
             <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
               <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
                 <Users className="h-4 w-4" />
               </div>
               <div>
                 <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">
-                  Total Recipients
+                  Unique Recipients
                 </p>
                 <p className="text-2xl font-bold text-slate-900 mt-0.5">{totalTarget}</p>
-                <p className="text-[11px] text-slate-400 mt-0.5">Configured for this campaign</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">Total Recipients</p>
               </div>
             </div>
 
-            {/* Sent */}
+            {/* Initial Emails Sent */}
             <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
               <div className="flex items-center justify-between">
                 <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
@@ -2071,13 +2113,41 @@ export const CampaignDetailPage: React.FC = () => {
                 </span>
               </div>
               <div>
-                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Sent</p>
-                <p className="text-2xl font-bold text-slate-900 mt-0.5">{sentCount}</p>
-                <p className="text-[11px] text-slate-400 mt-0.5">Dispatched successfully</p>
+                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Initial Sent</p>
+                <p className="text-2xl font-bold text-slate-900 mt-0.5">{initialSentCount}</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">Step 1 dispatches</p>
               </div>
             </div>
 
-            {/* Replies */}
+            {/* Follow-up Emails Sent */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
+                  <Mail className="h-4 w-4" />
+                </div>
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Follow-ups Sent</p>
+                <p className="text-2xl font-bold text-slate-900 mt-0.5">{followupSentCount}</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">Step 2+ dispatches</p>
+              </div>
+            </div>
+
+            {/* Total Emails Sent */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="w-8 h-8 rounded-lg bg-violet-50 text-violet-600 flex items-center justify-center">
+                  <TrendingUp className="h-4 w-4" />
+                </div>
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Total Sent</p>
+                <p className="text-2xl font-bold text-slate-900 mt-0.5">{totalSentCount}</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">All sequence dispatches</p>
+              </div>
+            </div>
+
+            {/* Unique Replies */}
             <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
               <div className="flex items-center justify-between">
                 <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
@@ -2088,9 +2158,9 @@ export const CampaignDetailPage: React.FC = () => {
                 </span>
               </div>
               <div>
-                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Replies</p>
-                <p className="text-2xl font-bold text-slate-900 mt-0.5">{repliedCount}</p>
-                <p className="text-[11px] text-slate-400 mt-0.5">Positive responses</p>
+                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Unique Replies</p>
+                <p className="text-2xl font-bold text-slate-900 mt-0.5">{uniqueRepliedCount}</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">Responding recipients</p>
               </div>
             </div>
 
@@ -2110,23 +2180,6 @@ export const CampaignDetailPage: React.FC = () => {
                 <p className="text-[11px] text-slate-400 mt-0.5">Hard / soft bounces</p>
               </div>
             </div>
-
-            {/* Failed */}
-            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center">
-                  <AlertCircle className="h-4 w-4" />
-                </div>
-                <span className="text-xs font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">
-                  {failedRate}%
-                </span>
-              </div>
-              <div>
-                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Failed</p>
-                <p className="text-2xl font-bold text-slate-900 mt-0.5">{failedCount}</p>
-                <p className="text-[11px] text-slate-400 mt-0.5">Exceeded max retries</p>
-              </div>
-            </div>
           </div>
 
           {/* Row 2: Delivery Trend (Left) & Email Status Distribution (Right) */}
@@ -2141,7 +2194,7 @@ export const CampaignDetailPage: React.FC = () => {
                   <div>
                     <h3 className="text-xs sm:text-sm font-bold text-slate-900">Delivery Trend</h3>
                     <p className="text-[11px] text-slate-500">
-                      Daily email delivery activity across this campaign.
+                      Daily email dispatch, bounces, and unique replying recipients.
                     </p>
                   </div>
                 </div>
@@ -2150,16 +2203,59 @@ export const CampaignDetailPage: React.FC = () => {
                 </span>
               </div>
 
-              {/* Honest state: Daily time-series dispatch tracking is omitted on this backend */}
-              <div className="w-full h-44 flex flex-col items-center justify-center text-center p-4 bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
-                <div className="w-10 h-10 rounded-full bg-indigo-50 text-indigo-500 flex items-center justify-center mb-2">
-                  <TrendingUp className="h-5 w-5" />
+              {/* Delivery Trend Content: Chart if data exists, empty state otherwise */}
+              {analytics?.delivery_trend && analytics.delivery_trend.length > 0 ? (
+                <div className="w-full h-44 flex flex-col justify-between p-3 bg-slate-50/50 rounded-xl border border-slate-200" data-testid="delivery-trend-chart">
+                  <div className="flex items-center justify-end gap-3 text-[11px]">
+                    <div className="flex items-center gap-1.5 text-slate-600" title="Total messages dispatched on this date">
+                      <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500 shrink-0" />
+                      <span>Sent</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-slate-600" title="Unique replying recipients recorded on this date">
+                      <span className="w-2.5 h-2.5 rounded-sm bg-indigo-600 shrink-0" />
+                      <span>Unique Replies</span>
+                    </div>
+                  </div>
+                  <div className="flex-1 flex items-end justify-around gap-2 pt-2 pb-1">
+                    {analytics.delivery_trend.map((pt) => {
+                      const maxVal = Math.max(1, ...analytics.delivery_trend!.map((p) => Math.max(p.sent_count, p.replied_count)));
+                      const sentH = Math.round((pt.sent_count / maxVal) * 85);
+                      const repH = Math.round((pt.replied_count / maxVal) * 85);
+                      return (
+                        <div key={pt.date} className="flex-1 flex flex-col items-center gap-1 h-full justify-end max-w-[80px]">
+                          <div className="flex items-end gap-1.5 w-full justify-center h-24">
+                            <div
+                              className="w-3.5 bg-emerald-500 rounded-t transition-all"
+                              style={{ height: `${Math.max(6, sentH)}%` }}
+                              title={`${pt.date}: ${pt.sent_count} sent`}
+                            />
+                            {pt.replied_count > 0 && (
+                              <div
+                                className="w-3.5 bg-indigo-600 rounded-t transition-all"
+                                style={{ height: `${Math.max(6, repH)}%` }}
+                                title={`${pt.date}: ${pt.replied_count} replied`}
+                              />
+                            )}
+                          </div>
+                          <span className="text-[10px] text-slate-500 font-medium truncate w-full text-center">
+                            {pt.date.slice(5)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-                <p className="text-xs font-semibold text-slate-700">No time-series dispatch trend recorded</p>
-                <p className="text-[11px] text-slate-500 max-w-sm mt-1 leading-relaxed">
-                  Daily time-series delivery tracking is not stored for this campaign. Overall deliverability is tracked in the KPI summary and Step Performance below.
-                </p>
-              </div>
+              ) : (
+                <div className="w-full h-44 flex flex-col items-center justify-center text-center p-4 bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
+                  <div className="w-10 h-10 rounded-full bg-indigo-50 text-indigo-500 flex items-center justify-center mb-2">
+                    <TrendingUp className="h-5 w-5" />
+                  </div>
+                  <p className="text-xs font-semibold text-slate-700">No time-series dispatch trend recorded</p>
+                  <p className="text-[11px] text-slate-500 max-w-sm mt-1 leading-relaxed">
+                    Daily time-series delivery tracking is not stored for this campaign. Overall deliverability is tracked in the KPI summary and Step Performance below.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Email Status Distribution (Approx 40% on desktop) */}
@@ -2200,7 +2296,7 @@ export const CampaignDetailPage: React.FC = () => {
                             fill="transparent"
                             stroke="#10b981"
                             strokeWidth="4"
-                            strokeDasharray={`${Math.round((sentCount / totalTarget) * 88)} 88`}
+                            strokeDasharray={`${Math.round((initialSentCount / totalTarget) * 88)} 88`}
                             strokeDashoffset="0"
                           />
                         )}
@@ -2214,7 +2310,33 @@ export const CampaignDetailPage: React.FC = () => {
                             stroke="#94a3b8"
                             strokeWidth="4"
                             strokeDasharray={`${Math.round((pendingCount / totalTarget) * 88)} 88`}
-                            strokeDashoffset={`-${Math.round((sentCount / totalTarget) * 88)}`}
+                            strokeDashoffset={`-${Math.round((initialSentCount / totalTarget) * 88)}`}
+                          />
+                        )}
+                        {/* Bounced segment */}
+                        {bouncedCount > 0 && (
+                          <circle
+                            cx="18"
+                            cy="18"
+                            r="14"
+                            fill="transparent"
+                            stroke="#f43f5e"
+                            strokeWidth="4"
+                            strokeDasharray={`${Math.round((bouncedCount / totalTarget) * 88)} 88`}
+                            strokeDashoffset={`-${Math.round(((initialSentCount + pendingCount) / totalTarget) * 88)}`}
+                          />
+                        )}
+                        {/* Failed segment */}
+                        {failedCount > 0 && (
+                          <circle
+                            cx="18"
+                            cy="18"
+                            r="14"
+                            fill="transparent"
+                            stroke="#f59e0b"
+                            strokeWidth="4"
+                            strokeDasharray={`${Math.round((failedCount / totalTarget) * 88)} 88`}
+                            strokeDashoffset={`-${Math.round(((initialSentCount + pendingCount + bouncedCount) / totalTarget) * 88)}`}
                           />
                         )}
                       </>
@@ -2235,44 +2357,62 @@ export const CampaignDetailPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Legend */}
-                <div className="space-y-1.5 text-xs">
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="flex items-center gap-1.5 text-slate-600">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
-                      <span>Sent</span>
-                    </span>
-                    <span className="font-semibold text-slate-900">{sentCount} ({sentRate}%)</span>
+                {/* Grouped Legend: Audience Status & Sequence Outcomes */}
+                <div className="space-y-2.5 text-xs">
+                  <div>
+                    <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">Audience Status</span>
+                    <div className="space-y-1 mt-1">
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="flex items-center gap-1.5 text-slate-600">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                          <span>Initial Sent</span>
+                        </span>
+                        <span className="font-semibold text-slate-900">{initialSentCount} ({sentRate}%)</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="flex items-center gap-1.5 text-slate-600">
+                          <span className="w-2 h-2 rounded-full bg-slate-400 shrink-0" />
+                          <span>Pending</span>
+                        </span>
+                        <span className="font-semibold text-slate-900">
+                          {pendingCount} ({totalTarget > 0 ? Math.round((pendingCount / totalTarget) * 100) : 0}%)
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="flex items-center gap-1.5 text-slate-600">
+                          <span className="w-2 h-2 rounded-full bg-rose-500 shrink-0" />
+                          <span>Bounced</span>
+                        </span>
+                        <span className="font-semibold text-slate-900">{bouncedCount} ({bounceRate}%)</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="flex items-center gap-1.5 text-slate-600">
+                          <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
+                          <span>Failed</span>
+                        </span>
+                        <span className="font-semibold text-slate-900">{failedCount} ({failedRate}%)</span>
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="flex items-center gap-1.5 text-slate-600">
-                      <span className="w-2 h-2 rounded-full bg-indigo-500 shrink-0" />
-                      <span>Replied</span>
-                    </span>
-                    <span className="font-semibold text-slate-900">{repliedCount} ({replyRate}%)</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="flex items-center gap-1.5 text-slate-600">
-                      <span className="w-2 h-2 rounded-full bg-rose-500 shrink-0" />
-                      <span>Bounced</span>
-                    </span>
-                    <span className="font-semibold text-slate-900">{bouncedCount} ({bounceRate}%)</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="flex items-center gap-1.5 text-slate-600">
-                      <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
-                      <span>Failed</span>
-                    </span>
-                    <span className="font-semibold text-slate-900">{failedCount} ({failedRate}%)</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="flex items-center gap-1.5 text-slate-600">
-                      <span className="w-2 h-2 rounded-full bg-slate-400 shrink-0" />
-                      <span>Pending</span>
-                    </span>
-                    <span className="font-semibold text-slate-900">
-                      {pendingCount} ({totalTarget > 0 ? Math.round((pendingCount / totalTarget) * 100) : 0}%)
-                    </span>
+
+                  <div className="pt-1.5 border-t border-slate-100">
+                    <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">Sequence Outcomes</span>
+                    <div className="space-y-1 mt-1">
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="flex items-center gap-1.5 text-slate-600">
+                          <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
+                          <span>Follow-ups Sent</span>
+                        </span>
+                        <span className="font-semibold text-slate-900">{followupSentCount}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="flex items-center gap-1.5 text-slate-600">
+                          <span className="w-2 h-2 rounded-full bg-indigo-500 shrink-0" />
+                          <span>Unique Replies</span>
+                        </span>
+                        <span className="font-semibold text-slate-900">{uniqueRepliedCount} ({replyRate}%)</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -2312,7 +2452,7 @@ export const CampaignDetailPage: React.FC = () => {
                     <th className="py-2.5 px-3 text-center">Replies</th>
                     <th className="py-2.5 px-3 text-center">Bounce Rate</th>
                     <th className="py-2.5 px-3 text-center">Failure Rate</th>
-                    <th className="py-2.5 px-3">Delivery Rate</th>
+                    <th className="py-2.5 px-3" title="Estimated from successful SMTP dispatch minus detected bounces; actual mailbox receipt is not tracked.">Net Delivery Rate</th>
                     <th className="py-2.5 px-3 text-right">Actions</th>
                   </tr>
                 </thead>
@@ -2355,10 +2495,15 @@ export const CampaignDetailPage: React.FC = () => {
                         : stepNum === 1
                         ? step1Item?.is_active !== false
                         : followupSteps.find((f) => f.step_number === stepNum)?.is_active !== false;
-                    const delRate = Math.round(stepItem.delivery_rate || 0);
-                    const bncRate = Math.round(stepItem.bounce_rate || 0);
-                    const failRate = totalTarget > 0 ? Math.round(((stepItem.failed_count || 0) / totalTarget) * 100) : 0;
-                    const repRate = Math.round(stepItem.reply_rate || 0);
+                    const sSent = stepItem.sent_count ?? 0;
+                    const sBnc = stepItem.bounced_count ?? 0;
+                    const sFail = stepItem.failed_count ?? 0;
+                    const sReplied = stepItem.replied_count ?? 0;
+                    const sDeliv = stepItem.delivered_count !== undefined ? stepItem.delivered_count : Math.max(0, sSent - sBnc);
+                    const delRate = stepItem.delivery_rate !== undefined ? Math.round(stepItem.delivery_rate) : (sSent > 0 ? Math.round((sDeliv / sSent) * 100) : 0);
+                    const bncRate = stepItem.bounce_rate !== undefined ? Math.round(stepItem.bounce_rate) : (sSent > 0 ? Math.round((sBnc / sSent) * 100) : 0);
+                    const failRate = sSent > 0 ? Math.round((sFail / sSent) * 100) : 0;
+                    const repRate = stepItem.reply_rate !== undefined ? Math.round(stepItem.reply_rate) : (sSent > 0 ? Math.round((sReplied / sSent) * 100) : 0);
 
                     return (
                       <tr key={stepNum} className="hover:bg-slate-50/70 transition-colors">
@@ -2405,7 +2550,7 @@ export const CampaignDetailPage: React.FC = () => {
                         <td className="py-3 px-3 text-center font-medium">
                           {stepItem.failed_count ?? 0} ({failRate}%)
                         </td>
-                        <td className="py-3 px-3">
+                        <td className="py-3 px-3" title="Estimated from successful SMTP dispatch minus detected bounces; actual mailbox receipt is not tracked.">
                           <div className="flex items-center gap-2">
                             <span className="font-semibold text-slate-900 w-8">{delRate}%</span>
                             <div className="w-16 bg-slate-100 rounded-full h-1.5 overflow-hidden">
@@ -2523,9 +2668,9 @@ export const CampaignDetailPage: React.FC = () => {
                       {sentCount === 0 ? "No data available yet" : "Campaign Performance Insight"}
                     </p>
                     <p className="text-[11px] text-indigo-700/90 leading-relaxed">
-                      {sentCount === 0
+                      {initialSentCount === 0
                         ? "Your campaign hasn't been sent yet. Analytics will appear here after emails are dispatched."
-                        : `Step 1 (Initial Outreach) has recorded ${sentCount} sends with ${repliedCount} positive replies detected.`}
+                        : `Step 1 (Initial Outreach) has recorded ${initialSentCount} sends with ${uniqueRepliedCount} positive replies detected.`}
                     </p>
                   </div>
                 </div>

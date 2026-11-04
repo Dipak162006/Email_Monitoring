@@ -28,7 +28,7 @@ export const RecipientStatusBadge: React.FC<RecipientStatusBadgeProps> = ({
   className = "",
 }) => {
   // 1. Stopped states
-  if (status === "STOPPED") {
+  if (status === "STOPPED" || Boolean(stoppedReason)) {
     switch (stoppedReason) {
       case "REPLIED":
         return (

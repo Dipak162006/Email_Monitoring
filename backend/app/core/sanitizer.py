@@ -19,6 +19,7 @@ from app.core.css_inliner import (
     parse_css_rules,
     selector_matches,
 )
+from app.core.email_layout import prepare_email_html_for_delivery
 
 
 class _HTMLSanitizerParser(HTMLParser):

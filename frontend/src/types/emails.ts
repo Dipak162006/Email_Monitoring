@@ -168,6 +168,7 @@ export interface AuthorizedEmailAccount {
   provider: string;
   is_active: boolean;
   is_sync_enabled: boolean;
+  is_verified?: boolean;
 }
 
 export interface EmailSendPayload {

@@ -1357,6 +1357,10 @@ class CampaignDeliveryService:
                 company_id=company_id,
                 email=recipient.email,
             )
+            try:
+                await cls.check_and_finalize_campaign_completion(delivery.campaign_id, db=db)
+            except Exception as exc:
+                logger.warning("Error checking completion for campaign %d after bounce: %s", delivery.campaign_id, exc)
         return delivery
 
     @classmethod
@@ -1709,7 +1713,7 @@ class CampaignDeliveryService:
                     if not recipient.replied_at:
                         recipient.replied_at = current_time
                     recipient.next_step_due_at = None
-                    if recipient.status == CampaignRecipientStatus.ACTIVE.value:
+                    if recipient.status in (CampaignRecipientStatus.ACTIVE.value, CampaignRecipientStatus.SENT.value):
                         recipient.status = CampaignRecipientStatus.STOPPED.value
                     await db.commit()
                     results.append({
@@ -1801,21 +1805,17 @@ class CampaignDeliveryService:
                         recipient.current_step_number = candidate_step.step_number
                         continue
                     else:
-                        # Candidate step matches targeting tags. Check due timing relative to previous send.
-                        ref_time = prev_delivery.sent_at or prev_delivery.created_at or current_time
-                        if ref_time.tzinfo is None:
-                            ref_time = ref_time.replace(tzinfo=timezone.utc)
-                        step_due_time = ref_time + timedelta(hours=candidate_step.delay_hours)
+                        # Candidate step matches targeting tags.
                         sw_fu = getattr(campaign, "sending_window", None)
-                        if sw_fu:
-                            step_due_time = SendingWindowService.compute_next_window_opening(step_due_time, sw_fu)
 
-                        if step_due_time > current_time:
-                            # Step is not due yet; schedule it
-                            recipient.next_step_due_at = step_due_time
-                            next_step = None
-                            break
-                        else:
+                        # If recipient.next_step_due_at was explicitly saved and reached, respect this scheduled due time
+                        # instead of overwriting it with the step's default delay (which would revert manual reschedules).
+                        is_already_due = (
+                            recipient.next_step_due_at is not None
+                            and recipient.next_step_due_at <= current_time
+                        )
+
+                        if is_already_due:
                             # Step is due now, but re-validate immediate window before dispatching
                             if sw_fu and not SendingWindowService.is_within_sending_window(current_time, sw_fu):
                                 recipient.next_step_due_at = SendingWindowService.compute_next_window_opening(current_time, sw_fu)
@@ -1823,6 +1823,28 @@ class CampaignDeliveryService:
                                 break
                             next_step = candidate_step
                             break
+                        else:
+                            # Check due timing relative to previous send when not already scheduled/due
+                            ref_time = prev_delivery.sent_at or prev_delivery.created_at or current_time
+                            if ref_time.tzinfo is None:
+                                ref_time = ref_time.replace(tzinfo=timezone.utc)
+                            step_due_time = ref_time + timedelta(hours=candidate_step.delay_hours)
+                            if sw_fu:
+                                step_due_time = SendingWindowService.compute_next_window_opening(step_due_time, sw_fu)
+
+                            if step_due_time > current_time:
+                                # Step is not due yet; schedule it
+                                recipient.next_step_due_at = step_due_time
+                                next_step = None
+                                break
+                            else:
+                                # Step is due now, but re-validate immediate window before dispatching
+                                if sw_fu and not SendingWindowService.is_within_sending_window(current_time, sw_fu):
+                                    recipient.next_step_due_at = SendingWindowService.compute_next_window_opening(current_time, sw_fu)
+                                    next_step = None
+                                    break
+                                next_step = candidate_step
+                                break
 
                 if not next_step:
                     if recipient.current_step_number >= remaining_steps[-1].step_number:
@@ -1998,118 +2020,154 @@ class CampaignDeliveryService:
         cls,
         campaign_id: int,
         db_factory: Optional[Any] = None,
+        db: Optional[AsyncSession] = None,
     ) -> Optional[str]:
         """Check whether all initial and follow-up work has completed for a campaign,
         and if so, transition it to COMPLETED.
 
         Preserves PAUSED, CANCELLED, or FAILED status without overwriting.
         """
+        if db is not None:
+            return await cls._finalize_with_db(db, campaign_id)
+
         if db_factory is None:
             from app.workers.tasks import get_worker_db
             db_factory = get_worker_db
 
-        async with db_factory() as db:
-            campaign = await db.get(Campaign, campaign_id)
-            if not campaign:
-                return None
+        async with db_factory() as session:
+            return await cls._finalize_with_db(session, campaign_id)
 
-            # Only RUNNING campaigns can naturally complete
-            if campaign.status != CampaignStatus.RUNNING.value:
-                return campaign.status
+    @classmethod
+    async def _finalize_with_db(
+        cls,
+        db: AsyncSession,
+        campaign_id: int,
+    ) -> Optional[str]:
+        campaign = await db.get(Campaign, campaign_id)
+        if not campaign:
+            return None
 
-            # 1. Check for remaining initial recipients
-            remaining_pending = await db.scalar(
+        # Only RUNNING campaigns can naturally complete
+        if campaign.status != CampaignStatus.RUNNING.value:
+            return campaign.status
+
+        # 1. Check for remaining initial recipients
+        remaining_pending = await db.scalar(
+            select(func.count(CampaignRecipient.id)).where(
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.status.in_([
+                    CampaignRecipientStatus.PENDING.value,
+                    CampaignRecipientStatus.ACTIVE.value,
+                ]),
+                CampaignRecipient.current_step_number == 0,
+            )
+        ) or 0
+        if remaining_pending > 0:
+            return campaign.status
+
+        # 2. Check for active deliveries in SENDING status
+        active_sending = await db.scalar(
+            select(func.count(CampaignDelivery.id)).where(
+                CampaignDelivery.campaign_id == campaign_id,
+                CampaignDelivery.status == CampaignDeliveryStatus.SENDING.value,
+            )
+        ) or 0
+        if active_sending > 0:
+            return campaign.status
+
+        # 3. Check for recipients with scheduled follow-ups
+        scheduled_followups = await db.scalar(
+            select(func.count(CampaignRecipient.id)).where(
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.next_step_due_at.is_not(None),
+                CampaignRecipient.stopped_reason.is_(None),
+            )
+        ) or 0
+        if scheduled_followups > 0:
+            return campaign.status
+
+        # 4. Check for recipients eligible for active follow-up steps
+        max_step = await db.scalar(
+            select(func.max(CampaignStep.step_number)).where(
+                CampaignStep.campaign_id == campaign_id,
+                CampaignStep.is_active == True,
+            )
+        ) or 1
+
+        if max_step >= 2:
+            eligible_for_followups = await db.scalar(
                 select(func.count(CampaignRecipient.id)).where(
-                    CampaignRecipient.campaign_id == campaign_id,
-                    CampaignRecipient.status.in_([
-                        CampaignRecipientStatus.PENDING.value,
-                        CampaignRecipientStatus.ACTIVE.value,
-                    ]),
-                    CampaignRecipient.current_step_number == 0,
-                )
-            ) or 0
-            if remaining_pending > 0:
-                return campaign.status
-
-            # 2. Check for active deliveries in SENDING status
-            active_sending = await db.scalar(
-                select(func.count(CampaignDelivery.id)).where(
-                    CampaignDelivery.campaign_id == campaign_id,
-                    CampaignDelivery.status == CampaignDeliveryStatus.SENDING.value,
-                )
-            ) or 0
-            if active_sending > 0:
-                return campaign.status
-
-            # 3. Check for recipients with scheduled follow-ups
-            scheduled_followups = await db.scalar(
-                select(func.count(CampaignRecipient.id)).where(
-                    CampaignRecipient.campaign_id == campaign_id,
-                    CampaignRecipient.next_step_due_at.is_not(None),
-                    CampaignRecipient.stopped_reason.is_(None),
-                )
-            ) or 0
-            if scheduled_followups > 0:
-                return campaign.status
-
-            # 4. Check for recipients eligible for active follow-up steps
-            max_step = await db.scalar(
-                select(func.max(CampaignStep.step_number)).where(
-                    CampaignStep.campaign_id == campaign_id,
-                    CampaignStep.is_active == True,
-                )
-            ) or 1
-
-            if max_step >= 2:
-                eligible_for_followups = await db.scalar(
-                    select(func.count(CampaignRecipient.id)).where(
-                        CampaignRecipient.campaign_id == campaign_id,
-                        CampaignRecipient.status.in_([
-                            CampaignRecipientStatus.SENT.value,
-                            CampaignRecipientStatus.ACTIVE.value,
-                        ]),
-                        CampaignRecipient.stopped_reason.is_(None),
-                        CampaignRecipient.replied_at.is_(None),
-                        CampaignRecipient.current_step_number < max_step,
-                    )
-                ) or 0
-                if eligible_for_followups > 0:
-                    return campaign.status
-
-            # Check if any sends succeeded
-            total_sent = await db.scalar(
-                select(func.count(CampaignDelivery.id)).where(
-                    CampaignDelivery.campaign_id == campaign_id,
-                    CampaignDelivery.status == CampaignDeliveryStatus.SENT.value,
-                )
-            ) or 0
-
-            target_status = CampaignStatus.COMPLETED if total_sent > 0 else CampaignStatus.FAILED
-
-            # Mark finished recipients as COMPLETED
-            if target_status == CampaignStatus.COMPLETED:
-                recip_stmt = select(CampaignRecipient).where(
                     CampaignRecipient.campaign_id == campaign_id,
                     CampaignRecipient.status.in_([
                         CampaignRecipientStatus.SENT.value,
                         CampaignRecipientStatus.ACTIVE.value,
                     ]),
                     CampaignRecipient.stopped_reason.is_(None),
-                    CampaignRecipient.next_step_due_at.is_(None),
+                    CampaignRecipient.replied_at.is_(None),
+                    CampaignRecipient.current_step_number < max_step,
                 )
-                recips_res = await db.execute(recip_stmt)
-                for recip in recips_res.scalars().all():
-                    recip.status = CampaignRecipientStatus.COMPLETED.value
+            ) or 0
+            if eligible_for_followups > 0:
+                return campaign.status
 
-            campaign = await CampaignService.transition_state(
-                db=db,
-                company_id=campaign.company_id,
-                campaign_id=campaign_id,
-                target_status=target_status,
+        # Check if any sends succeeded
+        total_sent = await db.scalar(
+            select(func.count(CampaignDelivery.id)).where(
+                CampaignDelivery.campaign_id == campaign_id,
+                CampaignDelivery.status == CampaignDeliveryStatus.SENT.value,
             )
-            await db.commit()
-            logger.info("Campaign %d has finished all work. Transitioned to %s.", campaign_id, target_status.value)
-            return campaign.status
+        ) or 0
+
+        target_status = CampaignStatus.COMPLETED if total_sent > 0 else CampaignStatus.FAILED
+
+        # Mark finished recipients as COMPLETED
+        if target_status == CampaignStatus.COMPLETED:
+            recip_stmt = select(CampaignRecipient).where(
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.status.in_([
+                    CampaignRecipientStatus.SENT.value,
+                    CampaignRecipientStatus.ACTIVE.value,
+                ]),
+                CampaignRecipient.stopped_reason.is_(None),
+                CampaignRecipient.next_step_due_at.is_(None),
+            )
+            recips_res = await db.execute(recip_stmt)
+            for recip in recips_res.scalars().all():
+                recip.status = CampaignRecipientStatus.COMPLETED.value
+
+        campaign = await CampaignService.transition_state(
+            db=db,
+            company_id=campaign.company_id,
+            campaign_id=campaign_id,
+            target_status=target_status,
+        )
+        await db.commit()
+        logger.info("Campaign %d has finished all work. Transitioned to %s.", campaign_id, target_status.value)
+        return campaign.status
+
+    @classmethod
+    async def check_and_finalize_all_running_campaigns(
+        cls,
+        db_factory: Optional[Any] = None,
+    ) -> List[int]:
+        """Sweep all RUNNING campaigns and finalize any that have finished all initial and follow-up work."""
+        if db_factory is None:
+            from app.workers.tasks import get_worker_db
+            db_factory = get_worker_db
+        finalized = []
+        async with db_factory() as db:
+            running_camps = await db.scalars(
+                select(Campaign.id).where(Campaign.status == CampaignStatus.RUNNING.value)
+            )
+            campaign_ids = list(running_camps.all())
+        for c_id in campaign_ids:
+            try:
+                res = await cls.check_and_finalize_campaign_completion(c_id, db_factory=db_factory)
+                if res == CampaignStatus.COMPLETED.value:
+                    finalized.append(c_id)
+            except Exception as e:
+                logger.warning("Error checking completion for campaign %d: %s", c_id, e)
+        return finalized
 
 
 

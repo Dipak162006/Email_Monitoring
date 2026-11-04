@@ -265,11 +265,33 @@ def sync_email_account_task(
                 )
                 raise
         else:
+            if isinstance(exc, HTTPException):
+                if isinstance(exc.detail, str):
+                    error_msg = exc.detail
+                elif isinstance(exc.detail, dict):
+                    error_msg = exc.detail.get("message") or str(exc.detail)
+                else:
+                    error_msg = str(exc.detail or exc)
+            else:
+                error_msg = getattr(exc, "safe_message", str(exc))
+
             logger.error(
                 "Non-retryable error synchronizing account %d: %s",
                 account_id,
-                str(exc),
+                error_msg,
             )
+            if isinstance(exc, HTTPException):
+                return {
+                    "status": "FAILURE",
+                    "account_id": account_id,
+                    "folder": folder,
+                    "total_discovered": 0,
+                    "new_messages": 0,
+                    "duplicates_skipped": 0,
+                    "malformed_skipped": 0,
+                    "synced_at": None,
+                    "error_message": error_msg,
+                }
             raise
 
 

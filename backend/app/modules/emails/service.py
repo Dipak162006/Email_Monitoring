@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.sanitizer import sanitize_html
+from app.core.sanitizer import prepare_email_html_for_delivery, sanitize_html
 from app.modules.auth.models import User
 from app.modules.email_accounts.models import EmailAccount
 from app.modules.emails.models import Email, EmailAttachment, EmailDirection, EmailStatus, EmailThread
@@ -204,7 +204,8 @@ class EmailService:
         has_html = bool(send_req.body_html and send_req.body_html.strip())
         if has_html:
             sanitized = sanitize_html(send_req.body_html) or send_req.body_html
-            mime_html, inline_media = process_inline_media_images(sanitized, account.company_id)
+            prepared_html = prepare_email_html_for_delivery(sanitized)
+            mime_html, inline_media = process_inline_media_images(prepared_html, account.company_id)
             if has_text:
                 msg.set_content(send_req.body_text)
                 msg.add_alternative(mime_html, subtype="html")

@@ -21,6 +21,7 @@ from app.modules.campaigns.schemas import (
     CampaignCreate,
     CampaignDetailRead,
     CampaignDispatchResponse,
+    CampaignEmailsDrilldownResponse,
     CampaignImportDraftRequest,
     CampaignPreflightResponse,
     CampaignRead,
@@ -35,6 +36,7 @@ from app.modules.campaigns.schemas import (
     CampaignRecipientTagsUpdateRequest,
     CampaignRecipientUpdate,
     CampaignScheduleRequest,
+    CampaignSummaryCountsRead,
     CampaignUpdate,
 )
 from app.modules.campaigns.service import CampaignService
@@ -109,6 +111,25 @@ async def list_campaigns(
 
 
 @router.get(
+    "/summary",
+    response_model=CampaignSummaryCountsRead,
+    status_code=status.HTTP_200_OK,
+    summary="Get company-wide campaign status counts summary",
+)
+async def get_campaigns_summary(
+    company_id: int,
+    membership: CompanyUser = Depends(get_company_membership),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignSummaryCountsRead:
+    """Retrieve company-wide campaign counts grouped by status for KPI summary cards."""
+    counts = await CampaignService.get_campaigns_summary(
+        db=db,
+        company_id=company_id,
+    )
+    return CampaignSummaryCountsRead(**counts)
+
+
+@router.get(
     "/{campaign_id}",
     response_model=CampaignDetailRead,
     status_code=status.HTTP_200_OK,
@@ -156,6 +177,42 @@ async def get_campaign_analytics(
         company_id=company_id,
         campaign_id=campaign_id,
     )
+
+
+@router.get(
+    "/{campaign_id}/emails",
+    response_model=CampaignEmailsDrilldownResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get campaign emails performance drilldown",
+)
+async def get_campaign_emails_drilldown(
+    company_id: int,
+    campaign_id: int,
+    status_filter: Optional[str] = Query("recipients", alias="status", description="Drilldown status filter: recipients, sent, replies, bounced, failed"),
+    search: Optional[str] = Query(None, description="Search keyword"),
+    limit: int = Query(50, ge=1, le=100, description="Page limit"),
+    offset: int = Query(0, ge=0, description="Page offset"),
+    sort_by: Optional[str] = Query(None, description="Sort column"),
+    sort_order: Optional[str] = Query("desc", description="Sort order: asc or desc"),
+    membership: CompanyUser = Depends(get_company_membership),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignEmailsDrilldownResponse:
+    """Retrieve filtered, paginated email performance drilldown records for a campaign.
+    
+    Accessible to all authorized company members (MEMBER, ADMIN, OWNER).
+    """
+    data = await CampaignService.get_campaign_emails_drilldown(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+        status=status_filter,
+        search=search,
+        limit=limit,
+        offset=offset,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+    return CampaignEmailsDrilldownResponse(**data)
 
 
 @router.patch(

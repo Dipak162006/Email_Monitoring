@@ -1,8 +1,9 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import parseaddr
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -20,18 +21,23 @@ from app.modules.campaigns.models import (
     CampaignRecipientStopReason,
     CampaignStep,
     CampaignStatus,
+    SuppressionEntry,
 )
 from app.modules.campaigns.schemas import (
     CampaignAnalyticsResponse,
     CampaignAttachmentRead,
     CampaignCreate,
+    CampaignDeliveryTrendPoint,
     CampaignDetailRead,
     CampaignStepAnalytics,
     CampaignStepRead,
     CampaignUpdate,
+    CampaignEmailsDrilldownResponse,
 )
 from app.modules.email_accounts.models import EmailAccount
 from app.modules.email_accounts.service import EmailAccountService
+from app.modules.emails.models import Email, EmailDirection, EmailThread
+from app.modules.emails.thread_service import EmailThreadService
 
 
 # Backend-owned campaign lifecycle state machine transition graph
@@ -292,6 +298,35 @@ class CampaignService:
             campaign.recipient_count = count or 0
             campaigns.append(campaign)
         return campaigns
+
+    @staticmethod
+    async def get_campaigns_summary(
+        db: AsyncSession,
+        company_id: int,
+    ) -> Dict[str, int]:
+        """Aggregate company-wide campaign counts grouped by status for KPI summary cards."""
+        stmt = (
+            select(Campaign.status, func.count(Campaign.id))
+            .where(
+                Campaign.company_id == company_id,
+                Campaign.status != CampaignStatus.ARCHIVED.value,
+            )
+            .group_by(Campaign.status)
+        )
+        res = await db.execute(stmt)
+        status_map = dict(res.all())
+        active_count = status_map.get(CampaignStatus.RUNNING.value, 0) + status_map.get(CampaignStatus.QUEUED.value, 0)
+        scheduled_count = status_map.get(CampaignStatus.SCHEDULED.value, 0)
+        draft_count = status_map.get(CampaignStatus.DRAFT.value, 0)
+        completed_count = status_map.get(CampaignStatus.COMPLETED.value, 0)
+        total_count = sum(status_map.values())
+        return {
+            "total_count": total_count,
+            "active_count": active_count,
+            "scheduled_count": scheduled_count,
+            "draft_count": draft_count,
+            "completed_count": completed_count,
+        }
 
     @staticmethod
     async def update_campaign(
@@ -804,6 +839,8 @@ class CampaignService:
                 counts["active_count"] += c
                 if step_num == 0:
                     counts["pending_count"] += c
+                else:
+                    counts["sent_count"] += c
             elif val_str == "COMPLETED":
                 counts["completed_count"] += c
                 counts["sent_count"] += c
@@ -813,8 +850,12 @@ class CampaignService:
                     counts["bounced_count"] += c
                 elif stopped_reason in ("UNSUBSCRIBED", "MANUAL"):
                     counts["suppressed_count"] += c
+                    if step_num >= 1:
+                        counts["sent_count"] += c
                 elif stopped_reason == "CAMPAIGN_CANCELLED":
                     counts["failed_count"] += c
+                elif stopped_reason == "REPLIED":
+                    counts["sent_count"] += c
             else:
                 # Legacy fallback
                 status_key = f"{val_str.lower()}_count"
@@ -830,12 +871,94 @@ class CampaignService:
         counts["uncertain_count"] = uncertain_c
 
         # Follow-up sequence telemetry counters
-        replied_count_stmt = select(func.count(CampaignRecipient.id)).where(
-            CampaignRecipient.campaign_id == campaign_id,
-            (CampaignRecipient.replied_at.is_not(None))
-            | (CampaignRecipient.stopped_reason == CampaignRecipientStopReason.REPLIED.value),
+        # Verified replies: verified thread_has_reply, matching inbound email, or non-disproven stopped reply
+        from email.utils import parseaddr
+        from app.modules.emails.models import Email, EmailDirection, EmailThread
+        from app.modules.emails.thread_service import EmailThreadService
+
+        deliv_stmt = (
+            select(
+                CampaignDelivery.recipient_id,
+                CampaignDelivery.message_id,
+                CampaignDelivery.thread_id,
+                EmailThread.has_reply,
+            )
+            .outerjoin(EmailThread, CampaignDelivery.thread_id == EmailThread.id)
+            .where(CampaignDelivery.campaign_id == campaign_id)
         )
-        counts["replied_count"] = (await db.scalar(replied_count_stmt)) or 0
+        deliv_rows = (await db.execute(deliv_stmt)).all()
+
+        matched_reply_recip_ids: set[int] = set()
+        deliv_by_msg_id: dict[str, int] = {}
+        recip_deliv_threads: dict[int, list[tuple[Optional[int], Optional[bool]]]] = {}
+
+        for r_id, msg_id, th_id, th_reply in deliv_rows:
+            # NOTE: th_reply (thread.has_reply) is NOT used here because it can be
+            # True due to outbound emails being imported back into the thread.
+            # Replies are only counted via verified inbound email header matching below.
+            if msg_id:
+                clean_mid = msg_id.strip()
+                deliv_by_msg_id[clean_mid] = r_id
+                stripped_mid = clean_mid.strip("<>")
+                deliv_by_msg_id[stripped_mid] = r_id
+                deliv_by_msg_id[f"<{stripped_mid}>"] = r_id
+            if r_id not in recip_deliv_threads:
+                recip_deliv_threads[r_id] = []
+            recip_deliv_threads[r_id].append((th_id, th_reply))
+
+        if deliv_by_msg_id:
+            camp_stmt = select(Campaign.company_id, Campaign.email_account_id).where(Campaign.id == campaign_id)
+            camp_row = (await db.execute(camp_stmt)).first()
+            if camp_row:
+                comp_id, camp_acc_id = camp_row[0], camp_row[1]
+                camp_sender_email = ""
+                if camp_acc_id:
+                    acc_email = await db.scalar(
+                        select(EmailAccount.email_address).where(EmailAccount.id == camp_acc_id)
+                    )
+                    if acc_email:
+                        camp_sender_email = acc_email.strip().lower()
+
+                recip_emails = dict((await db.execute(
+                    select(CampaignRecipient.id, CampaignRecipient.email)
+                    .where(CampaignRecipient.campaign_id == campaign_id)
+                )).all())
+
+                inc_emails = (await db.execute(
+                    select(Email.in_reply_to, Email.references_header, Email.sender)
+                    .where(
+                        Email.company_id == comp_id,
+                        Email.direction == EmailDirection.INCOMING.value,
+                    )
+                )).all()
+
+                for in_reply, refs, sender in inc_emails:
+                    sender_clean = parseaddr(sender)[1].strip().lower() if sender else ""
+                    if not sender_clean or (camp_sender_email and sender_clean == camp_sender_email):
+                        continue
+
+                    candidate_cids = []
+                    if in_reply:
+                        candidate_cids.extend(EmailThreadService.extract_message_ids(in_reply))
+                        clean_in_reply = in_reply.strip()
+                        if clean_in_reply not in candidate_cids:
+                            candidate_cids.append(clean_in_reply)
+                    if refs:
+                        candidate_cids.extend(EmailThreadService.extract_message_ids(refs))
+
+                    for cid in candidate_cids:
+                        cid_clean = cid.strip()
+                        target_r_id = deliv_by_msg_id.get(cid_clean)
+                        if target_r_id and (recip_emails.get(target_r_id) or "").strip().lower() == sender_clean:
+                            matched_reply_recip_ids.add(target_r_id)
+                            break
+
+        # Fallback attribution via stopped_reason='REPLIED' or replied_at has been
+        # removed. Only header-verified inbound email matches count as genuine replies.
+        # This prevents stale/incorrect recipient state from inflating reply counts.
+
+        counts["replied_count"] = len(matched_reply_recip_ids)
+        counts["unique_replied_count"] = len(matched_reply_recip_ids)
 
         followup_sched_stmt = select(func.count(CampaignRecipient.id)).where(
             CampaignRecipient.campaign_id == campaign_id,
@@ -843,6 +966,18 @@ class CampaignService:
             CampaignRecipient.stopped_reason.is_(None),
         )
         counts["followup_scheduled_count"] = (await db.scalar(followup_sched_stmt)) or 0
+
+        initial_sent_stmt = (
+            select(func.count(CampaignDelivery.id))
+            .join(CampaignStep, CampaignDelivery.step_id == CampaignStep.id)
+            .where(
+                CampaignDelivery.campaign_id == campaign_id,
+                CampaignDelivery.status == CampaignDeliveryStatus.SENT.value,
+                CampaignStep.step_number == 1,
+            )
+        )
+        initial_sent = (await db.scalar(initial_sent_stmt)) or 0
+        counts["initial_sent_count"] = initial_sent
 
         followup_sent_stmt = (
             select(func.count(CampaignDelivery.id))
@@ -853,7 +988,11 @@ class CampaignService:
                 CampaignStep.step_number >= 2,
             )
         )
-        counts["followup_sent_count"] = (await db.scalar(followup_sent_stmt)) or 0
+        followup_sent = (await db.scalar(followup_sent_stmt)) or 0
+        counts["followup_sent_count"] = followup_sent
+        counts["total_sent_count"] = initial_sent + followup_sent
+        # Authoritative Step 1 sends: preserve historical Initial Sent even if recipients were later stopped
+        counts["sent_count"] = initial_sent if initial_sent > 0 else counts["sent_count"]
 
         return counts
 
@@ -933,6 +1072,9 @@ class CampaignService:
             replied_count=counts.get("replied_count", 0),
             followup_scheduled_count=counts.get("followup_scheduled_count", 0),
             followup_sent_count=counts.get("followup_sent_count", 0),
+            initial_sent_count=counts.get("initial_sent_count", 0),
+            total_sent_count=counts.get("total_sent_count", 0),
+            unique_replied_count=counts.get("unique_replied_count", counts.get("replied_count", 0)),
             attachments=[CampaignAttachmentRead.model_validate(a) for a in attachments],
             steps=steps_read,
             followup_steps=followup_steps_read,
@@ -1271,8 +1413,11 @@ class CampaignService:
         recipients = (await db.execute(recip_stmt)).scalars().all()
         total_recipients = len(recipients)
 
-        # 3. Fetch all deliveries and check for thread replies via EmailThread
-        from app.modules.emails.models import EmailThread
+        # 3. Fetch all deliveries and check for thread replies via EmailThread and message_id
+        from app.modules.emails.models import EmailThread, Email, EmailDirection
+        from app.modules.emails.thread_service import EmailThreadService
+        from sqlalchemy import or_
+
         deliv_stmt = (
             select(
                 CampaignDelivery.id,
@@ -1283,6 +1428,7 @@ class CampaignService:
                 CampaignDelivery.bounced_at,
                 CampaignDelivery.thread_id,
                 EmailThread.has_reply,
+                CampaignDelivery.message_id,
             )
             .outerjoin(EmailThread, CampaignDelivery.thread_id == EmailThread.id)
             .where(CampaignDelivery.campaign_id == campaign.id)
@@ -1291,11 +1437,10 @@ class CampaignService:
 
         deliv_by_recipient_step: dict[tuple[int, int], dict] = {}
         deliv_by_step: dict[int, list[dict]] = {s.id: [] for s in steps}
-        sent_steps_by_recipient: dict[int, list[int]] = {r.id: [] for r in recipients}
-        recipient_has_reply_thread: dict[int, bool] = {r.id: False for r in recipients}
+        sent_steps_by_recipient: dict[int, list[dict]] = {r.id: [] for r in recipients}
 
         for row in deliv_rows:
-            d_id, s_id, r_id, status_val, sent_at, bounced_at, thread_id, thread_has_reply = row
+            d_id, s_id, r_id, status_val, sent_at, bounced_at, thread_id, thread_has_reply, msg_id = row
             deliv_data = {
                 "id": d_id,
                 "step_id": s_id,
@@ -1305,6 +1450,7 @@ class CampaignService:
                 "bounced_at": bounced_at,
                 "thread_id": thread_id,
                 "thread_has_reply": bool(thread_has_reply),
+                "message_id": msg_id,
             }
             deliv_by_recipient_step[(r_id, s_id)] = deliv_data
             if s_id in deliv_by_step:
@@ -1313,10 +1459,12 @@ class CampaignService:
             if status_val == CampaignDeliveryStatus.SENT.value:
                 step_obj = next((s for s in steps if s.id == s_id), None)
                 if step_obj and r_id in sent_steps_by_recipient:
-                    sent_steps_by_recipient[r_id].append(step_obj.step_number)
-
-            if thread_has_reply and r_id in recipient_has_reply_thread:
-                recipient_has_reply_thread[r_id] = True
+                    sent_steps_by_recipient[r_id].append({
+                        "step_number": step_obj.step_number,
+                        "step_id": step_obj.id,
+                        "sent_at": sent_at,
+                        "message_id": msg_id,
+                    })
 
         # Precompute set of targeted recipient IDs per step
         step_targeted_recipient_ids: dict[int, set[int]] = {}
@@ -1331,19 +1479,169 @@ class CampaignService:
                     if any(t.strip().lower() in tag_set for t in (r.tags or []))
                 }
 
-        # 4. Attribute replies to the highest step actually sent (replied_count <= sent_count)
-        reply_attributed_step_numbers: dict[int, int] = {}
-        for r in recipients:
-            replied = (
-                r.replied_at is not None
-                or r.stopped_reason == CampaignRecipientStopReason.REPLIED.value
-                or recipient_has_reply_thread.get(r.id, False)
+        # Index deliveries by message_id for fast, reliable header-based reply attribution
+        deliv_by_message_id: dict[str, dict] = {}
+        for d in deliv_by_recipient_step.values():
+            m_id = d.get("message_id")
+            if m_id:
+                clean_m = m_id.strip()
+                deliv_by_message_id[clean_m] = d
+                deliv_by_message_id[clean_m.strip("<>")] = d
+                deliv_by_message_id[f"<{clean_m.strip('<>')}>"] = d
+
+        # Query all incoming emails associated with this campaign's threads or referencing deliveries
+        campaign_thread_ids = {d["thread_id"] for d in deliv_by_recipient_step.values() if d.get("thread_id") is not None}
+        campaign_msg_ids = list(deliv_by_message_id.keys())
+
+        inc_conditions = []
+        if campaign_thread_ids:
+            inc_conditions.append(Email.thread_id.in_(campaign_thread_ids))
+        if campaign_msg_ids:
+            mids_slice = campaign_msg_ids[:500]
+            inc_conditions.append(Email.in_reply_to.in_(mids_slice))
+            ref_clauses = [Email.references_header.contains(mid) for mid in mids_slice if len(mid) > 5]
+            if ref_clauses:
+                inc_conditions.append(or_(*ref_clauses))
+
+        incoming_reply_emails = []
+        if inc_conditions:
+            inc_stmt = (
+                select(
+                    Email.id,
+                    Email.thread_id,
+                    Email.message_id,
+                    Email.in_reply_to,
+                    Email.references_header,
+                    Email.sender,
+                    Email.sent_at,
+                    Email.received_at,
+                )
+                .where(
+                    Email.company_id == campaign.company_id,
+                    Email.direction == EmailDirection.INCOMING.value,
+                    or_(*inc_conditions),
+                )
             )
-            if replied:
-                sent_nums = sent_steps_by_recipient.get(r.id, [])
-                if sent_nums:
-                    max_sent = max(sent_nums)
-                    reply_attributed_step_numbers[max_sent] = reply_attributed_step_numbers.get(max_sent, 0) + 1
+            incoming_reply_emails = (await db.execute(inc_stmt)).all()
+
+        # 4. Attribute replies to the exact referenced step using actual message headers & records
+        from email.utils import parseaddr
+        camp_sender_email = (campaign.email_account.email_address if campaign.email_account else "").strip().lower()
+
+        recipient_replied_steps: dict[int, set[int]] = {r.id: set() for r in recipients}
+        matched_reply_recipient_ids: set[int] = set()
+
+        # Step 4a: Primary Attribution via In-Reply-To and References headers
+        for inc_row in incoming_reply_emails:
+            (
+                inc_id,
+                inc_thread_id,
+                inc_msg_id,
+                inc_in_reply_to,
+                inc_refs,
+                inc_sender,
+                inc_sent_at,
+                inc_received_at,
+            ) = inc_row
+
+            inc_sender_clean = parseaddr(inc_sender)[1].strip().lower() if inc_sender else ""
+            if not inc_sender_clean:
+                continue
+            # Exclude emails originating from the campaign's own sending account
+            if camp_sender_email and inc_sender_clean == camp_sender_email:
+                continue
+
+            candidate_ids = []
+            if inc_in_reply_to:
+                candidate_ids.extend(EmailThreadService.extract_message_ids(inc_in_reply_to))
+                clean_in_reply = inc_in_reply_to.strip()
+                if clean_in_reply not in candidate_ids:
+                    candidate_ids.append(clean_in_reply)
+            if inc_refs:
+                ref_ids = EmailThreadService.extract_message_ids(inc_refs)
+                for rid in reversed(ref_ids):
+                    if rid not in candidate_ids:
+                        candidate_ids.append(rid)
+
+            matched_deliv = None
+            for cid in candidate_ids:
+                if cid in deliv_by_message_id:
+                    matched_deliv = deliv_by_message_id[cid]
+                    break
+                stripped = cid.strip("<>")
+                if stripped in deliv_by_message_id:
+                    matched_deliv = deliv_by_message_id[stripped]
+                    break
+                bracketed = f"<{stripped}>"
+                if bracketed in deliv_by_message_id:
+                    matched_deliv = deliv_by_message_id[bracketed]
+                    break
+
+            if matched_deliv:
+                r_id = matched_deliv["recipient_id"]
+                recip_obj = next((r for r in recipients if r.id == r_id), None)
+                if not recip_obj:
+                    continue
+                # Only recognize an incoming reply when its sender matches the actual campaign recipient
+                recip_email = (recip_obj.email or "").strip().lower()
+                if inc_sender_clean != recip_email:
+                    continue
+
+                step_obj = next((s for s in steps if s.id == matched_deliv["step_id"]), None)
+                if step_obj:
+                    recipient_replied_steps[r_id].add(step_obj.step_number)
+                    matched_reply_recipient_ids.add(r_id)
+
+        # Step 4b: Fallback Attribution for recipients with verified delivery or thread evidence
+        for r in recipients:
+            recipient_delivs = [d for d in deliv_by_recipient_step.values() if d.get("recipient_id") == r.id]
+            has_thread_reply = any(d.get("thread_has_reply") for d in recipient_delivs)
+
+            has_disproven_thread = bool(recipient_delivs) and all(
+                d.get("thread_id") is not None and not d.get("thread_has_reply")
+                for d in recipient_delivs
+            )
+
+            has_genuine_reply = (
+                r.id in matched_reply_recipient_ids
+                or has_thread_reply
+                or (
+                    r.status == CampaignRecipientStatus.STOPPED.value
+                    and r.stopped_reason == CampaignRecipientStopReason.REPLIED.value
+                    and not has_disproven_thread
+                )
+            )
+            if not has_genuine_reply:
+                continue
+
+            matched_reply_recipient_ids.add(r.id)
+
+            # If this recipient already has step attribution via headers, preserve it
+            if recipient_replied_steps[r.id]:
+                continue
+
+            sent_entries = sent_steps_by_recipient.get(r.id, [])
+            if not sent_entries:
+                # Do NOT assign unmatched replies to an arbitrary step
+                continue
+
+            sorted_sent = sorted(
+                sent_entries,
+                key=lambda x: (x["sent_at"] or datetime.min.replace(tzinfo=timezone.utc), x["step_number"]),
+            )
+
+            target_step_num = None
+            if r.replied_at is not None:
+                reply_cutoff = r.replied_at + timedelta(seconds=60)
+                eligible_entries = [e for e in sorted_sent if e["sent_at"] is None or e["sent_at"] <= reply_cutoff]
+                if eligible_entries:
+                    target_step_num = eligible_entries[-1]["step_number"]
+
+            if target_step_num is None:
+                # If replied_at is missing, attribute to the latest sent step before stopping
+                target_step_num = sorted_sent[-1]["step_number"]
+
+            recipient_replied_steps[r.id].add(target_step_num)
 
         # 5. Determine at most one pending step per active recipient
         recipient_pending_step_id: dict[int, int] = {}
@@ -1393,6 +1691,7 @@ class CampaignService:
 
             # Only deliveries of targeted recipients belong to this step's funnel
             step_delivs = [d for d in deliv_by_step.get(step.id, []) if d["recipient_id"] in targeted_ids]
+            recipient_ids_with_deliv = {d["recipient_id"] for d in step_delivs}
 
             sent_count = 0
             sending_count = 0
@@ -1414,10 +1713,11 @@ class CampaignService:
                 elif st == CampaignDeliveryStatus.SKIPPED.value:
                     skipped_count += 1
 
-            replied_count = reply_attributed_step_numbers.get(step.step_number, 0)
+            replied_count = sum(1 for r_id, step_nums in recipient_replied_steps.items() if step.step_number in step_nums)
             pending_count = sum(1 for p_step_id in recipient_pending_step_id.values() if p_step_id == step.id)
 
-            delivery_rate = round((sent_count / targeted_count * 100), 1) if targeted_count > 0 else 0.0
+            delivered_count = max(0, sent_count - bounced_count)
+            delivery_rate = round((delivered_count / sent_count * 100), 1) if sent_count > 0 else 0.0
             reply_rate = round((replied_count / sent_count * 100), 1) if sent_count > 0 else 0.0
             bounce_rate = round((bounced_count / sent_count * 100), 1) if sent_count > 0 else 0.0
 
@@ -1436,11 +1736,83 @@ class CampaignService:
                     skipped_count=skipped_count,
                     replied_count=replied_count,
                     pending_count=pending_count,
+                    delivered_count=delivered_count,
                     delivery_rate=delivery_rate,
                     reply_rate=reply_rate,
                     bounce_rate=bounce_rate,
                 )
             )
+
+        # 7. Delivery Trend: aggregate daily volume from persisted delivery and recipient records
+        daily_trend: dict[str, dict[str, int]] = {}
+        for row in deliv_rows:
+            d_id, s_id, r_id, status_val, sent_at, bounced_at, thread_id, thread_has_reply, msg_id = row
+            if sent_at is not None and status_val == CampaignDeliveryStatus.SENT.value:
+                day_str = sent_at.strftime("%Y-%m-%d")
+                if day_str not in daily_trend:
+                    daily_trend[day_str] = {"sent_count": 0, "bounced_count": 0, "replied_count": 0}
+                daily_trend[day_str]["sent_count"] += 1
+
+            if bounced_at is not None or status_val == CampaignDeliveryStatus.BOUNCED.value:
+                b_date = bounced_at or sent_at
+                if b_date is not None:
+                    day_str = b_date.strftime("%Y-%m-%d")
+                    if day_str not in daily_trend:
+                        daily_trend[day_str] = {"sent_count": 0, "bounced_count": 0, "replied_count": 0}
+                    daily_trend[day_str]["bounced_count"] += 1
+
+        # Track unique replying recipients per date to prevent inflating daily reply engagement
+        recipients_counted_by_date: dict[str, set[int]] = {}
+        for r in recipients:
+            if r.id in matched_reply_recipient_ids and r.replied_at is not None:
+                day_str = r.replied_at.strftime("%Y-%m-%d")
+                if day_str not in daily_trend:
+                    daily_trend[day_str] = {"sent_count": 0, "bounced_count": 0, "replied_count": 0}
+                if day_str not in recipients_counted_by_date:
+                    recipients_counted_by_date[day_str] = set()
+                if r.id not in recipients_counted_by_date[day_str]:
+                    recipients_counted_by_date[day_str].add(r.id)
+                    daily_trend[day_str]["replied_count"] += 1
+
+        for inc_row in incoming_reply_emails:
+            inc_sender = inc_row[5]
+            inc_sender_clean = parseaddr(inc_sender)[1].strip().lower() if inc_sender else ""
+            if not inc_sender_clean or (camp_sender_email and inc_sender_clean == camp_sender_email):
+                continue
+
+            inc_date = inc_row[7] or inc_row[6]
+            if inc_date is not None:
+                day_str = inc_date.strftime("%Y-%m-%d")
+                clean_in_reply = (inc_row[3] or "").strip()
+                r_id = None
+                if clean_in_reply in deliv_by_message_id:
+                    cand_deliv = deliv_by_message_id[clean_in_reply]
+                    cand_r_id = cand_deliv["recipient_id"]
+                    cand_recip = next((r for r in recipients if r.id == cand_r_id), None)
+                    if cand_recip and (cand_recip.email or "").strip().lower() == inc_sender_clean:
+                        r_id = cand_r_id
+                if r_id is not None:
+                    if day_str not in daily_trend:
+                        daily_trend[day_str] = {"sent_count": 0, "bounced_count": 0, "replied_count": 0}
+                    if day_str not in recipients_counted_by_date:
+                        recipients_counted_by_date[day_str] = set()
+                    if r_id not in recipients_counted_by_date[day_str]:
+                        recipients_counted_by_date[day_str].add(r_id)
+                        daily_trend[day_str]["replied_count"] += 1
+
+        delivery_trend_points = [
+            CampaignDeliveryTrendPoint(
+                date=day,
+                sent_count=metrics["sent_count"],
+                bounced_count=metrics["bounced_count"],
+                replied_count=metrics["replied_count"],
+            )
+            for day, metrics in sorted(daily_trend.items())
+        ]
+
+        initial_sent = sum(s.sent_count for s in step_analytics_list if s.step_number == 1)
+        followup_sent = sum(s.sent_count for s in step_analytics_list if s.step_number >= 2)
+        total_sent = initial_sent + followup_sent
 
         return CampaignAnalyticsResponse(
             campaign_id=campaign.id,
@@ -1448,6 +1820,408 @@ class CampaignService:
             campaign_status=campaign.status,
             total_recipients=total_recipients,
             total_steps=len(steps),
+            initial_sent_count=initial_sent,
+            followup_sent_count=followup_sent,
+            total_sent_count=total_sent,
+            unique_replied_count=len(matched_reply_recipient_ids),
             steps=step_analytics_list,
+            delivery_trend=delivery_trend_points,
         )
 
+
+    @classmethod
+    async def get_campaign_emails_drilldown(
+        cls,
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+        status: Optional[str] = "recipients",
+        search: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+        sort_by: Optional[str] = None,
+        sort_order: Optional[str] = "desc",
+    ) -> Dict[str, Any]:
+        """Unified drill-down query for Campaign Emails page supporting 5 performance statuses:
+        recipients, sent, replies, bounced, failed.
+        Enforces strict company isolation and campaign scoping.
+        """
+        campaign = await db.get(Campaign, campaign_id)
+        if not campaign or campaign.company_id != company_id:
+            raise HTTPException(status_code=404, detail="Campaign not found.")
+
+        raw_status = (status or "recipients").strip().lower()
+        valid_statuses = ("recipients", "sent", "replies", "bounced", "failed")
+        if raw_status not in valid_statuses:
+            raise HTTPException(status_code=400, detail=f"Invalid status filter '{status}'. Must be one of: recipients, sent, replies, bounced, failed.")
+
+        search_term = search.strip() if search and search.strip() else None
+
+        # Safe retrieval of campaign sending account
+        camp_sender = ""
+        if campaign.email_account_id:
+            acc = await db.get(EmailAccount, campaign.email_account_id)
+            if acc and acc.email_address:
+                camp_sender = acc.email_address.strip().lower()
+
+        # Load all deliveries for this campaign (used for reply matching, delivery indexing, etc.)
+        deliv_stmt = (
+            select(CampaignDelivery, CampaignRecipient, CampaignStep)
+            .join(CampaignRecipient, CampaignDelivery.recipient_id == CampaignRecipient.id)
+            .join(CampaignStep, CampaignDelivery.step_id == CampaignStep.id)
+            .where(CampaignDelivery.campaign_id == campaign_id)
+            .order_by(CampaignDelivery.id.desc())
+        )
+        deliv_res = (await db.execute(deliv_stmt)).all()
+
+        # Index deliveries by message_id and collect thread_ids
+        deliv_by_message_id = {}
+        campaign_thread_ids = set()
+        for d, r, s in deliv_res:
+            if d.thread_id:
+                campaign_thread_ids.add(d.thread_id)
+            if d.message_id:
+                clean_m = d.message_id.strip()
+                deliv_by_message_id[clean_m] = (d, r, s)
+                deliv_by_message_id[clean_m.strip("<>")] = (d, r, s)
+                deliv_by_message_id[f"<{clean_m.strip('<>')}>"] = (d, r, s)
+
+        campaign_msg_ids = list(deliv_by_message_id.keys())
+        inc_conditions = []
+        if campaign_thread_ids:
+            inc_conditions.append(Email.thread_id.in_(campaign_thread_ids))
+        if campaign_msg_ids:
+            mids_slice = campaign_msg_ids[:500]
+            inc_conditions.append(Email.in_reply_to.in_(mids_slice))
+            ref_clauses = [Email.references_header.contains(mid) for mid in mids_slice if len(mid) > 5]
+            if ref_clauses:
+                inc_conditions.append(or_(*ref_clauses))
+
+        all_matched_replies = []
+        seen_reply_ids = set()
+        if inc_conditions:
+            inc_stmt = (
+                select(Email)
+                .where(
+                    Email.company_id == company_id,
+                    Email.direction == EmailDirection.INCOMING.value,
+                    or_(*inc_conditions),
+                )
+                .order_by(Email.received_at.desc(), Email.id.desc())
+            )
+            inc_emails = (await db.execute(inc_stmt)).scalars().all()
+
+            for email_obj in inc_emails:
+                if email_obj.id in seen_reply_ids:
+                    continue
+                inc_sender_clean = parseaddr(email_obj.sender)[1].strip().lower() if email_obj.sender else ""
+                if not inc_sender_clean or (camp_sender and inc_sender_clean == camp_sender):
+                    continue
+
+                cids = []
+                if email_obj.in_reply_to:
+                    cids.extend(EmailThreadService.extract_message_ids(email_obj.in_reply_to))
+                    clean_in = email_obj.in_reply_to.strip()
+                    if clean_in not in cids:
+                        cids.append(clean_in)
+                if email_obj.references_header:
+                    for rid in reversed(EmailThreadService.extract_message_ids(email_obj.references_header)):
+                        if rid not in cids:
+                            cids.append(rid)
+
+                matched_tuple = None
+                for cid in cids:
+                    if cid in deliv_by_message_id:
+                        matched_tuple = deliv_by_message_id[cid]
+                        break
+                    stripped = cid.strip("<>")
+                    if stripped in deliv_by_message_id:
+                        matched_tuple = deliv_by_message_id[stripped]
+                        break
+                    bracketed = f"<{stripped}>"
+                    if bracketed in deliv_by_message_id:
+                        matched_tuple = deliv_by_message_id[bracketed]
+                        break
+
+                if not matched_tuple and email_obj.thread_id:
+                    for d, r, s in deliv_res:
+                        if d.thread_id == email_obj.thread_id and (r.email or "").strip().lower() == inc_sender_clean:
+                            matched_tuple = (d, r, s)
+                            break
+
+                if matched_tuple:
+                    d, r, s = matched_tuple
+                    if (r.email or "").strip().lower() != inc_sender_clean:
+                        continue
+
+                    seen_reply_ids.add(email_obj.id)
+                    all_matched_replies.append({
+                        "id": email_obj.id,
+                        "email_id": email_obj.id,
+                        "thread_id": email_obj.thread_id,
+                        "recipient_id": r.id,
+                        "sender": email_obj.sender,
+                        "recipient": email_obj.recipients[0] if email_obj.recipients else camp_sender,
+                        "email": inc_sender_clean,
+                        "recipient_name": f"{r.first_name or ''} {r.last_name or ''}".strip() or None,
+                        "subject": email_obj.subject,
+                        "received_at": email_obj.received_at or email_obj.sent_at,
+                        "sent_at": email_obj.sent_at,
+                        "step_number": s.step_number,
+                        "delivery_id": d.id,
+                    })
+
+        # Summary metrics (shared source of truth for the 5 cards)
+        recipients_count = (await db.scalar(
+            select(func.count(CampaignRecipient.id)).where(CampaignRecipient.campaign_id == campaign_id)
+        )) or 0
+
+        sent_count = (await db.scalar(
+            select(func.count(CampaignDelivery.id)).where(
+                CampaignDelivery.campaign_id == campaign_id,
+                CampaignDelivery.status == CampaignDeliveryStatus.SENT.value,
+                CampaignDelivery.bounced_at.is_(None),
+            )
+        )) or 0
+
+        bounced_count = (await db.scalar(
+            select(func.count(CampaignDelivery.id)).where(
+                CampaignDelivery.campaign_id == campaign_id,
+                or_(
+                    CampaignDelivery.status == CampaignDeliveryStatus.BOUNCED.value,
+                    CampaignDelivery.bounced_at.is_not(None),
+                ),
+            )
+        )) or 0
+
+        failed_count = (await db.scalar(
+            select(func.count(CampaignDelivery.id)).where(
+                CampaignDelivery.campaign_id == campaign_id,
+                CampaignDelivery.status == CampaignDeliveryStatus.FAILED.value,
+                CampaignDelivery.bounced_at.is_(None),
+            )
+        )) or 0
+
+        replies_count = len(all_matched_replies)
+
+        summary = {
+            "recipients_count": recipients_count,
+            "sent_count": sent_count,
+            "replies_count": replies_count,
+            "bounced_count": bounced_count,
+            "failed_count": failed_count,
+        }
+
+        items = []
+        total = 0
+
+        if raw_status == "recipients":
+            base_q = select(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign_id)
+            if search_term:
+                s = f"%{search_term}%"
+                base_q = base_q.where(
+                    or_(
+                        CampaignRecipient.email.ilike(s),
+                        CampaignRecipient.first_name.ilike(s),
+                        CampaignRecipient.last_name.ilike(s),
+                    )
+                )
+            count_q = select(func.count()).select_from(base_q.subquery())
+            total = (await db.scalar(count_q)) or 0
+
+            if sort_by == "email":
+                order_col = CampaignRecipient.email.desc() if sort_order == "desc" else CampaignRecipient.email.asc()
+            else:
+                order_col = CampaignRecipient.created_at.desc() if sort_order == "desc" else CampaignRecipient.created_at.asc()
+
+            paged_q = base_q.order_by(order_col, CampaignRecipient.id.desc()).offset(offset).limit(limit)
+            recip_rows = (await db.execute(paged_q)).scalars().all()
+            for r in recip_rows:
+                items.append({
+                    "id": r.id,
+                    "recipient_id": r.id,
+                    "email": r.email,
+                    "recipient_name": f"{r.first_name or ''} {r.last_name or ''}".strip() or None,
+                    "status": r.status,
+                    "stopped_reason": r.stopped_reason,
+                    "step_number": r.current_step_number,
+                    "replied_at": r.replied_at,
+                    "created_at": r.created_at,
+                    "next_step_due_at": r.next_step_due_at,
+                })
+
+        elif raw_status == "sent":
+            base_q = (
+                select(CampaignDelivery, CampaignRecipient, CampaignStep)
+                .join(CampaignRecipient, CampaignDelivery.recipient_id == CampaignRecipient.id)
+                .join(CampaignStep, CampaignDelivery.step_id == CampaignStep.id)
+                .where(
+                    CampaignDelivery.campaign_id == campaign_id,
+                    CampaignDelivery.status == CampaignDeliveryStatus.SENT.value,
+                    CampaignDelivery.bounced_at.is_(None),
+                )
+            )
+            if search_term:
+                s = f"%{search_term}%"
+                base_q = base_q.where(
+                    or_(
+                        CampaignRecipient.email.ilike(s),
+                        CampaignRecipient.first_name.ilike(s),
+                        CampaignRecipient.last_name.ilike(s),
+                        CampaignStep.subject.ilike(s),
+                    )
+                )
+            count_q = select(func.count()).select_from(base_q.subquery())
+            total = (await db.scalar(count_q)) or 0
+
+            order_col = CampaignDelivery.sent_at.desc() if sort_order == "desc" else CampaignDelivery.sent_at.asc()
+            paged_q = base_q.order_by(order_col, CampaignDelivery.id.desc()).offset(offset).limit(limit)
+            rows = (await db.execute(paged_q)).all()
+            for deliv, recip, step in rows:
+                items.append({
+                    "id": deliv.id,
+                    "delivery_id": deliv.id,
+                    "recipient_id": recip.id,
+                    "email_id": deliv.email_id,
+                    "thread_id": deliv.thread_id,
+                    "email": recip.email,
+                    "recipient_name": f"{recip.first_name or ''} {recip.last_name or ''}".strip() or None,
+                    "subject": step.subject,
+                    "step_number": step.step_number,
+                    "sent_at": deliv.sent_at or deliv.created_at,
+                    "status": deliv.status,
+                })
+
+        elif raw_status == "replies":
+            filtered_replies = all_matched_replies
+            if search_term:
+                st = search_term.lower()
+                filtered_replies = [
+                    item for item in all_matched_replies
+                    if st in (item.get("sender") or "").lower()
+                    or st in (item.get("recipient") or "").lower()
+                    or st in (item.get("email") or "").lower()
+                    or st in (item.get("subject") or "").lower()
+                    or st in (item.get("recipient_name") or "").lower()
+                ]
+            total = len(filtered_replies)
+            items = filtered_replies[offset : offset + limit]
+
+        elif raw_status == "bounced":
+            base_q = (
+                select(CampaignDelivery, CampaignRecipient, CampaignStep)
+                .join(CampaignRecipient, CampaignDelivery.recipient_id == CampaignRecipient.id)
+                .join(CampaignStep, CampaignDelivery.step_id == CampaignStep.id)
+                .where(
+                    CampaignDelivery.campaign_id == campaign_id,
+                    or_(
+                        CampaignDelivery.status == CampaignDeliveryStatus.BOUNCED.value,
+                        CampaignDelivery.bounced_at.is_not(None),
+                    ),
+                )
+            )
+            if search_term:
+                s = f"%{search_term}%"
+                base_q = base_q.where(
+                    or_(
+                        CampaignRecipient.email.ilike(s),
+                        CampaignRecipient.first_name.ilike(s),
+                        CampaignRecipient.last_name.ilike(s),
+                        CampaignStep.subject.ilike(s),
+                        CampaignDelivery.error_message.ilike(s),
+                    )
+                )
+            count_q = select(func.count()).select_from(base_q.subquery())
+            total = (await db.scalar(count_q)) or 0
+
+            order_col = CampaignDelivery.bounced_at.desc() if sort_order == "desc" else CampaignDelivery.bounced_at.asc()
+            paged_q = base_q.order_by(order_col, CampaignDelivery.id.desc()).offset(offset).limit(limit)
+            rows = (await db.execute(paged_q)).all()
+
+            recip_emails = [recip.email.strip().lower() for _, recip, _ in rows if recip.email]
+            suppr_map = {}
+            if recip_emails:
+                sup_stmt = select(SuppressionEntry).where(
+                    SuppressionEntry.company_id == company_id,
+                    func.lower(SuppressionEntry.email).in_(recip_emails),
+                )
+                sup_rows = (await db.execute(sup_stmt)).scalars().all()
+                for sup in sup_rows:
+                    suppr_map[sup.email.strip().lower()] = sup
+
+            for deliv, recip, step in rows:
+                norm_e = (recip.email or "").strip().lower()
+                suppr_obj = suppr_map.get(norm_e)
+                items.append({
+                    "id": deliv.id,
+                    "delivery_id": deliv.id,
+                    "recipient_id": recip.id,
+                    "email_id": deliv.email_id,
+                    "thread_id": deliv.thread_id,
+                    "email": recip.email,
+                    "recipient_name": f"{recip.first_name or ''} {recip.last_name or ''}".strip() or None,
+                    "subject": step.subject,
+                    "step_number": step.step_number,
+                    "status": deliv.status,
+                    "stopped_reason": recip.stopped_reason,
+                    "bounce_type": (deliv.error_message if deliv.error_message else (suppr_obj.reason if suppr_obj else "Hard Bounce")),
+                    "error_message": deliv.error_message or "Recipient mailbox bounced / rejected",
+                    "bounced_at": deliv.bounced_at or deliv.sent_at or deliv.created_at,
+                    "is_suppressed": suppr_obj is not None,
+                    "suppression_reason": suppr_obj.reason if suppr_obj else None,
+                })
+
+        elif raw_status == "failed":
+            base_q = (
+                select(CampaignDelivery, CampaignRecipient, CampaignStep)
+                .join(CampaignRecipient, CampaignDelivery.recipient_id == CampaignRecipient.id)
+                .join(CampaignStep, CampaignDelivery.step_id == CampaignStep.id)
+                .where(
+                    CampaignDelivery.campaign_id == campaign_id,
+                    CampaignDelivery.status == CampaignDeliveryStatus.FAILED.value,
+                    CampaignDelivery.bounced_at.is_(None),
+                )
+            )
+            if search_term:
+                s = f"%{search_term}%"
+                base_q = base_q.where(
+                    or_(
+                        CampaignRecipient.email.ilike(s),
+                        CampaignRecipient.first_name.ilike(s),
+                        CampaignRecipient.last_name.ilike(s),
+                        CampaignStep.subject.ilike(s),
+                        CampaignDelivery.error_message.ilike(s),
+                    )
+                )
+            count_q = select(func.count()).select_from(base_q.subquery())
+            total = (await db.scalar(count_q)) or 0
+
+            order_col = CampaignDelivery.last_attempt_at.desc() if sort_order == "desc" else CampaignDelivery.last_attempt_at.asc()
+            paged_q = base_q.order_by(order_col, CampaignDelivery.id.desc()).offset(offset).limit(limit)
+            rows = (await db.execute(paged_q)).all()
+            for deliv, recip, step in rows:
+                items.append({
+                    "id": deliv.id,
+                    "delivery_id": deliv.id,
+                    "recipient_id": recip.id,
+                    "email": recip.email,
+                    "recipient_name": f"{recip.first_name or ''} {recip.last_name or ''}".strip() or None,
+                    "subject": step.subject,
+                    "error_message": deliv.error_message or "Delivery dispatch failed",
+                    "attempt_count": deliv.attempt_count or 1,
+                    "last_attempt_at": deliv.last_attempt_at or deliv.created_at,
+                    "step_number": step.step_number,
+                    "status": deliv.status,
+                    "can_retry": True,
+                })
+
+        return {
+            "campaign_id": campaign.id,
+            "campaign_name": campaign.name,
+            "selected_status": raw_status,
+            "summary": summary,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "items": items,
+        }
