@@ -327,3 +327,205 @@ async def test_drilldown_counts_and_replies_and_bounces(
     res_iso = await async_client.get(f"/api/v1/companies/{co_other}/campaigns/{campaign.id}/emails?status=recipients", headers={"Authorization": f"Bearer {token_other}"})
     assert res_iso.status_code in (404, 403)
 
+@pytest.mark.asyncio
+async def test_drilldown_subject_resolution_from_sent_email_and_step(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Verify drill-down subject resolution:
+    - Priority 1: Persisted sent Email.subject.
+    - Priority 2: Associated CampaignStep.subject.
+    - If genuinely missing in both, subject is None / (No Subject).
+    - Step 2 and Step 3 return 'Re: Testing 2' when step.subject is empty/None.
+    - Search by subject matches actual sent subject.
+    """
+    token = await register_and_login(async_client, "subject_owner@test.com")
+    company_id = await create_company_helper(async_client, token, "Subject Test Co")
+    account_id = await create_account_helper(async_client, token, company_id, email="subject_sender@test.com")
+
+    now = datetime.now(timezone.utc)
+    campaign = Campaign(
+        company_id=company_id,
+        name="Subject Test Campaign",
+        subject="Testing 2",
+        body_text="Initial text",
+        status=CampaignStatus.RUNNING.value,
+        email_account_id=account_id,
+    )
+    db_session.add(campaign)
+    await db_session.flush()
+
+    # Step 1: explicit subject
+    step1 = CampaignStep(
+        campaign_id=campaign.id,
+        step_number=1,
+        delay_hours=0,
+        subject="Testing 2",
+        body_text="Body step 1",
+    )
+    # Step 2: empty subject (follow-up convention)
+    step2 = CampaignStep(
+        campaign_id=campaign.id,
+        step_number=2,
+        delay_hours=24,
+        subject="",
+        body_text="Body step 2",
+    )
+    # Step 3: None subject
+    step3 = CampaignStep(
+        campaign_id=campaign.id,
+        step_number=3,
+        delay_hours=48,
+        subject="",
+        body_text="Body step 3",
+    )
+    # Step 4: empty subject without sent email (genuinely missing)
+    step4 = CampaignStep(
+        campaign_id=campaign.id,
+        step_number=4,
+        delay_hours=72,
+        subject="",
+        body_text="Body step 4",
+    )
+    db_session.add_all([step1, step2, step3, step4])
+    await db_session.flush()
+
+    recip1 = CampaignRecipient(
+        campaign_id=campaign.id,
+        email="lead_step23@test.com",
+        first_name="Alice",
+        last_name="Tester",
+        status=CampaignRecipientStatus.SENT.value,
+        current_step_number=3,
+    )
+    recip2 = CampaignRecipient(
+        campaign_id=campaign.id,
+        email="lead_missing@test.com",
+        first_name="Bob",
+        last_name="Tester",
+        status=CampaignRecipientStatus.SENT.value,
+        current_step_number=4,
+    )
+    db_session.add_all([recip1, recip2])
+    await db_session.flush()
+
+    th1 = EmailThread(company_id=company_id, email_account_id=account_id, subject="Testing 2", last_message_at=now)
+    db_session.add(th1)
+    await db_session.flush()
+
+    # Sent Email records matching the actual sent emails
+    email_s1 = Email(
+        company_id=company_id,
+        email_account_id=account_id,
+        direction=EmailDirection.OUTGOING.value,
+        sender="subject_sender@test.com",
+        recipients=["lead_step23@test.com"],
+        subject="Testing 2",
+        message_id="<msg-step1-test2@test.com>",
+        thread_id=th1.id,
+        sent_at=now,
+    )
+    email_s2 = Email(
+        company_id=company_id,
+        email_account_id=account_id,
+        direction=EmailDirection.OUTGOING.value,
+        sender="subject_sender@test.com",
+        recipients=["lead_step23@test.com"],
+        subject="Re: Testing 2",
+        message_id="<msg-step2-test2@test.com>",
+        thread_id=th1.id,
+        sent_at=now,
+    )
+    email_s3 = Email(
+        company_id=company_id,
+        email_account_id=account_id,
+        direction=EmailDirection.OUTGOING.value,
+        sender="subject_sender@test.com",
+        recipients=["lead_step23@test.com"],
+        subject="Re: Testing 2",
+        message_id="<msg-step3-test2@test.com>",
+        thread_id=th1.id,
+        sent_at=now,
+    )
+    db_session.add_all([email_s1, email_s2, email_s3])
+    await db_session.flush()
+
+    # Campaign Deliveries
+    deliv_s1 = CampaignDelivery(
+        campaign_id=campaign.id,
+        recipient_id=recip1.id,
+        step_id=step1.id,
+        email_id=email_s1.id,
+        message_id=email_s1.message_id,
+        thread_id=th1.id,
+        status=CampaignDeliveryStatus.SENT.value,
+        sent_at=now,
+    )
+    deliv_s2 = CampaignDelivery(
+        campaign_id=campaign.id,
+        recipient_id=recip1.id,
+        step_id=step2.id,
+        email_id=email_s2.id,
+        message_id=email_s2.message_id,
+        thread_id=th1.id,
+        status=CampaignDeliveryStatus.SENT.value,
+        sent_at=now,
+    )
+    deliv_s3 = CampaignDelivery(
+        campaign_id=campaign.id,
+        recipient_id=recip1.id,
+        step_id=step3.id,
+        email_id=email_s3.id,
+        message_id=email_s3.message_id,
+        thread_id=th1.id,
+        status=CampaignDeliveryStatus.SENT.value,
+        sent_at=now,
+    )
+    # Delivery 4 has no email_id and step4 has no subject
+    deliv_s4 = CampaignDelivery(
+        campaign_id=campaign.id,
+        recipient_id=recip2.id,
+        step_id=step4.id,
+        email_id=None,
+        message_id="<msg-step4-missing@test.com>",
+        thread_id=th1.id,
+        status=CampaignDeliveryStatus.SENT.value,
+        sent_at=now,
+    )
+    db_session.add_all([deliv_s1, deliv_s2, deliv_s3, deliv_s4])
+    await db_session.commit()
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Fetch sent drill-down
+    res_sent = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns/{campaign.id}/emails?status=sent",
+        headers=headers,
+    )
+    assert res_sent.status_code == 200
+    data_sent = res_sent.json()
+    assert data_sent["total"] == 4
+    items_by_step = {item["step_number"]: item for item in data_sent["items"]}
+
+    # Verify Step 1 displays "Testing 2"
+    assert items_by_step[1]["subject"] == "Testing 2"
+
+    # Verify Step 2 and Step 3 display "Re: Testing 2" instead of (No Subject)
+    assert items_by_step[2]["subject"] == "Re: Testing 2"
+    assert items_by_step[3]["subject"] == "Re: Testing 2"
+
+    # Verify Step 4 (genuinely missing) returns None
+    assert items_by_step[4]["subject"] is None
+
+    # Verify Search for "Re: Testing 2" finds Step 2 and Step 3
+    res_search = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns/{campaign.id}/emails?status=sent&search=Re:%20Testing%202",
+        headers=headers,
+    )
+    assert res_search.status_code == 200
+    search_items = res_search.json()["items"]
+    search_steps = [item["step_number"] for item in search_items]
+    assert 2 in search_steps
+    assert 3 in search_steps
+    assert 1 not in search_steps
+

@@ -1025,9 +1025,9 @@ export const CampaignEmailsPage: React.FC = () => {
 
                         </td>
 
-                        <td className="py-3 px-3 text-slate-800 font-medium max-w-xs truncate" title={item.subject || ""}>
+                        <td className="py-3 px-3 text-slate-800 font-medium max-w-xs truncate" title={item.subject?.trim() || ""}>
 
-                          {item.subject || "(No Subject)"}
+                          {item.subject?.trim() || "(No Subject)"}
 
                         </td>
 
@@ -1105,9 +1105,9 @@ export const CampaignEmailsPage: React.FC = () => {
 
                         </td>
 
-                        <td className="py-3 px-3 text-slate-800 font-medium max-w-xs truncate" title={item.subject || ""}>
+                        <td className="py-3 px-3 text-slate-800 font-medium max-w-xs truncate" title={item.subject?.trim() || ""}>
 
-                          {item.subject || "(No Subject)"}
+                          {item.subject?.trim() || "(No Subject)"}
 
                         </td>
 

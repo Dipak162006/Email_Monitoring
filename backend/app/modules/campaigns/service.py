@@ -3,7 +3,7 @@ from email.utils import parseaddr
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import func, select, or_
+from sqlalchemy import func, select, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -1866,9 +1866,10 @@ class CampaignService:
 
         # Load all deliveries for this campaign (used for reply matching, delivery indexing, etc.)
         deliv_stmt = (
-            select(CampaignDelivery, CampaignRecipient, CampaignStep)
+            select(CampaignDelivery, CampaignRecipient, CampaignStep, Email)
             .join(CampaignRecipient, CampaignDelivery.recipient_id == CampaignRecipient.id)
             .join(CampaignStep, CampaignDelivery.step_id == CampaignStep.id)
+            .outerjoin(Email, and_(CampaignDelivery.email_id == Email.id, Email.company_id == company_id))
             .where(CampaignDelivery.campaign_id == campaign_id)
             .order_by(CampaignDelivery.id.desc())
         )
@@ -1877,14 +1878,14 @@ class CampaignService:
         # Index deliveries by message_id and collect thread_ids
         deliv_by_message_id = {}
         campaign_thread_ids = set()
-        for d, r, s in deliv_res:
+        for d, r, s, e in deliv_res:
             if d.thread_id:
                 campaign_thread_ids.add(d.thread_id)
             if d.message_id:
                 clean_m = d.message_id.strip()
-                deliv_by_message_id[clean_m] = (d, r, s)
-                deliv_by_message_id[clean_m.strip("<>")] = (d, r, s)
-                deliv_by_message_id[f"<{clean_m.strip('<>')}>"] = (d, r, s)
+                deliv_by_message_id[clean_m] = (d, r, s, e)
+                deliv_by_message_id[clean_m.strip("<>")] = (d, r, s, e)
+                deliv_by_message_id[f"<{clean_m.strip('<>')}>"] = (d, r, s, e)
 
         campaign_msg_ids = list(deliv_by_message_id.keys())
         inc_conditions = []
@@ -1944,15 +1945,25 @@ class CampaignService:
                         break
 
                 if not matched_tuple and email_obj.thread_id:
-                    for d, r, s in deliv_res:
+                    for d, r, s, e in deliv_res:
                         if d.thread_id == email_obj.thread_id and (r.email or "").strip().lower() == inc_sender_clean:
-                            matched_tuple = (d, r, s)
+                            matched_tuple = (d, r, s, e)
                             break
 
                 if matched_tuple:
-                    d, r, s = matched_tuple
+                    d, r, s, e = matched_tuple
                     if (r.email or "").strip().lower() != inc_sender_clean:
                         continue
+
+                    # Subject resolution: incoming reply subject first; fallback to sent Email.subject, then step.subject
+                    reply_subj = (email_obj.subject or "").strip()
+                    if not reply_subj:
+                        if e and e.subject and e.subject.strip():
+                            reply_subj = e.subject.strip()
+                        elif s and s.subject and s.subject.strip():
+                            reply_subj = s.subject.strip()
+                        else:
+                            reply_subj = None
 
                     seen_reply_ids.add(email_obj.id)
                     all_matched_replies.append({
@@ -1964,7 +1975,7 @@ class CampaignService:
                         "recipient": email_obj.recipients[0] if email_obj.recipients else camp_sender,
                         "email": inc_sender_clean,
                         "recipient_name": f"{r.first_name or ''} {r.last_name or ''}".strip() or None,
-                        "subject": email_obj.subject,
+                        "subject": reply_subj,
                         "received_at": email_obj.received_at or email_obj.sent_at,
                         "sent_at": email_obj.sent_at,
                         "step_number": s.step_number,
@@ -2052,9 +2063,10 @@ class CampaignService:
 
         elif raw_status == "sent":
             base_q = (
-                select(CampaignDelivery, CampaignRecipient, CampaignStep)
+                select(CampaignDelivery, CampaignRecipient, CampaignStep, Email)
                 .join(CampaignRecipient, CampaignDelivery.recipient_id == CampaignRecipient.id)
                 .join(CampaignStep, CampaignDelivery.step_id == CampaignStep.id)
+                .outerjoin(Email, and_(CampaignDelivery.email_id == Email.id, Email.company_id == company_id))
                 .where(
                     CampaignDelivery.campaign_id == campaign_id,
                     CampaignDelivery.status == CampaignDeliveryStatus.SENT.value,
@@ -2069,6 +2081,7 @@ class CampaignService:
                         CampaignRecipient.first_name.ilike(s),
                         CampaignRecipient.last_name.ilike(s),
                         CampaignStep.subject.ilike(s),
+                        Email.subject.ilike(s),
                     )
                 )
             count_q = select(func.count()).select_from(base_q.subquery())
@@ -2077,7 +2090,13 @@ class CampaignService:
             order_col = CampaignDelivery.sent_at.desc() if sort_order == "desc" else CampaignDelivery.sent_at.asc()
             paged_q = base_q.order_by(order_col, CampaignDelivery.id.desc()).offset(offset).limit(limit)
             rows = (await db.execute(paged_q)).all()
-            for deliv, recip, step in rows:
+            for deliv, recip, step, email_record in rows:
+                resolved_subject = None
+                if email_record and email_record.subject and email_record.subject.strip():
+                    resolved_subject = email_record.subject.strip()
+                elif step and step.subject and step.subject.strip():
+                    resolved_subject = step.subject.strip()
+
                 items.append({
                     "id": deliv.id,
                     "delivery_id": deliv.id,
@@ -2086,7 +2105,7 @@ class CampaignService:
                     "thread_id": deliv.thread_id,
                     "email": recip.email,
                     "recipient_name": f"{recip.first_name or ''} {recip.last_name or ''}".strip() or None,
-                    "subject": step.subject,
+                    "subject": resolved_subject,
                     "step_number": step.step_number,
                     "sent_at": deliv.sent_at or deliv.created_at,
                     "status": deliv.status,
@@ -2109,9 +2128,10 @@ class CampaignService:
 
         elif raw_status == "bounced":
             base_q = (
-                select(CampaignDelivery, CampaignRecipient, CampaignStep)
+                select(CampaignDelivery, CampaignRecipient, CampaignStep, Email)
                 .join(CampaignRecipient, CampaignDelivery.recipient_id == CampaignRecipient.id)
                 .join(CampaignStep, CampaignDelivery.step_id == CampaignStep.id)
+                .outerjoin(Email, and_(CampaignDelivery.email_id == Email.id, Email.company_id == company_id))
                 .where(
                     CampaignDelivery.campaign_id == campaign_id,
                     or_(
@@ -2128,6 +2148,7 @@ class CampaignService:
                         CampaignRecipient.first_name.ilike(s),
                         CampaignRecipient.last_name.ilike(s),
                         CampaignStep.subject.ilike(s),
+                        Email.subject.ilike(s),
                         CampaignDelivery.error_message.ilike(s),
                     )
                 )
@@ -2138,7 +2159,7 @@ class CampaignService:
             paged_q = base_q.order_by(order_col, CampaignDelivery.id.desc()).offset(offset).limit(limit)
             rows = (await db.execute(paged_q)).all()
 
-            recip_emails = [recip.email.strip().lower() for _, recip, _ in rows if recip.email]
+            recip_emails = [recip.email.strip().lower() for _, recip, _, _ in rows if recip.email]
             suppr_map = {}
             if recip_emails:
                 sup_stmt = select(SuppressionEntry).where(
@@ -2149,9 +2170,15 @@ class CampaignService:
                 for sup in sup_rows:
                     suppr_map[sup.email.strip().lower()] = sup
 
-            for deliv, recip, step in rows:
+            for deliv, recip, step, email_record in rows:
                 norm_e = (recip.email or "").strip().lower()
                 suppr_obj = suppr_map.get(norm_e)
+                resolved_subject = None
+                if email_record and email_record.subject and email_record.subject.strip():
+                    resolved_subject = email_record.subject.strip()
+                elif step and step.subject and step.subject.strip():
+                    resolved_subject = step.subject.strip()
+
                 items.append({
                     "id": deliv.id,
                     "delivery_id": deliv.id,
@@ -2160,7 +2187,7 @@ class CampaignService:
                     "thread_id": deliv.thread_id,
                     "email": recip.email,
                     "recipient_name": f"{recip.first_name or ''} {recip.last_name or ''}".strip() or None,
-                    "subject": step.subject,
+                    "subject": resolved_subject,
                     "step_number": step.step_number,
                     "status": deliv.status,
                     "stopped_reason": recip.stopped_reason,
@@ -2173,9 +2200,10 @@ class CampaignService:
 
         elif raw_status == "failed":
             base_q = (
-                select(CampaignDelivery, CampaignRecipient, CampaignStep)
+                select(CampaignDelivery, CampaignRecipient, CampaignStep, Email)
                 .join(CampaignRecipient, CampaignDelivery.recipient_id == CampaignRecipient.id)
                 .join(CampaignStep, CampaignDelivery.step_id == CampaignStep.id)
+                .outerjoin(Email, and_(CampaignDelivery.email_id == Email.id, Email.company_id == company_id))
                 .where(
                     CampaignDelivery.campaign_id == campaign_id,
                     CampaignDelivery.status == CampaignDeliveryStatus.FAILED.value,
@@ -2190,6 +2218,7 @@ class CampaignService:
                         CampaignRecipient.first_name.ilike(s),
                         CampaignRecipient.last_name.ilike(s),
                         CampaignStep.subject.ilike(s),
+                        Email.subject.ilike(s),
                         CampaignDelivery.error_message.ilike(s),
                     )
                 )
@@ -2199,14 +2228,20 @@ class CampaignService:
             order_col = CampaignDelivery.last_attempt_at.desc() if sort_order == "desc" else CampaignDelivery.last_attempt_at.asc()
             paged_q = base_q.order_by(order_col, CampaignDelivery.id.desc()).offset(offset).limit(limit)
             rows = (await db.execute(paged_q)).all()
-            for deliv, recip, step in rows:
+            for deliv, recip, step, email_record in rows:
+                resolved_subject = None
+                if email_record and email_record.subject and email_record.subject.strip():
+                    resolved_subject = email_record.subject.strip()
+                elif step and step.subject and step.subject.strip():
+                    resolved_subject = step.subject.strip()
+
                 items.append({
                     "id": deliv.id,
                     "delivery_id": deliv.id,
                     "recipient_id": recip.id,
                     "email": recip.email,
                     "recipient_name": f"{recip.first_name or ''} {recip.last_name or ''}".strip() or None,
-                    "subject": step.subject,
+                    "subject": resolved_subject,
                     "error_message": deliv.error_message or "Delivery dispatch failed",
                     "attempt_count": deliv.attempt_count or 1,
                     "last_attempt_at": deliv.last_attempt_at or deliv.created_at,
