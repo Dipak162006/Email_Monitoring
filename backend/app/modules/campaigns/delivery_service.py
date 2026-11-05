@@ -27,6 +27,7 @@ from app.modules.campaigns.suppression_service import SuppressionService
 from app.modules.emails.models import Email
 from app.modules.emails.schemas import EmailSendRequest
 from app.modules.emails.service import EmailService
+from app.modules.emails.link_tracking_service import LinkTrackingService
 
 logger = logging.getLogger(__name__)
 
@@ -604,6 +605,14 @@ class CampaignDeliveryService:
             rendered_subject = render_content_for_recipient(camp_subject, recipient_obj, context_vars=context_vars) or ""
             rendered_body_text = render_content_for_recipient(camp_body_text, recipient_obj, context_vars=context_vars)
             rendered_body_html = render_content_for_recipient(camp_body_html, recipient_obj, is_html=True, context_vars=context_vars)
+            if rendered_body_html:
+                rendered_body_html = await LinkTrackingService.rewrite_campaign_html(
+                    html_content=rendered_body_html,
+                    company_id=company_id,
+                    campaign_id=campaign_id,
+                    recipient_id=recipient_obj.id,
+                    delivery_id=delivery_id,
+                )
 
             send_req = EmailSendRequest(
                 email_account_id=sender_account.id,
@@ -1198,6 +1207,14 @@ class CampaignDeliveryService:
         rendered_subject = render_content_for_recipient(camp_subject, recipient, context_vars=context_vars) or ""
         rendered_body_text = render_content_for_recipient(camp_body_text, recipient, context_vars=context_vars)
         rendered_body_html = render_content_for_recipient(camp_body_html, recipient, is_html=True, context_vars=context_vars)
+        if rendered_body_html:
+            rendered_body_html = await LinkTrackingService.rewrite_campaign_html(
+                html_content=rendered_body_html,
+                company_id=company_id,
+                campaign_id=campaign.id,
+                recipient_id=recipient.id,
+                delivery_id=delivery.id,
+            )
 
         send_req = EmailSendRequest(
             email_account_id=sender_account.id,
@@ -1889,6 +1906,14 @@ class CampaignDeliveryService:
                 rendered_subject = render_content_for_recipient(subj_to_render, recipient, context_vars=context_vars) or f"Re: {campaign.subject}"
                 rendered_text = render_content_for_recipient(next_step.body_text, recipient, context_vars=context_vars)
                 rendered_html = render_content_for_recipient(next_step.body_html, recipient, is_html=True, context_vars=context_vars)
+                if rendered_html:
+                    rendered_html = await LinkTrackingService.rewrite_campaign_html(
+                        html_content=rendered_html,
+                        company_id=campaign.company_id,
+                        campaign_id=campaign.id,
+                        recipient_id=recipient.id,
+                        delivery_id=delivery_id,
+                    )
 
                 send_req = EmailSendRequest(
                     email_account_id=sender_account.id,

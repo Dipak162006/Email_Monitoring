@@ -111,10 +111,27 @@ async def clean_database():
         await conn.execute(text("ALTER TABLE email_attachments ADD COLUMN IF NOT EXISTS disposition VARCHAR(50) DEFAULT 'attachment' NOT NULL;"))
         await conn.execute(text("ALTER TABLE email_attachments ADD COLUMN IF NOT EXISTS content_id VARCHAR(255);"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_email_attachments_content_id ON email_attachments (content_id);"))
-        await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments, campaigns, campaign_steps, campaign_recipients, campaign_deliveries, suppression_list, campaign_attachments RESTART IDENTITY CASCADE;"))
+        await conn.execute(text("ALTER TABLE email_tracking_tokens ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(64);"))
+        await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_email_tracking_tokens_idempotency_key ON email_tracking_tokens (idempotency_key);"))
+        await conn.execute(text("ALTER TABLE email_tracking_events ALTER COLUMN is_bot DROP NOT NULL, ALTER COLUMN is_bot DROP DEFAULT;"))
+        for fk in [
+            "email_tracking_tokens_company_id_fkey",
+            "email_tracking_tokens_email_id_fkey",
+            "email_tracking_tokens_campaign_id_fkey",
+            "email_tracking_tokens_recipient_id_fkey",
+            "email_tracking_tokens_delivery_id_fkey",
+            "email_tracking_events_company_id_fkey",
+            "email_tracking_events_email_id_fkey",
+            "email_tracking_events_campaign_id_fkey",
+            "email_tracking_events_recipient_id_fkey",
+            "email_tracking_events_delivery_id_fkey",
+        ]:
+            await conn.execute(text(f"ALTER TABLE email_tracking_tokens DROP CONSTRAINT IF EXISTS {fk};"))
+            await conn.execute(text(f"ALTER TABLE email_tracking_events DROP CONSTRAINT IF EXISTS {fk};"))
+        await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments, campaigns, campaign_steps, campaign_recipients, campaign_deliveries, suppression_list, campaign_attachments, email_tracking_tokens, email_tracking_events RESTART IDENTITY CASCADE;"))
     yield
     async with test_async_engine.begin() as conn:
-        await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments, campaigns, campaign_steps, campaign_recipients, campaign_deliveries, suppression_list, campaign_attachments RESTART IDENTITY CASCADE;"))
+        await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments, campaigns, campaign_steps, campaign_recipients, campaign_deliveries, suppression_list, campaign_attachments, email_tracking_tokens, email_tracking_events RESTART IDENTITY CASCADE;"))
     await test_async_engine.dispose()
 
 
@@ -132,6 +149,7 @@ def test_alembic_config() -> Config:
             f"FATAL SAFETY INTERLOCK: Refusing to create Alembic test config for unsafe database '{db_name}'."
         )
 
+    cfg.set_main_option("script_location", str(backend_dir / "alembic"))
     cfg.set_main_option("sqlalchemy.url", TEST_DATABASE_SYNC_URL)
     cfg.set_main_option("is_test_migration", "true")
     return cfg

@@ -5,6 +5,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -13,13 +14,14 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, foreign, mapped_column, relationship
 from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.modules.auth.models import User
     from app.modules.companies.models import Company
     from app.modules.email_accounts.models import EmailAccount
+    from app.modules.campaigns.models import Campaign, CampaignRecipient, CampaignDelivery
 
 
 class EmailDirection(str, enum.Enum):
@@ -37,6 +39,20 @@ class EmailStatus(str, enum.Enum):
     FAILED = "FAILED"
     BOUNCED = "BOUNCED"
     RECEIVED = "RECEIVED"
+
+
+class TrackingTokenType(str, enum.Enum):
+    """Purpose classification for cryptographically secure tracking tokens."""
+    OPEN = "OPEN"
+    CLICK = "CLICK"
+    UNSUBSCRIBE = "UNSUBSCRIBE"
+
+
+class TrackingEventType(str, enum.Enum):
+    """Interaction type for append-only email tracking event records."""
+    OPEN = "OPEN"
+    CLICK = "CLICK"
+    UNSUBSCRIBE = "UNSUBSCRIBE"
 
 
 class Email(Base):
@@ -138,6 +154,18 @@ class Email(Base):
     user: Mapped[Optional["User"]] = relationship("User", back_populates="sent_emails")
     thread: Mapped[Optional["EmailThread"]] = relationship("EmailThread", back_populates="emails")
     attachments: Mapped[List["EmailAttachment"]] = relationship("EmailAttachment", back_populates="email", cascade="all, delete-orphan")
+    tracking_tokens: Mapped[List["EmailTrackingToken"]] = relationship(
+        "EmailTrackingToken",
+        primaryjoin="Email.id == foreign(EmailTrackingToken.email_id)",
+        back_populates="email",
+        cascade="all, delete-orphan",
+    )
+    tracking_events: Mapped[List["EmailTrackingEvent"]] = relationship(
+        "EmailTrackingEvent",
+        primaryjoin="Email.id == foreign(EmailTrackingEvent.email_id)",
+        back_populates="email",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         return f"<Email id={self.id} subject='{self.subject[:30]}' status={self.status} direction={self.direction}>"
@@ -385,4 +413,111 @@ class EmailAttachment(Base):
 
     def __repr__(self) -> str:
         return f"<EmailAttachment id={self.id} file_name='{self.file_name}' size={self.file_size} email_id={self.email_id}>"
+
+
+class EmailTrackingToken(Base):
+    """Opaque, secure token mapping an outbound email to engagement tracking actions.
+
+    Raw tokens are generated with cryptographic entropy and never persisted; only
+    their SHA-256 digests (token_hash) are stored. Supports distinct tracking purposes
+    (OPEN, CLICK, UNSUBSCRIBE), server-side destination URLs for clicks, tenant scoping,
+    and revocation/expiration controls.
+    """
+    __tablename__ = "email_tracking_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    company_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    email_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    campaign_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    recipient_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    delivery_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    token_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    destination_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(64), unique=True, nullable=True, index=True)
+    is_revoked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_email_tracking_tokens_lookup", "token_hash", "token_type", "is_revoked"),
+    )
+
+    # Relationships
+    email: Mapped[Optional["Email"]] = relationship(
+        "Email",
+        primaryjoin="foreign(EmailTrackingToken.email_id) == Email.id",
+        back_populates="tracking_tokens",
+    )
+    events: Mapped[List["EmailTrackingEvent"]] = relationship(
+        "EmailTrackingEvent",
+        back_populates="token",
+        cascade="all, delete-orphan",
+    )
+
+    def __repr__(self) -> str:
+        return f"<EmailTrackingToken id={self.id} type='{self.token_type}' email_id={self.email_id} revoked={self.is_revoked}>"
+
+
+class EmailTrackingEvent(Base):
+    """Append-only interaction event stream capturing opens, clicks, and engagement.
+
+    Separates interaction telemetry from mutable campaign and recipient state.
+    Personally identifiable network fields (IP address, User-Agent) are nullable
+    and safeguarded.
+    """
+    __tablename__ = "email_tracking_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    company_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    token_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("email_tracking_tokens.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    email_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    campaign_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    recipient_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    delivery_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+    user_agent: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    is_bot: Mapped[Optional[bool]] = mapped_column(Boolean, default=None, server_default=None, nullable=True)
+    bot_reason: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    bot_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_email_tracking_events_company_type_time", "company_id", "event_type", "occurred_at"),
+        Index("ix_email_tracking_events_campaign_type", "campaign_id", "event_type"),
+    )
+
+    # Relationships
+    token: Mapped["EmailTrackingToken"] = relationship("EmailTrackingToken", back_populates="events")
+    email: Mapped[Optional["Email"]] = relationship(
+        "Email",
+        primaryjoin="foreign(EmailTrackingEvent.email_id) == Email.id",
+        back_populates="tracking_events",
+    )
+
+    def __repr__(self) -> str:
+        return f"<EmailTrackingEvent id={self.id} type='{self.event_type}' email_id={self.email_id} occurred_at='{self.occurred_at}'>"
 

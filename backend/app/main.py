@@ -13,6 +13,10 @@ from app.modules.campaigns.suppression_routes import router as suppression_route
 from app.modules.domains.routes import router as domains_router
 from app.modules.email_accounts.routes import router as email_accounts_router
 from app.modules.emails.routes import router as emails_router
+from app.modules.emails.tracking_routes import (
+    router as internal_tracking_router,
+    public_tracking_router,
+)
 from app.modules.health.routes import router as health_router
 from app.modules.campaigns.public_routes import public_router
 
@@ -59,6 +63,9 @@ def create_application() -> FastAPI:
     app.include_router(domains_router, prefix=settings.API_V1_STR)
     app.include_router(email_accounts_router, prefix=settings.API_V1_STR)
     app.include_router(emails_router, prefix=settings.API_V1_STR)
+    app.include_router(internal_tracking_router, prefix=settings.API_V1_STR)
+    app.include_router(public_tracking_router)
+    app.include_router(public_tracking_router, prefix=settings.API_V1_STR)
     app.include_router(health_router, prefix=settings.API_V1_STR)
     app.include_router(health_router)
 
