@@ -22,12 +22,12 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application source code
 COPY . .
 
-# Expose port
+# Expose default port
 EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/v1/ping || exit 1
+    CMD sh -c "curl -f http://localhost:${PORT:-8000}/api/v1/ping || exit 1"
 
-# Default command
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default command supporting dynamic $PORT on Render with localhost fallback
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
