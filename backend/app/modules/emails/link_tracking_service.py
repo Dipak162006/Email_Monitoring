@@ -1,3 +1,4 @@
+import html
 import logging
 import re
 from typing import Optional
@@ -35,6 +36,8 @@ class LinkTrackingService:
     Guarantees:
     - Never rewrites non-HTTP URLs (mailto, tel, javascript, cid, anchor fragments).
     - Never rewrites unsubscribe URLs or un-rendered template variables.
+    - Decodes HTML entities (e.g. &amp; in query strings) exactly once so the destination
+      persisted by Render is the intended HTTP/HTTPS URL.
     - Preserves all HTML anchor tag attributes (class, style, target, id, data-*).
     - Fails open: If tracking client is unconfigured, times out, or fails,
       the original URL is left completely intact so email dispatch is never halted.
@@ -59,7 +62,8 @@ class LinkTrackingService:
         if trimmed.startswith("#"):
             return False
 
-        lower = trimmed.lower()
+        decoded = html.unescape(trimmed)
+        lower = decoded.lower()
 
         # Exclude non-web schemes
         if any(lower.startswith(scheme) for scheme in BLOCKED_SCHEMES):
@@ -67,7 +71,7 @@ class LinkTrackingService:
 
         # Parse scheme and netloc
         try:
-            parsed = urlparse(trimmed)
+            parsed = urlparse(decoded)
         except Exception:
             return False
 
@@ -142,6 +146,9 @@ class LinkTrackingService:
                 new_pieces.append(full_tag)
                 continue
 
+            # Unescape HTML entities (e.g. &amp; -> &) exactly once so Render stores the true destination URL
+            decoded_destination = html.unescape(raw_href).strip()
+
             # Deterministic idempotency key per link in delivery sequence
             idempotency_key = f"c{campaign_id or 0}_d{delivery_id or 0}_l{link_idx}"
             link_idx += 1
@@ -151,7 +158,7 @@ class LinkTrackingService:
                     company_id=company_id,
                     email_id=effective_email_id,
                     token_type=TrackingTokenType.CLICK,
-                    destination_url=raw_href,
+                    destination_url=decoded_destination,
                     campaign_id=campaign_id,
                     recipient_id=recipient_id,
                     delivery_id=delivery_id,
@@ -160,7 +167,7 @@ class LinkTrackingService:
             except Exception as exc:
                 logger.warning(
                     "Error requesting tracking token for link %s (fail-open): %s",
-                    raw_href,
+                    decoded_destination,
                     exc,
                 )
                 issue_resp = None
@@ -174,4 +181,3 @@ class LinkTrackingService:
 
         new_pieces.append(html_content[last_end:])
         return "".join(new_pieces)
-

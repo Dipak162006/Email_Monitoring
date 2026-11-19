@@ -392,3 +392,82 @@ async def test_delivery_service_link_tracking_dispatch():
             recipient_id=3,
             delivery_id=4,
         )
+
+
+@pytest.mark.asyncio
+async def test_link_rewriter_html_entity_decoding_and_formatting():
+    """Verify HTML entities (&amp;, &quot;, etc.) are decoded exactly once in destination_url,
+    fragments/query strings are preserved, quotes are maintained, and exclusions remain untouched.
+    """
+    html_input = """
+    <div>
+        <!-- Link with multiple query parameters and &amp; entities -->
+        <p><a href="https://example.com/search?q=shoes&amp;sort=asc&amp;page=2">Search Shoes</a></p>
+        
+        <!-- Link with single quotes, query params, and URL fragment -->
+        <p><a href='https://example.com/deals?category=tech&amp;discount=20#top-deals' class='deal-link'>Top Deals</a></p>
+        
+        <!-- Link with percent-encoding and HTML entity -->
+        <p><a href="https://example.com/product?name=Tom%20%26%20Jerry&amp;item_id=123">Cartoon</a></p>
+        
+        <!-- Exclusions containing &amp; must be preserved verbatim -->
+        <a href="mailto:support@example.com?subject=Help&amp;body=Hi">Email Us</a>
+        <a href="https://app.pulsemail.com/unsubscribe?id=99&amp;token=xyz">Unsubscribe</a>
+        <a href="#section&amp;frag">Anchor Jump</a>
+    </div>
+    """
+
+    recorded_destinations = []
+    call_idx = 0
+
+    mock_client = AsyncMock(spec=TrackingServiceClient)
+    mock_client.is_configured = True
+
+    async def mock_issue(*args, **kwargs):
+        nonlocal call_idx
+        call_idx += 1
+        dest = kwargs.get("destination_url")
+        recorded_destinations.append(dest)
+        return TrackingTokenIssueResponse(
+            token_id=call_idx,
+            raw_token=f"token_{call_idx}",
+            token_type="CLICK",
+            tracking_url=f"https://track.pulsemail.com/t/c/token_{call_idx}",
+            destination_url=dest,
+            expires_at=None,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    mock_client.issue_token = AsyncMock(side_effect=mock_issue)
+
+    rewritten_html = await LinkTrackingService.rewrite_campaign_html(
+        html_content=html_input,
+        company_id=1,
+        campaign_id=10,
+        recipient_id=20,
+        delivery_id=30,
+        tracking_client=mock_client,
+    )
+
+    # 3 eligible links rewritten
+    assert mock_client.issue_token.call_count == 3
+
+    # 1. First destination has &amp; decoded to single &
+    assert recorded_destinations[0] == "https://example.com/search?q=shoes&sort=asc&page=2"
+    assert '&amp;' not in recorded_destinations[0]
+
+    # 2. Second destination preserves fragment #top-deals with decoded &
+    assert recorded_destinations[1] == "https://example.com/deals?category=tech&discount=20#top-deals"
+
+    # 3. Third destination preserves percent-encoding Tom%20%26%20Jerry
+    assert recorded_destinations[2] == "https://example.com/product?name=Tom%20%26%20Jerry&item_id=123"
+
+    # HTML quote preservation: double quotes on link 1, single quotes on link 2
+    assert 'href="https://track.pulsemail.com/t/c/token_1"' in rewritten_html
+    assert "href='https://track.pulsemail.com/t/c/token_2'" in rewritten_html
+    assert "class='deal-link'" in rewritten_html
+
+    # Exclusions must remain completely untouched in the output HTML
+    assert 'href="mailto:support@example.com?subject=Help&amp;body=Hi"' in rewritten_html
+    assert 'href="https://app.pulsemail.com/unsubscribe?id=99&amp;token=xyz"' in rewritten_html
+    assert 'href="#section&amp;frag"' in rewritten_html
