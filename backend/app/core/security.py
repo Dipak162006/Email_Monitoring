@@ -151,20 +151,34 @@ def create_unsubscribe_token(
     company_id: int,
     email: str,
     campaign_id: Optional[int] = None,
+    recipient_id: Optional[int] = None,
+    delivery_id: Optional[int] = None,
     expires_delta: Optional[timedelta] = None,
 ) -> str:
-    """Generate a signed, tamper-proof JWT token for email unsubscription."""
+    """Generate a signed, tamper-proof JWT token for email unsubscription.
+    
+    Protects recipient privacy by Fernet-encrypting email address to ensure
+    no PII is visible in the URL or Base64 payload.
+    """
     now = datetime.now(timezone.utc)
     expire = now + (expires_delta or timedelta(days=365))
 
+    clean_email = email.strip().lower() if email else ""
+    enc_email = encrypt_credential(clean_email) if clean_email else None
+
     to_encode = {
         "company_id": company_id,
-        "email": email.strip().lower(),
         "campaign_id": campaign_id,
+        "recipient_id": recipient_id,
+        "delivery_id": delivery_id,
         "type": "unsubscribe",
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
+    if enc_email:
+        to_encode["enc_email"] = enc_email
+    else:
+        to_encode["email"] = clean_email
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
@@ -178,8 +192,18 @@ def decode_unsubscribe_token(token: str) -> dict:
     payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
     if payload.get("type") != "unsubscribe":
         raise jwt.InvalidTokenError("Invalid token type for unsubscription")
-    if "company_id" not in payload or "email" not in payload:
+    if "company_id" not in payload:
         raise jwt.InvalidTokenError("Missing required unsubscribe claims")
+
+    # Securely resolve recipient email from encrypted claim or legacy plain claim
+    enc_email = payload.get("enc_email")
+    if enc_email:
+        payload["email"] = decrypt_credential(enc_email) or enc_email
+    elif "email" in payload:
+        payload["email"] = payload["email"]
+    else:
+        payload["email"] = None
+
     return payload
 
 
@@ -188,9 +212,26 @@ def build_unsubscribe_url(
     email: str,
     campaign_id: Optional[int] = None,
     base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    recipient_id: Optional[int] = None,
+    delivery_id: Optional[int] = None,
 ) -> str:
-    """Construct the full RFC 8058 one-click unsubscribe URL with signed token."""
-    token = create_unsubscribe_token(company_id=company_id, email=email, campaign_id=campaign_id)
-    base = base_url or getattr(settings, "BACKEND_URL", "http://localhost:8000")
-    return f"{base.rstrip('/')}/api/v1/public/unsubscribe/{token}"
+    """Construct the full RFC 8058 one-click unsubscribe URL with signed or opaque token."""
+    unsub_token = token or create_unsubscribe_token(
+        company_id=company_id,
+        email=email,
+        campaign_id=campaign_id,
+        recipient_id=recipient_id,
+        delivery_id=delivery_id,
+    )
+    if base_url:
+        base = base_url
+    else:
+        tracking_base = getattr(settings, "TRACKING_BASE_URL", None)
+        if tracking_base and tracking_base.strip():
+            base = tracking_base.strip()
+        else:
+            base = getattr(settings, "BACKEND_URL", "http://localhost:8000")
+    return f"{base.rstrip('/')}/api/v1/public/unsubscribe/{unsub_token}"
+
 

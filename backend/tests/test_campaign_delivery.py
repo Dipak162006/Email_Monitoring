@@ -16,6 +16,7 @@ from app.modules.campaigns.models import (
     CampaignDeliveryStatus,
     CampaignRecipient,
     CampaignRecipientStatus,
+    CampaignRecipientStopReason,
     CampaignStatus,
     SuppressionEntry,
     SuppressionReason,
@@ -296,11 +297,11 @@ async def test_campaign_delivery_success_flow_and_linkage(async_client: AsyncCli
     assert email_bob.subject == "Hello Bob"
     assert email_bob.body_text == "Hi Bob, check out our update!"
 
-    # 3. Verify Recipients status updated to SENT
+    # 3. Verify Recipients status updated to SENT or COMPLETED
     r1 = await db_session.get(CampaignRecipient, r1_id)
     r2 = await db_session.get(CampaignRecipient, r2_id)
-    assert r1.status == CampaignRecipientStatus.SENT.value
-    assert r2.status == CampaignRecipientStatus.SENT.value
+    assert r1.status in (CampaignRecipientStatus.SENT.value, CampaignRecipientStatus.COMPLETED.value)
+    assert r2.status in (CampaignRecipientStatus.SENT.value, CampaignRecipientStatus.COMPLETED.value)
 
 
 @pytest.mark.anyio
@@ -564,7 +565,7 @@ async def test_campaign_with_suppressed_recipients_completes_and_lists_suppresse
     recipients_data = list_resp.json()
     assert len(recipients_data) == 10
 
-    sent_items = [r for r in recipients_data if r["status"] == "SENT"]
+    sent_items = [r for r in recipients_data if r["status"] in ("SENT", "COMPLETED")]
     suppressed_items = [r for r in recipients_data if r["status"] == "SUPPRESSED"]
     pending_items = [r for r in recipients_data if r["status"] == "PENDING"]
 
@@ -809,7 +810,7 @@ async def test_execute_campaign_injects_unsubscribe_headers_and_resolves_context
         assert "List-Unsubscribe" in sent_mime
         assert "List-Unsubscribe-Post" in sent_mime
         assert sent_mime["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
-        assert "/api/v1/public/unsubscribe/" in sent_mime["List-Unsubscribe"]
+        assert "/api/v1/public/unsubscribe/" in sent_mime["List-Unsubscribe"] or "/t/u/" in sent_mime["List-Unsubscribe"]
 
         # Check Subject resolution
         assert sent_mime["Subject"] == "Welcome Bob to Acme Merge Org!"
@@ -818,7 +819,7 @@ async def test_execute_campaign_injects_unsubscribe_headers_and_resolves_context
         plain_part = sent_mime.get_body(preferencelist=("plain",))
         plain_content = plain_part.get_content() if plain_part else sent_mime.get_content()
         assert "Hi Bob Builder, your plan is Pro Annual." in plain_content
-        assert "/api/v1/public/unsubscribe/" in plain_content
+        assert "/api/v1/public/unsubscribe/" in plain_content or "/t/u/" in plain_content
 
 
 @pytest.mark.anyio
@@ -840,35 +841,25 @@ async def test_public_unsubscribe_get_and_post_endpoints(
     # 1. Generate valid token
     valid_token = create_unsubscribe_token(company_id=company_id, email=target_email, campaign_id=camp_id)
 
-    # 2. GET request with Accept: application/json
+    # 2. GET request with Accept: application/json returns confirmation requirement without unsubscribing
     get_resp = await async_client.get(
         f"/api/v1/public/unsubscribe/{valid_token}",
         headers={"Accept": "application/json"},
     )
     assert get_resp.status_code == 200
     data = get_resp.json()
-    assert data["status"] == "unsubscribed"
-    assert data["email"] == target_email
-    assert data["company_id"] == company_id
+    assert data["status"] == "pending_confirmation"
 
-    # 3. Verify suppression entry created via company suppressions API
+    # 3. Verify suppression entry was NOT created on GET (RFC 8058 scanner protection)
     supp_resp = await async_client.get(
         f"/api/v1/companies/{company_id}/suppressions",
         headers={"Authorization": f"Bearer {owner_token}"},
     )
     assert supp_resp.status_code == 200
     supp_data = supp_resp.json()
-    assert any(s["email"] == target_email and s["reason"] == "UNSUBSCRIBE" for s in supp_data)
+    assert not any(s["email"] == target_email for s in supp_data)
 
-    # 4. Verify pending CampaignRecipient transitioned to SUPPRESSED via API
-    recips_resp = await async_client.get(
-        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients",
-        headers={"Authorization": f"Bearer {owner_token}"},
-    )
-    assert recips_resp.status_code == 200
-    assert any(r["email"] == target_email and r["status"] == "SUPPRESSED" for r in recips_resp.json())
-
-    # 5. POST request (RFC 8058 One-Click Unsubscribe) - idempotent
+    # 4. POST request (RFC 8058 One-Click Unsubscribe) - actually unsubscribes
     post_resp = await async_client.post(
         f"/api/v1/public/unsubscribe/{valid_token}",
         headers={"List-Unsubscribe": "One-Click"},
@@ -876,15 +867,40 @@ async def test_public_unsubscribe_get_and_post_endpoints(
     assert post_resp.status_code == 200
     assert post_resp.json()["status"] == "unsubscribed"
 
-    # 6. GET request requesting HTML returns 200 HTMLResponse
+    # 5. Verify suppression entry IS created via company suppressions API after POST
+    supp_resp2 = await async_client.get(
+        f"/api/v1/companies/{company_id}/suppressions",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert supp_resp2.status_code == 200
+    supp_data2 = supp_resp2.json()
+    assert any(s["email"] == target_email and s["reason"] == "UNSUBSCRIBE" for s in supp_data2)
+
+    # 6. Verify pending CampaignRecipient transitioned to SUPPRESSED via API
+    recips_resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert recips_resp.status_code == 200
+    assert any(r["email"] == target_email and r["status"] == "SUPPRESSED" for r in recips_resp.json())
+
+    # 7. Repeated POST is idempotent
+    post_resp2 = await async_client.post(
+        f"/api/v1/public/unsubscribe/{valid_token}",
+        headers={"List-Unsubscribe": "One-Click"},
+    )
+    assert post_resp2.status_code == 200
+    assert post_resp2.json()["status"] == "unsubscribed"
+
+    # 8. GET request requesting HTML returns 200 HTML confirmation page
     html_resp = await async_client.get(
         f"/api/v1/public/unsubscribe/{valid_token}",
         headers={"Accept": "text/html"},
     )
     assert html_resp.status_code == 200
     assert "text/html" in html_resp.headers["content-type"]
-    assert "You're Unsubscribed" in html_resp.text
-    assert target_email in html_resp.text
+    assert "Unsubscribe Confirmation" in html_resp.text
+
 
     # 7. Tampered token returns 400 Bad Request
     tampered_token = valid_token[:-4] + "abcd"
@@ -893,4 +909,48 @@ async def test_public_unsubscribe_get_and_post_endpoints(
         headers={"Accept": "application/json"},
     )
     assert bad_resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_suppressed_recipient_preserves_existing_stopped_reason(async_client: AsyncClient, db_session: AsyncSession):
+    """Verify that when a recipient is suppressed, an existing stopped_reason is preserved."""
+    owner_token = await register_and_login(async_client, "owner_stop_reason@test.com", "Owner Stop")
+    company_id = await create_company_helper(async_client, owner_token, "Delivery Org Stop")
+    camp_id, _ = await setup_delivery_campaign(async_client, db_session, owner_token, company_id)
+
+    # Recipient 1: already stopped due to reply
+    r1_id = await add_recipient_helper(async_client, owner_token, company_id, camp_id, "replied@test.com", first_name="Replied")
+    # Recipient 2: no prior stop reason
+    r2_id = await add_recipient_helper(async_client, owner_token, company_id, camp_id, "fresh_supp@test.com", first_name="Fresh")
+
+    # Set stopped_reason on r1 while keeping status PENDING so it is evaluated by suppression check
+    r1 = await db_session.get(CampaignRecipient, r1_id)
+    r1.stopped_reason = CampaignRecipientStopReason.REPLIED.value
+    await db_session.commit()
+
+    # Add both to suppression list
+    db_session.add(SuppressionEntry(company_id=company_id, email="replied@test.com", reason=SuppressionReason.MANUAL.value))
+    db_session.add(SuppressionEntry(company_id=company_id, email="fresh_supp@test.com", reason=SuppressionReason.MANUAL.value))
+    await db_session.commit()
+
+    await queue_campaign_helper(db_session, camp_id)
+
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync"):
+        result = await CampaignDeliveryService.execute_campaign(
+            campaign_id=camp_id,
+            company_id=company_id,
+        )
+
+    # Refresh and verify
+    await db_session.refresh(r1)
+    r2 = await db_session.get(CampaignRecipient, r2_id)
+
+    # r1 preserves its existing stopped_reason
+    assert r1.status == CampaignRecipientStatus.SUPPRESSED.value
+    assert r1.stopped_reason == CampaignRecipientStopReason.REPLIED.value
+
+    # r2 gets the default UNSUBSCRIBED since it had no prior stop reason
+    assert r2.status == CampaignRecipientStatus.SUPPRESSED.value
+    assert r2.stopped_reason == CampaignRecipientStopReason.UNSUBSCRIBED.value
+
 

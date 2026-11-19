@@ -5,8 +5,10 @@ import secrets
 from typing import List, Optional, Union
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse, Response
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -120,6 +122,50 @@ async def issue_tracking_token(
         expires_at=token_rec.expires_at,
         created_at=token_rec.created_at,
     )
+
+
+@router.get(
+    "/unsubscribes",
+    summary="Retrieve recorded unsubscribe events for synchronization with local suppression",
+)
+async def list_internal_unsubscribes(
+    since_id: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    internal_auth: None = Depends(verify_tracking_internal_secret),
+    db: AsyncSession = Depends(get_db),
+):
+    """Internal endpoint for local application to synchronize remote unsubscribe events."""
+    from app.modules.emails.models import EmailTrackingEvent
+    stmt = (
+        select(EmailTrackingEvent)
+        .options(selectinload(EmailTrackingEvent.token))
+        .where(
+            EmailTrackingEvent.event_type == TrackingEventType.UNSUBSCRIBE.value,
+            EmailTrackingEvent.id > since_id,
+        )
+        .order_by(EmailTrackingEvent.id.asc())
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    events = result.scalars().all()
+    return [
+        {
+            "event_id": e.id,
+            "token_id": e.token_id,
+            "company_id": e.company_id,
+            "campaign_id": e.campaign_id,
+            "recipient_id": e.recipient_id,
+            "delivery_id": e.delivery_id,
+            "email": (
+                e.token.destination_url.replace("email:", "")
+                if e.token and e.token.destination_url and e.token.destination_url.startswith("email:")
+                else None
+            ),
+            "occurred_at": e.occurred_at.isoformat() if e.occurred_at else None,
+        }
+        for e in events
+    ]
+
 
 
 def get_trusted_proxy_networks() -> List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
@@ -389,4 +435,41 @@ async def track_open_pixel(
         status_code=status.HTTP_200_OK,
         headers=headers,
     )
+
+
+@public_tracking_router.get(
+    "/t/u/{token}",
+    summary="Public confirmation page for email unsubscription",
+)
+@public_tracking_router.get(
+    "/t/u/{token}/",
+    include_in_schema=False,
+)
+async def track_unsubscribe_get(
+    token: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Public GET endpoint for opaque tracking unsubscribe URLs."""
+    from app.modules.campaigns.unsubscribe_service import UnsubscribeService
+    return await UnsubscribeService.handle_get(token=token, request=request, db=db)
+
+
+@public_tracking_router.post(
+    "/t/u/{token}",
+    summary="Public RFC 8058 one-click unsubscribe endpoint",
+)
+@public_tracking_router.post(
+    "/t/u/{token}/",
+    include_in_schema=False,
+)
+async def track_unsubscribe_post(
+    token: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Public RFC 8058 One-Click POST endpoint for opaque tracking unsubscribe URLs."""
+    from app.modules.campaigns.unsubscribe_service import UnsubscribeService
+    return await UnsubscribeService.handle_post(token=token, request=request, db=db)
+
 

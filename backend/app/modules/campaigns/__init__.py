@@ -41,6 +41,7 @@ from app.modules.campaigns.preflight_service import CampaignPreflightService
 from app.modules.campaigns.recipient_service import CampaignRecipientService
 from app.modules.campaigns.scheduling_service import CampaignSchedulingService
 from app.modules.campaigns.suppression_service import SuppressionService
+from app.modules.campaigns.unsubscribe_service import UnsubscribeService
 from app.modules.campaigns.suppression_routes import router as suppression_router
 from app.modules.campaigns.service import (
     CampaignService,
@@ -88,6 +89,7 @@ __all__ = [
     "CampaignRecipientService",
     "CampaignSchedulingService",
     "SuppressionService",
+    "UnsubscribeService",
     "suppression_router",
     "VALID_TRANSITIONS",
     "TERMINAL_STATES",

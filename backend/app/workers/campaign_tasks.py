@@ -111,3 +111,28 @@ def scheduled_campaign_dispatch_task(self) -> Dict[str, Any]:
     """Celery periodic task checking and dispatching due scheduled campaigns."""
     return run_async(_async_scheduled_campaign_dispatch_task())
 
+
+async def _async_sync_remote_unsubscribes_task() -> Dict[str, Any]:
+    """Asynchronous core of the remote unsubscribe periodic synchronization task."""
+    logger.info("Executing periodic remote unsubscribe synchronization task.")
+    try:
+        from app.modules.campaigns.unsubscribe_service import UnsubscribeService
+        from app.workers.tasks import get_worker_db
+        async with get_worker_db() as db:
+            synced_count = await UnsubscribeService.sync_remote_unsubscribes(db=db)
+            return {"status": "SUCCESS", "synced_count": synced_count}
+    except Exception as exc:
+        logger.exception("Error in periodic remote unsubscribe synchronization: %s", exc)
+        return {"status": "FAILED", "error": str(exc)}
+
+
+@celery_app.task(
+    bind=True,
+    name="app.workers.campaign_tasks.sync_remote_unsubscribes_task",
+    acks_late=True,
+)
+def sync_remote_unsubscribes_task(self) -> Dict[str, Any]:
+    """Celery periodic task synchronizing remote tracking unsubscribes into local suppression."""
+    return run_async(_async_sync_remote_unsubscribes_task())
+
+

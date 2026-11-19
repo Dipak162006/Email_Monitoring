@@ -32,5 +32,11 @@ beat_schedule["scheduled-campaign-dispatch-periodic"] = {
     "schedule": crontab(minute="*"),
 }
 
+# T4.2 periodic remote unsubscribe synchronization
+beat_schedule["sync-remote-unsubscribes-periodic"] = {
+    "task": "app.workers.campaign_tasks.sync_remote_unsubscribes_task",
+    "schedule": crontab(minute="*/5"),
+}
+
 celery_app.conf.beat_schedule = beat_schedule
 

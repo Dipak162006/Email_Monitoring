@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, Union
+from typing import List, Optional, Union
 import httpx
 from pydantic import ValidationError
 
@@ -126,4 +126,35 @@ class TrackingServiceClient:
         except Exception as exc:
             logger.warning("Unexpected error communicating with tracking service: %s", exc.__class__.__name__)
             return None
+
+    async def get_unsubscribes(self, since_id: int = 0, limit: int = 100) -> List[dict]:
+        """Fetch recorded unsubscribe events from the remote tracking backend.
+        
+        Used by the local application to synchronize remote unsubscribes into the
+        local suppression list.
+        """
+        if not self.is_configured:
+            return []
+
+        url = f"{self._service_url}/api/v1/internal/tracking/unsubscribes"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Tracking-Internal-Secret": self._internal_secret,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+                response = await client.get(
+                    url,
+                    params={"since_id": since_id, "limit": limit},
+                    headers=headers,
+                )
+                if response.status_code == 200:
+                    return response.json()
+                logger.warning("Failed to fetch unsubscribes (status=%d)", response.status_code)
+                return []
+        except Exception as exc:
+            logger.debug("Failed to connect to tracking service for unsubscribes: %s", exc)
+            return []
+
 

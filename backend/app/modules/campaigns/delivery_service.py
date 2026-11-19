@@ -29,6 +29,7 @@ from app.modules.emails.schemas import EmailSendRequest
 from app.modules.emails.service import EmailService
 from app.modules.emails.link_tracking_service import LinkTrackingService
 from app.modules.emails.open_tracking_service import OpenTrackingService
+from app.modules.campaigns.unsubscribe_service import UnsubscribeService
 
 logger = logging.getLogger(__name__)
 
@@ -366,6 +367,9 @@ class CampaignDeliveryService:
                 db.add(step_1)
                 await db.flush()
 
+            # Sync remote unsubscribes to ensure newly suppressed recipients are excluded
+            await UnsubscribeService.sync_remote_unsubscribes(db)
+
             recip_stmt = (
                 select(CampaignRecipient)
                 .where(
@@ -412,7 +416,8 @@ class CampaignDeliveryService:
                 if norm_email in suppressed_emails:
                     logger.info("Recipient %d (%s) is suppressed. Skipping delivery.", r.id, norm_email)
                     r.status = CampaignRecipientStatus.SUPPRESSED.value
-                    r.stopped_reason = "UNSUBSCRIBED"
+                    if not r.stopped_reason:
+                        r.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
                     r.next_step_due_at = None
                     suppressed_count += 1
                     continue
@@ -523,6 +528,29 @@ class CampaignDeliveryService:
                     )
                     break
 
+                # In-Flight Suppression Check: Recheck recipient status and company suppression immediately before send
+                is_suppressed_now = (
+                    recipient.status in (
+                        CampaignRecipientStatus.SUPPRESSED.value,
+                        CampaignRecipientStatus.STOPPED.value,
+                        CampaignRecipientStatus.BOUNCED.value,
+                    )
+                    or await SuppressionService.is_suppressed(db, company_id, recipient.email)
+                )
+                if is_suppressed_now:
+                    logger.info(
+                        "Recipient %d (%s) is suppressed or stopped. Skipping in-flight dispatch.",
+                        recipient.id,
+                        recipient.email,
+                    )
+                    recipient.status = CampaignRecipientStatus.SUPPRESSED.value
+                    if not recipient.stopped_reason:
+                        recipient.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
+                    recipient.next_step_due_at = None
+                    await db.commit()
+                    skipped_count += 1
+                    continue
+
                 recipient_obj = recipient
                 recipient_email = recipient.email
                 camp_subject = campaign.subject
@@ -592,7 +620,13 @@ class CampaignDeliveryService:
             # 3b. Render recipient-specific content with full template variables
             sender_name = sender_account.name or sender_account.email_address
             sender_email = sender_account.email_address
-            unsub_url = build_unsubscribe_url(company_id=company_id, email=recipient_email, campaign_id=campaign_id)
+            unsub_url = await UnsubscribeService.build_campaign_unsubscribe_url(
+                company_id=company_id,
+                recipient_id=recipient_obj.id,
+                delivery_id=delivery_id,
+                campaign_id=campaign_id,
+                recipient_email=recipient_email,
+            )
             login_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
 
             context_vars = {
@@ -671,6 +705,16 @@ class CampaignDeliveryService:
                 recipient = recip_res.scalar_one_or_none()
 
                 if delivery and recipient:
+                    # Concurrency Guard: Check if the recipient was suppressed during the SMTP transport window
+                    is_suppressed_post = (
+                        recipient.status in (
+                            CampaignRecipientStatus.SUPPRESSED.value,
+                            CampaignRecipientStatus.STOPPED.value,
+                            CampaignRecipientStatus.BOUNCED.value,
+                        )
+                        or await SuppressionService.is_suppressed(db, company_id, recipient.email)
+                    )
+
                     if send_success and sent_email_record:
                         delivery.status = CampaignDeliveryStatus.SENT.value
                         delivery.sent_at = datetime.now(timezone.utc)
@@ -680,24 +724,32 @@ class CampaignDeliveryService:
                         delivery.error_message = None
 
                         recipient.current_step_number = 1
-                        recipient.status = CampaignRecipientStatus.SENT.value
 
-                        # Check if the campaign has an active Step 2 follow-up
-                        step_2_stmt = select(CampaignStep).where(
-                            CampaignStep.campaign_id == campaign.id,
-                            CampaignStep.step_number == 2,
-                            CampaignStep.is_active == True,
-                        )
-                        step_2_res = await db.execute(step_2_stmt)
-                        step_2 = step_2_res.scalar_one_or_none()
-                        if step_2:
-                            raw_s2_due = delivery.sent_at + timedelta(hours=step_2.delay_hours)
-                            sw_s2 = getattr(campaign, "sending_window", None)
-                            if sw_s2:
-                                raw_s2_due = SendingWindowService.compute_next_window_opening(raw_s2_due, sw_s2)
-                            recipient.next_step_due_at = raw_s2_due
-                        else:
+                        if is_suppressed_post:
+                            # Protect against overwriting SUPPRESSED with SENT and do NOT schedule follow-up
+                            recipient.status = CampaignRecipientStatus.SUPPRESSED.value
+                            if not recipient.stopped_reason:
+                                recipient.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
                             recipient.next_step_due_at = None
+                        else:
+                            recipient.status = CampaignRecipientStatus.SENT.value
+
+                            # Check if the campaign has an active Step 2 follow-up
+                            step_2_stmt = select(CampaignStep).where(
+                                CampaignStep.campaign_id == campaign.id,
+                                CampaignStep.step_number == 2,
+                                CampaignStep.is_active == True,
+                            )
+                            step_2_res = await db.execute(step_2_stmt)
+                            step_2 = step_2_res.scalar_one_or_none()
+                            if step_2:
+                                raw_s2_due = delivery.sent_at + timedelta(hours=step_2.delay_hours)
+                                sw_s2 = getattr(campaign, "sending_window", None)
+                                if sw_s2:
+                                    raw_s2_due = SendingWindowService.compute_next_window_opening(raw_s2_due, sw_s2)
+                                recipient.next_step_due_at = raw_s2_due
+                            else:
+                                recipient.next_step_due_at = None
                         sent_count += 1
                     else:
                         delivery.status = CampaignDeliveryStatus.FAILED.value
@@ -707,21 +759,28 @@ class CampaignDeliveryService:
                             delivery.thread_id = failed_email_record.thread_id
                             delivery.message_id = failed_email_record.message_id
 
-                        recipient.status = CampaignRecipientStatus.FAILED.value
+                        if is_suppressed_post:
+                            recipient.status = CampaignRecipientStatus.SUPPRESSED.value
+                            if not recipient.stopped_reason:
+                                recipient.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
+                            recipient.next_step_due_at = None
+                        else:
+                            recipient.status = CampaignRecipientStatus.FAILED.value
                         failed_count += 1
 
-                        # Schedule retry if error is retryable and attempt_count < max_retries
-                        max_retries = getattr(settings, "MAX_CAMPAIGN_DELIVERY_RETRIES", 3)
-                        if is_retryable_delivery_error(caught_exc) and delivery.attempt_count < max_retries:
-                            try:
-                                cls.schedule_delivery_retry(
-                                    delivery_id=delivery.id,
-                                    company_id=company_id,
-                                    attempt_count=delivery.attempt_count,
-                                    min_countdown=send_interval_sec,
-                                )
-                            except Exception as sched_err:
-                                logger.warning("Could not schedule retry for delivery %d: %s", delivery.id, sched_err)
+                        # Schedule retry if error is retryable, not suppressed, and attempt_count < max_retries
+                        if not is_suppressed_post:
+                            max_retries = getattr(settings, "MAX_CAMPAIGN_DELIVERY_RETRIES", 3)
+                            if is_retryable_delivery_error(caught_exc) and delivery.attempt_count < max_retries:
+                                try:
+                                    cls.schedule_delivery_retry(
+                                        delivery_id=delivery.id,
+                                        company_id=company_id,
+                                        attempt_count=delivery.attempt_count,
+                                        min_countdown=send_interval_sec,
+                                    )
+                                except Exception as sched_err:
+                                    logger.warning("Could not schedule retry for delivery %d: %s", delivery.id, sched_err)
 
                     await db.commit()
 
@@ -1169,6 +1228,7 @@ class CampaignDeliveryService:
             if not recipient:
                 return {"status": "FAILED", "delivery_id": delivery_id, "error": "Recipient record not found"}
 
+            await UnsubscribeService.sync_remote_unsubscribes(db)
             if await SuppressionService.is_suppressed(db, company_id, recipient.email):
                 logger.warning("Recipient %s is suppressed for company %d. Aborting retry.", recipient.email, company_id)
                 delivery.status = CampaignDeliveryStatus.FAILED.value
@@ -1201,7 +1261,13 @@ class CampaignDeliveryService:
         # ---------------------------------------------------------------------
         sender_name = sender_account.name or sender_account.email_address
         sender_email = sender_account.email_address
-        unsub_url = build_unsubscribe_url(company_id=company_id, email=recip_email, campaign_id=campaign.id)
+        unsub_url = await UnsubscribeService.build_campaign_unsubscribe_url(
+            company_id=company_id,
+            recipient_id=recipient.id,
+            delivery_id=delivery.id,
+            campaign_id=campaign.id,
+            recipient_email=recip_email,
+        )
         login_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
 
         context_vars = {
@@ -1650,6 +1716,7 @@ class CampaignDeliveryService:
         # Step 1: Query due recipients with row locks to prevent duplicate execution across workers
         due_recipients_data = []
         async with db_factory() as db:
+            await UnsubscribeService.sync_remote_unsubscribes(db)
             stmt = (
                 select(CampaignRecipient.id, CampaignRecipient.campaign_id)
                 .join(Campaign, CampaignRecipient.campaign_id == Campaign.id)
@@ -1762,7 +1829,8 @@ class CampaignDeliveryService:
                     or await SuppressionService.is_suppressed(db, campaign.company_id, recipient.email)
                 ):
                     logger.info("Recipient %s is suppressed/bounced in campaign %d. Cancelling follow-up.", recipient.email, campaign.id)
-                    recipient.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
+                    if not recipient.stopped_reason:
+                        recipient.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
                     recipient.next_step_due_at = None
                     recipient.status = CampaignRecipientStatus.SUPPRESSED.value
                     await db.commit()
@@ -1905,7 +1973,13 @@ class CampaignDeliveryService:
                 # Render content
                 sender_name = sender_account.name or sender_account.email_address
                 sender_email = sender_account.email_address
-                unsub_url = build_unsubscribe_url(company_id=campaign.company_id, email=recipient.email, campaign_id=campaign.id)
+                unsub_url = await UnsubscribeService.build_campaign_unsubscribe_url(
+                    company_id=campaign.company_id,
+                    recipient_id=recipient.id,
+                    delivery_id=delivery_id,
+                    campaign_id=campaign.id,
+                    recipient_email=recipient.email,
+                )
                 login_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
                 camp_company_name = (campaign.company.name if campaign.company and campaign.company.name else "") or sender_name
 
