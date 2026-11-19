@@ -15,6 +15,7 @@ from app.modules.emails.models import (
 from app.modules.emails.tracking_service import EmailTrackingService
 from app.modules.emails.tracking_client import TrackingServiceClient
 from app.modules.emails.link_tracking_service import LinkTrackingService
+from app.modules.emails.open_tracking_service import OpenTrackingService
 from app.modules.emails.tracking_schemas import (
     TrackingTokenIssueRequest,
     TrackingTokenIssueResponse,
@@ -99,6 +100,7 @@ __all__ = [
     "EmailTrackingService",
     "TrackingServiceClient",
     "LinkTrackingService",
+    "OpenTrackingService",
     "TrackingTokenIssueRequest",
     "TrackingTokenIssueResponse",
     "router",

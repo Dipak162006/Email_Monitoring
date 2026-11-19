@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     TRACKING_SERVICE_URL: Optional[str] = None
     TRACKING_CLIENT_TIMEOUT_SECONDS: float = 3.0
 
+    # Proxy Security (comma-separated list of trusted proxy IPs/CIDRs, e.g. "10.0.0.0/8,127.0.0.1")
+    TRUSTED_PROXIES: Optional[str] = None
+
     @model_validator(mode="after")
     def validate_and_sync_runtime_settings(self) -> "Settings":
         # Derive sync database URL if DATABASE_URL was set to remote instance but sync URL was not explicitly configured

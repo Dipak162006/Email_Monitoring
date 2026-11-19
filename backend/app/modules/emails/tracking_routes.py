@@ -1,11 +1,12 @@
 from datetime import timedelta
+import ipaddress
 import logging
 import secrets
-from typing import Optional
+from typing import List, Optional, Union
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -121,6 +122,104 @@ async def issue_tracking_token(
     )
 
 
+def get_trusted_proxy_networks() -> List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
+    """Parse configured trusted proxy networks from application settings.
+    
+    Security Rules:
+    - If TRUSTED_PROXIES is configured, it defines the explicit trust boundary.
+    - In local development/testing (APP_ENV != 'production'), loopback (127.0.0.1/32, ::1/128)
+      is trusted by default to support local testing, unless TRUSTED_PROXIES is explicitly set empty.
+    - In production (APP_ENV == 'production'), trusted proxies is empty by default unless explicitly configured.
+    """
+    raw = getattr(settings, "TRUSTED_PROXIES", None)
+    if raw is not None:
+        if not raw.strip():
+            return []
+        items = raw.split(",")
+    else:
+        is_prod = (getattr(settings, "APP_ENV", "") or "").strip().lower() in ("production", "prod")
+        if is_prod:
+            return []
+        items = ["127.0.0.1", "::1"]
+
+    networks: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = []
+    for item in items:
+        clean = item.strip()
+        if not clean:
+            continue
+        try:
+            if "/" in clean:
+                networks.append(ipaddress.ip_network(clean, strict=False))
+            else:
+                networks.append(ipaddress.ip_network(f"{clean}/32" if ":" not in clean else f"{clean}/128", strict=False))
+        except ValueError:
+            logger.warning("Invalid trusted proxy IP/network '%s' ignored", clean)
+    return networks
+
+
+def extract_client_ip(request: Request) -> Optional[str]:
+    """Extract client IP address strictly respecting the trusted proxy boundary.
+    
+    Security & Privacy Rules:
+    - Never trust arbitrary X-Forwarded-For or CF-Connecting-IP headers from the public internet.
+    - If trusted proxy configuration is not established (no TRUSTED_PROXIES configured or
+      immediate peer request.client.host is not within a trusted proxy network),
+      forwarding headers are considered untrusted/spoofable.
+    - When untrusted, returns None (stores NULL in the database) to prevent spoofed IP injection.
+    - When the immediate peer IS an established trusted proxy:
+      1. Inspects CF-Connecting-IP (if configured behind Cloudflare) and validates it is a valid IP.
+      2. Or inspects the rightmost untrusted IP in X-Forwarded-For (walking back past internal/private proxy hops).
+      3. Validates and returns normalized IP string (max 45 chars).
+    - If no forwarding headers are provided by the trusted proxy, returns None.
+    """
+    trusted_networks = get_trusted_proxy_networks()
+    if not trusted_networks:
+        return None
+
+    client_host = request.client.host if request.client else None
+    if not client_host:
+        return None
+
+    try:
+        peer_ip = ipaddress.ip_address(client_host)
+    except ValueError:
+        return None
+
+    is_trusted_peer = any(peer_ip in net for net in trusted_networks)
+    if not is_trusted_peer:
+        return None
+
+    # Immediate peer IS trusted; check headers passed by the trusted proxy
+    cf_connecting = request.headers.get("cf-connecting-ip")
+    if cf_connecting:
+        clean_cf = cf_connecting.strip()
+        try:
+            ipaddress.ip_address(clean_cf)
+            return clean_cf[:45]
+        except ValueError:
+            pass
+
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+        for candidate in reversed(parts):
+            try:
+                c_ip = ipaddress.ip_address(candidate)
+                if any(c_ip in net for net in trusted_networks) or c_ip.is_private:
+                    continue
+                return str(c_ip)[:45]
+            except ValueError:
+                continue
+        if parts:
+            try:
+                ipaddress.ip_address(parts[0])
+                return parts[0][:45]
+            except ValueError:
+                pass
+
+    return None
+
+
 @public_tracking_router.get(
     "/t/c/{token}",
     response_class=RedirectResponse,
@@ -173,8 +272,7 @@ async def track_click_and_redirect(
             detail="Invalid redirect destination scheme",
         )
 
-    forwarded = request.headers.get("x-forwarded-for")
-    client_ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else None)
+    client_ip = extract_client_ip(request)
     user_agent = request.headers.get("user-agent")
     token_id = token_record.id
 
@@ -209,3 +307,86 @@ async def track_click_and_redirect(
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
+
+
+# RFC-compliant 43-byte transparent 1x1 GIF89a pixel
+TRANSPARENT_PIXEL_GIF = (
+    b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00"
+    b"!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01"
+    b"\x00\x00\x02\x02D\x01\x00;"
+)
+
+
+@public_tracking_router.get(
+    "/t/o/{token}",
+    summary="Track email open via transparent 1x1 pixel",
+)
+async def track_open_pixel(
+    token: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Public open tracking pixel endpoint.
+    
+    Validates token from server-side database, records unclassified open event,
+    and returns a transparent 1x1 GIF with strict no-cache headers.
+    
+    Security & Reliability Rules:
+    - Token validated strictly against stored SHA-256 hash; revoked, expired,
+      invalid, or non-OPEN tokens return HTTP 404.
+    - Records an OPEN event with is_bot = None (unclassified raw open).
+    - Fails closed: if the event cannot be recorded/committed, returns HTTP 500 without returning image.
+    - Emits strict no-cache headers to prevent proxy or client caching.
+    - Never redirects.
+    - Does not expose database errors or token details.
+    """
+    token_record = await EmailTrackingService.resolve_and_validate_token(
+        db=db,
+        raw_token=token,
+        expected_type=TrackingTokenType.OPEN,
+    )
+    if token_record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tracking pixel is invalid, expired, or has been disabled",
+        )
+
+    client_ip = extract_client_ip(request)
+    user_agent = request.headers.get("user-agent")
+    token_id = token_record.id
+
+    try:
+        await EmailTrackingService.record_tracking_event(
+            db=db,
+            token=token_record,
+            event_type=TrackingEventType.OPEN,
+            ip_address=client_ip,
+            user_agent=user_agent,
+            is_bot=None,
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.error(
+            "Failed to record open event for token id=%d: %s",
+            token_id,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to record tracking event",
+        )
+
+    headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+    return Response(
+        content=TRANSPARENT_PIXEL_GIF,
+        media_type="image/gif",
+        status_code=status.HTTP_200_OK,
+        headers=headers,
+    )
+

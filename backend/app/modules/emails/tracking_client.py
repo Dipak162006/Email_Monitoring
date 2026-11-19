@@ -27,8 +27,16 @@ class TrackingServiceClient:
         internal_secret: Optional[str] = None,
         timeout_seconds: Optional[float] = None,
     ):
-        self._service_url = (service_url or settings.get_tracking_service_url() or "").rstrip("/")
-        self._internal_secret = internal_secret or settings.TRACKING_INTERNAL_SECRET
+        if service_url is not None:
+            self._service_url = service_url.rstrip("/")
+        else:
+            self._service_url = (settings.get_tracking_service_url() or "").rstrip("/")
+
+        if internal_secret is not None:
+            self._internal_secret = internal_secret
+        else:
+            self._internal_secret = settings.TRACKING_INTERNAL_SECRET
+
         self._timeout_seconds = timeout_seconds if timeout_seconds is not None else settings.TRACKING_CLIENT_TIMEOUT_SECONDS
 
     @property
