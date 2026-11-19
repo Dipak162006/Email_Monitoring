@@ -510,6 +510,7 @@ class UnsubscribeService:
                     break
 
                 max_batch_id = cursor
+                batch_suppressed_keys = set()
 
                 for ev in events:
                     ev_id = ev.get("event_id") or ev.get("id") or 0
@@ -530,7 +531,8 @@ class UnsubscribeService:
                             if not email:
                                 email = recip.email
                             recip.status = CampaignRecipientStatus.SUPPRESSED.value
-                            recip.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
+                            if not recip.stopped_reason:
+                                recip.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
                             recip.next_step_due_at = None
 
                     if not email:
@@ -542,20 +544,23 @@ class UnsubscribeService:
                         norm_email = email.strip().lower()
 
                     # Idempotent suppression entry
-                    existing = await db.execute(
-                        select(SuppressionEntry).where(
-                            SuppressionEntry.company_id == company_id,
-                            SuppressionEntry.email == norm_email,
-                        )
-                    )
-                    if not existing.scalar_one_or_none():
-                        db.add(
-                            SuppressionEntry(
-                                company_id=company_id,
-                                email=norm_email,
-                                reason=SuppressionReason.UNSUBSCRIBE.value,
+                    supp_key = (company_id, norm_email)
+                    if supp_key not in batch_suppressed_keys:
+                        existing = await db.execute(
+                            select(SuppressionEntry).where(
+                                SuppressionEntry.company_id == company_id,
+                                SuppressionEntry.email == norm_email,
                             )
                         )
+                        if not existing.scalar_one_or_none():
+                            db.add(
+                                SuppressionEntry(
+                                    company_id=company_id,
+                                    email=norm_email,
+                                    reason=SuppressionReason.UNSUBSCRIBE.value,
+                                )
+                            )
+                        batch_suppressed_keys.add(supp_key)
 
                     # Stop all active/pending recipients for this company and email, and cancel follow-ups
                     all_recips = await db.execute(
@@ -573,7 +578,8 @@ class UnsubscribeService:
                     )
                     for r in all_recips.scalars().all():
                         r.status = CampaignRecipientStatus.SUPPRESSED.value
-                        r.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
+                        if not r.stopped_reason:
+                            r.stopped_reason = CampaignRecipientStopReason.UNSUBSCRIBED.value
                         r.next_step_due_at = None
 
                     total_synced += 1

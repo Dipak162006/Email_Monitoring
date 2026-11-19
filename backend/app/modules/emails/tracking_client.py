@@ -136,7 +136,7 @@ class TrackingServiceClient:
         if not self.is_configured:
             return []
 
-        url = f"{self._service_url}/api/v1/internal/tracking/unsubscribes"
+        url = f"{self._service_url}/api/v1/unsubscribes"
         headers = {
             "Content-Type": "application/json",
             "X-Tracking-Internal-Secret": self._internal_secret,

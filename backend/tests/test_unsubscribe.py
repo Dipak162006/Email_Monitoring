@@ -818,3 +818,139 @@ async def test_browser_post_response_behavior(async_client: AsyncClient, setup_t
     assert machine_res.status_code == 200
     assert "application/json" in machine_res.headers["content-type"]
     assert machine_res.json()["status"] == "unsubscribed"
+
+
+@pytest.mark.asyncio
+async def test_tracking_client_canonical_unsubscribes_path():
+    """T4.7: Verify TrackingServiceClient requests the canonical /api/v1/unsubscribes path."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.modules.emails.tracking_client import TrackingServiceClient
+
+    client = TrackingServiceClient()
+    client._service_url = "https://tracking.test"
+    client._internal_secret = "secret123"
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = [{"event_id": 1, "company_id": 1}]
+
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_resp
+        events = await client.get_unsubscribes(since_id=5, limit=50)
+
+        assert events == [{"event_id": 1, "company_id": 1}]
+        mock_get.assert_called_once()
+        called_url = mock_get.call_args[0][0]
+        called_params = mock_get.call_args[1]["params"]
+        called_headers = mock_get.call_args[1]["headers"]
+
+        assert called_url == "https://tracking.test/api/v1/unsubscribes"
+        assert called_params == {"since_id": 5, "limit": 50}
+        assert called_headers["X-Tracking-Internal-Secret"] == "secret123"
+
+
+@pytest.mark.asyncio
+async def test_sync_remote_unsubscribes_duplicate_events_in_same_batch(db_session: AsyncSession, setup_test_org):
+    """T4.7: Verify multiple events for the same email in one batch are handled idempotently."""
+    company = setup_test_org["company"]
+    account = setup_test_org["account"]
+    from app.modules.campaigns.models import Campaign, CampaignRecipient, CampaignRecipientStatus, SuppressionEntry
+    from app.modules.campaigns.unsubscribe_service import UnsubscribeService
+    from sqlalchemy import select, func
+
+    camp = Campaign(
+        company_id=company.id,
+        email_account_id=account.id,
+        name="Dup Batch Test Camp",
+        subject="Dup Test",
+        body_text="Test",
+    )
+    db_session.add(camp)
+    await db_session.commit()
+    await db_session.refresh(camp)
+
+    r = CampaignRecipient(
+        campaign_id=camp.id,
+        email="dup_batch_test@test.com",
+        status=CampaignRecipientStatus.ACTIVE.value,
+    )
+    db_session.add(r)
+    await db_session.commit()
+    await db_session.refresh(r)
+
+    # Batch with two duplicate events for the same recipient with email=None (Zero PII from Render)
+    batch_events = [
+        {"event_id": 201, "company_id": company.id, "recipient_id": r.id, "email": None},
+        {"event_id": 202, "company_id": company.id, "recipient_id": r.id, "email": None},
+    ]
+
+    mock_client = AsyncMock()
+    mock_client.is_configured = True
+    mock_client.get_unsubscribes.return_value = batch_events
+
+    await UnsubscribeService.set_sync_cursor(200)
+
+    # Execute sync
+    synced = await UnsubscribeService.sync_remote_unsubscribes(db=db_session, tracking_client=mock_client)
+    assert synced == 2
+
+    # Verify cursor advanced to 202
+    cursor = await UnsubscribeService.get_sync_cursor()
+    assert cursor == 202
+
+    # Verify recipient is suppressed
+    await db_session.refresh(r)
+    assert r.status == CampaignRecipientStatus.SUPPRESSED.value
+
+    # Verify exactly 1 suppression entry was created using locally resolved email
+    count = (await db_session.execute(
+        select(func.count(SuppressionEntry.id)).where(
+            SuppressionEntry.company_id == company.id,
+            SuppressionEntry.email == "dup_batch_test@test.com",
+        )
+    )).scalar()
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_build_campaign_unsubscribe_url_omits_destination_url():
+    """T4.9: Verify build_campaign_unsubscribe_url does not pass plaintext email in destination_url to Render."""
+    from unittest.mock import AsyncMock
+    from app.modules.campaigns.unsubscribe_service import UnsubscribeService
+    from app.modules.emails.tracking_client import TrackingServiceClient
+    from app.modules.emails.models import TrackingTokenType
+    from app.modules.emails.tracking_schemas import TrackingTokenIssueResponse
+    from datetime import datetime, timezone
+
+    mock_client = AsyncMock(spec=TrackingServiceClient)
+    mock_client.is_configured = True
+    mock_client.issue_token.return_value = TrackingTokenIssueResponse(
+        token_id=99,
+        raw_token="mock_raw_token",
+        token_type=TrackingTokenType.UNSUBSCRIBE.value,
+        tracking_url="https://tracking.test/t/u/mock_raw_token",
+        destination_url=None,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    url = await UnsubscribeService.build_campaign_unsubscribe_url(
+        company_id=1,
+        recipient_id=42,
+        delivery_id=100,
+        campaign_id=10,
+        recipient_email="sensitive_user@example.com",
+        tracking_client=mock_client,
+    )
+
+    assert url == "https://tracking.test/t/u/mock_raw_token"
+    mock_client.issue_token.assert_called_once()
+    called_kwargs = mock_client.issue_token.call_args[1]
+
+    # Invariant: destination_url must NOT contain the email (must be None)
+    assert called_kwargs.get("destination_url") is None
+    assert called_kwargs["company_id"] == 1
+    assert called_kwargs["recipient_id"] == 42
+    assert called_kwargs["delivery_id"] == 100
+    assert called_kwargs["campaign_id"] == 10
+
+
