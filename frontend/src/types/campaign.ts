@@ -291,13 +291,14 @@ export interface SuppressionListParams {
 
 
 export interface CampaignStepAnalytics {
-  step_id: number;
+  step_id?: number;
   step_number: number;
   subject: string;
   delay_hours: number;
   target_tags: string[];
   targeted_count: number;
   sent_count: number;
+  unique_recipients_sent?: number;
   sending_count: number;
   bounced_count: number;
   failed_count: number;
@@ -308,6 +309,14 @@ export interface CampaignStepAnalytics {
   delivery_rate: number;
   reply_rate: number;
   bounce_rate: number;
+  is_active?: boolean;
+  raw_open_count?: number;
+  unique_open_recipients?: number;
+  raw_click_count?: number;
+  unique_click_recipients?: number;
+  open_rate?: number;
+  click_rate?: number;
+  click_to_open_rate?: number;
 }
 
 export interface CampaignDeliveryTrendPoint {
@@ -315,6 +324,41 @@ export interface CampaignDeliveryTrendPoint {
   sent_count: number;
   bounced_count: number;
   replied_count: number;
+}
+
+export interface CampaignDeliveryMetrics {
+  total_recipients: number;
+  total_sent: number;
+  unique_recipients_sent: number;
+  estimated_delivered_count: number;
+  bounced_count: number;
+  failed_count: number;
+  suppressed_count: number;
+  delivered_count: number;
+}
+
+export interface CampaignEngagementMetrics {
+  raw_open_count: number;
+  unique_open_recipients: number;
+  unique_recipients_sent: number;
+  open_rate: number;
+  raw_click_count: number;
+  unique_click_recipients: number;
+  click_rate: number;
+  click_to_open_rate: number;
+  unique_clicked_destinations?: number | null;
+}
+
+export interface CampaignClassificationMetrics {
+  bot_events_count: number;
+  non_bot_events_count: number;
+  unknown_events_count: number;
+  bot_open_count?: number;
+  non_bot_open_count?: number;
+  unknown_open_count?: number;
+  bot_click_count?: number;
+  non_bot_click_count?: number;
+  unknown_click_count?: number;
 }
 
 export interface CampaignAnalyticsResponse {
@@ -330,6 +374,61 @@ export interface CampaignAnalyticsResponse {
   steps: CampaignStepAnalytics[];
   omitted_metrics_notice?: string;
   delivery_trend?: CampaignDeliveryTrendPoint[];
+
+  // Extended delivery metrics
+  estimated_delivered_count?: number;
+  delivered_count?: number;
+  bounced_count?: number;
+  failed_count?: number;
+  suppressed_count?: number;
+
+  // Extended engagement metrics
+  unique_recipients_sent?: number;
+  raw_open_count?: number;
+  unique_open_recipients?: number;
+  open_rate?: number;
+  raw_click_count?: number;
+  unique_click_recipients?: number;
+  click_rate?: number;
+  click_to_open_rate?: number;
+  unique_clicked_destinations?: number | null;
+
+  // Extended classification metrics
+  bot_events_count?: number;
+  non_bot_events_count?: number;
+  unknown_events_count?: number;
+
+  // Structured metric groups
+  delivery?: CampaignDeliveryMetrics;
+  engagement?: CampaignEngagementMetrics;
+  classification?: CampaignClassificationMetrics;
+}
+
+export interface CampaignRecipientEngagementItem {
+  recipient_id: number;
+  masked_email?: string | null;
+  first_event_at: string;
+  last_event_at: string;
+  total_events_count: number;
+  bot_events_count: number;
+  non_bot_events_count: number;
+  unknown_events_count: number;
+}
+
+export interface CampaignRecipientEngagementResponse {
+  campaign_id: number;
+  event_type: "OPEN" | "CLICK" | string;
+  total: number;
+  limit: number;
+  offset: number;
+  items: CampaignRecipientEngagementItem[];
+}
+
+export interface CampaignRecipientEngagementParams {
+  event_type?: "OPEN" | "CLICK" | string;
+  limit?: number;
+  offset?: number;
+  step_number?: number | null;
 }
 
 

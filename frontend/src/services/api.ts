@@ -54,6 +54,8 @@ import type {
   CampaignDetail,
   CampaignAnalyticsResponse,
   CampaignEmailsDrilldownResponse,
+  CampaignRecipientEngagementResponse,
+  CampaignRecipientEngagementParams,
   CampaignCreatePayload,
   CampaignUpdatePayload,
   CampaignSchedulePayload,
@@ -966,6 +968,57 @@ export const campaignsApi = {
   ): Promise<CampaignAnalyticsResponse> => {
     return apiClient.get<CampaignAnalyticsResponse>(
       `/api/v1/companies/${companyId}/campaigns/${campaignId}/analytics`
+    );
+  },
+
+  getCampaignRecipientEngagement: async (
+    companyId: number,
+    campaignId: number,
+    params: CampaignRecipientEngagementParams & { event_type: "OPEN" | "CLICK" | string }
+  ): Promise<CampaignRecipientEngagementResponse> => {
+    const searchParams = new URLSearchParams();
+    searchParams.set("event_type", params.event_type);
+    if (params.step_number !== undefined && params.step_number !== null) {
+      searchParams.set("step_number", String(params.step_number));
+    }
+    if (params.limit !== undefined) searchParams.set("limit", String(params.limit));
+    if (params.offset !== undefined) searchParams.set("offset", String(params.offset));
+    return apiClient.get<CampaignRecipientEngagementResponse>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/analytics/recipients?${searchParams.toString()}`
+    );
+  },
+
+  getCampaignOpenedRecipients: async (
+    companyId: number,
+    campaignId: number,
+    params?: { limit?: number; offset?: number; step_number?: number | null }
+  ): Promise<CampaignRecipientEngagementResponse> => {
+    const searchParams = new URLSearchParams();
+    if (params?.step_number !== undefined && params?.step_number !== null) {
+      searchParams.set("step_number", String(params.step_number));
+    }
+    if (params?.limit !== undefined) searchParams.set("limit", String(params.limit));
+    if (params?.offset !== undefined) searchParams.set("offset", String(params.offset));
+    const qs = searchParams.toString();
+    return apiClient.get<CampaignRecipientEngagementResponse>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/analytics/opens${qs ? `?${qs}` : ""}`
+    );
+  },
+
+  getCampaignClickedRecipients: async (
+    companyId: number,
+    campaignId: number,
+    params?: { limit?: number; offset?: number; step_number?: number | null }
+  ): Promise<CampaignRecipientEngagementResponse> => {
+    const searchParams = new URLSearchParams();
+    if (params?.step_number !== undefined && params?.step_number !== null) {
+      searchParams.set("step_number", String(params.step_number));
+    }
+    if (params?.limit !== undefined) searchParams.set("limit", String(params.limit));
+    if (params?.offset !== undefined) searchParams.set("offset", String(params.offset));
+    const qs = searchParams.toString();
+    return apiClient.get<CampaignRecipientEngagementResponse>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/analytics/clicks${qs ? `?${qs}` : ""}`
     );
   },
 

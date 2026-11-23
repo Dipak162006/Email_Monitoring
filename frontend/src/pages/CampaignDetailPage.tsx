@@ -35,7 +35,6 @@ import {
   ChevronDown,
   Info,
   Plus,
-  ExternalLink,
 } from "lucide-react";
 
 import { useWorkspace } from "../hooks/useWorkspace";
@@ -44,6 +43,7 @@ import type {
   Campaign,
   CampaignDetail,
   CampaignPreflightResponse,
+  CampaignStepAnalytics,
   SendingWindowConfig,
 } from "../types/campaign";
 import { CampaignStatusBadge } from "../components/campaigns/CampaignStatusBadge";
@@ -52,6 +52,10 @@ import {
   type CampaignModalMode,
 } from "../components/campaigns/CancelCampaignModal";
 import { CampaignPreflightModal } from "../components/campaigns/CampaignPreflightModal";
+import { AnalyticsScopeToolbar } from "../components/campaigns/analytics/AnalyticsScopeToolbar";
+import { CampaignEngagementOverview } from "../components/campaigns/analytics/CampaignEngagementOverview";
+import { CampaignSequencePerformanceTable } from "../components/campaigns/analytics/CampaignSequencePerformanceTable";
+import { CampaignRecipientEngagementTable } from "../components/campaigns/analytics/CampaignRecipientEngagementTable";
 
 function formatDate(dateStr?: string | null): string {
   if (!dateStr) return "—";
@@ -105,6 +109,8 @@ export const CampaignDetailPage: React.FC = () => {
   const [deviceView, setDeviceView] = useState<"desktop" | "mobile">("desktop");
   const [copiedSubject, setCopiedSubject] = useState<boolean>(false);
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState<boolean>(false);
+  const [drilldownEventType, setDrilldownEventType] = useState<"OPEN" | "CLICK">("OPEN");
+  const [selectedAnalyticsStepScope, setSelectedAnalyticsStepScope] = useState<number | null>(null);
 
   // Toast feedback state
   const [toastMessage, setToastMessage] = useState<{
@@ -150,8 +156,8 @@ export const CampaignDetailPage: React.FC = () => {
     staleTime: 0,
   });
 
-  // Query Campaign Analytics (M7)
-  const { data: analytics } = useQuery({
+  // Query Campaign Analytics (M7 & T5)
+  const { data: analytics, isLoading: isAnalyticsLoading } = useQuery({
     queryKey: ["campaigns", currentCompanyId, "analytics", campaignIdNum],
     queryFn: () => {
       if (!currentCompanyId || !campaignIdNum) throw new Error("Missing parameters");
@@ -230,6 +236,98 @@ export const CampaignDetailPage: React.FC = () => {
       ADD_ATTR: ["target"],
     });
   }, [activeStepItem?.body_html]);
+
+  // Step sequence performance analytics list (authoritative from API or assembled from campaign sequence)
+  const sequenceStepAnalytics: CampaignStepAnalytics[] = useMemo(() => {
+    if (analytics?.steps && analytics.steps.length > 0) {
+      return analytics.steps;
+    }
+    if (!campaign) return [];
+    const totalTarget = campaign.recipient_count || 0;
+    const sentCount = campaign.sent_count ?? 0;
+    const repliedCount = campaign.replied_count ?? 0;
+    const bouncedCount = campaign.bounced_count ?? 0;
+    const failedCount = campaign.failed_count ?? 0;
+    const suppressedCount = campaign.suppressed_count ?? 0;
+    const pendingCount =
+      campaign.pending_count !== undefined
+        ? campaign.pending_count
+        : Math.max(0, totalTarget - sentCount - bouncedCount - failedCount - suppressedCount);
+    const sentRate = totalTarget > 0 ? Math.round((sentCount / totalTarget) * 100) : 0;
+    const replyRate = sentCount > 0 ? Math.round((repliedCount / sentCount) * 100) : 0;
+    const bounceRate = sentCount > 0 ? Math.round((bouncedCount / sentCount) * 100) : 0;
+    const deliveredCount = Math.max(0, sentCount - bouncedCount);
+
+    return [
+      {
+        step_id: 1,
+        step_number: 1,
+        subject: step1Item?.subject || campaign.subject,
+        delay_hours: 0,
+        is_active: step1Item?.is_active ?? true,
+        target_tags: [],
+        targeted_count: totalTarget,
+        sent_count: sentCount,
+        unique_recipients_sent: analytics?.delivery?.unique_recipients_sent ?? analytics?.unique_recipients_sent ?? sentCount,
+        sending_count: 0,
+        bounced_count: bouncedCount,
+        failed_count: failedCount,
+        skipped_count: suppressedCount,
+        replied_count: repliedCount,
+        pending_count: pendingCount,
+        delivered_count: deliveredCount,
+        delivery_rate: sentRate,
+        reply_rate: replyRate,
+        bounce_rate: bounceRate,
+        raw_open_count: analytics?.raw_open_count ?? 0,
+        unique_open_recipients: analytics?.unique_open_recipients ?? 0,
+        raw_click_count: analytics?.raw_click_count ?? 0,
+        unique_click_recipients: analytics?.unique_click_recipients ?? 0,
+        open_rate: analytics?.open_rate ?? 0,
+        click_rate: analytics?.click_rate ?? 0,
+        click_to_open_rate: analytics?.engagement?.click_to_open_rate ?? 0,
+      },
+      ...followupSteps.map((s, idx) => ({
+        step_id: s.id || s.step_number || idx + 2,
+        step_number: s.step_number || idx + 2,
+        subject: s.subject || `Step ${s.step_number || idx + 2}`,
+        delay_hours: s.delay_hours,
+        is_active: s.is_active ?? true,
+        target_tags: [],
+        targeted_count: totalTarget,
+        sent_count: 0,
+        unique_recipients_sent: 0,
+        sending_count: 0,
+        bounced_count: 0,
+        failed_count: 0,
+        skipped_count: 0,
+        replied_count: 0,
+        pending_count: 0,
+        delivered_count: 0,
+        delivery_rate: 0,
+        reply_rate: 0,
+        bounce_rate: 0,
+        raw_open_count: 0,
+        unique_open_recipients: 0,
+        raw_click_count: 0,
+        unique_click_recipients: 0,
+        open_rate: 0,
+        click_rate: 0,
+        click_to_open_rate: 0,
+      })),
+    ];
+  }, [
+    analytics?.steps,
+    analytics?.raw_open_count,
+    analytics?.unique_open_recipients,
+    analytics?.raw_click_count,
+    analytics?.unique_click_recipients,
+    analytics?.open_rate,
+    analytics?.click_rate,
+    campaign,
+    step1Item,
+    followupSteps,
+  ]);
 
 
   const handleCopySubject = () => {
@@ -699,14 +797,21 @@ export const CampaignDetailPage: React.FC = () => {
                 <span>Last modified {formatDate(campaign.updated_at)}</span>
                 <span className="text-slate-300">•</span>
                 <span className="font-mono text-slate-600 font-medium">ID: #{campaign.id}</span>
-                {campaign.scheduled_at && (
+                {campaign.status === "SCHEDULED" && campaign.scheduled_at ? (
                   <>
                     <span className="text-slate-300">•</span>
                     <span className="text-amber-700 font-semibold">
                       Scheduled: {formatDate(campaign.scheduled_at)}
                     </span>
                   </>
-                )}
+                ) : campaign.started_at ? (
+                  <>
+                    <span className="text-slate-300">•</span>
+                    <span className="text-indigo-700 font-semibold">
+                      Started: {formatDate(campaign.started_at)}
+                    </span>
+                  </>
+                ) : null}
               </div>
             </div>
           </div>
@@ -997,15 +1102,29 @@ export const CampaignDetailPage: React.FC = () => {
                     <h3 className="text-xs sm:text-sm font-bold text-slate-900">Schedule & Timing</h3>
                   </div>
                   <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold">
-                    {campaign.scheduled_at ? "Scheduled" : isDraft ? "On-Demand" : campaign.status}
+                    {campaign.status === "RUNNING"
+                      ? "Live Dispatch"
+                      : campaign.status === "SCHEDULED" && campaign.scheduled_at
+                      ? "Scheduled"
+                      : isDraft
+                      ? "On-Demand"
+                      : campaign.status}
                   </span>
                 </div>
                 <div className="mt-2.5 space-y-1">
                   <p className="text-xs sm:text-sm font-semibold text-slate-900 truncate">
-                    {campaign.scheduled_at ? "Scheduled Dispatch" : isDraft ? "Manual Dispatch" : campaign.status}
+                    {campaign.status === "RUNNING"
+                      ? "Live Dispatch In Progress"
+                      : campaign.status === "SCHEDULED" && campaign.scheduled_at
+                      ? "Scheduled Dispatch"
+                      : isDraft
+                      ? "Manual Dispatch"
+                      : campaign.status}
                   </p>
                   <p className="text-[11px] text-slate-500 truncate">
-                    {campaign.scheduled_at
+                    {campaign.status === "RUNNING" && campaign.started_at
+                      ? `Started ${formatDate(campaign.started_at)}`
+                      : campaign.status === "SCHEDULED" && campaign.scheduled_at
                       ? `Execution set for ${formatDate(campaign.scheduled_at)}`
                       : isDraft
                       ? "Requires final review before queue ingestion."
@@ -2086,103 +2205,45 @@ export const CampaignDetailPage: React.FC = () => {
           ========================================================================= */}
       {currentTab === "analytics" && (
         <div className="space-y-4 sm:space-y-5">
-          {/* Row 1: 6 KPI Metric Cards */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-3.5">
-            {/* Unique Recipients */}
-            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
-              <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
-                <Users className="h-4 w-4" />
-              </div>
-              <div>
-                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">
-                  Unique Recipients
-                </p>
-                <p className="text-2xl font-bold text-slate-900 mt-0.5">{totalTarget}</p>
-                <p className="text-[11px] text-slate-400 mt-0.5">Total Recipients</p>
-              </div>
-            </div>
+          {/* Section B: Analytics Scope Toolbar */}
+          <AnalyticsScopeToolbar
+            steps={sequenceStepAnalytics}
+            selectedStepNumber={selectedAnalyticsStepScope}
+            onSelectStep={setSelectedAnalyticsStepScope}
+          />
 
-            {/* Initial Emails Sent */}
-            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
-                  <Send className="h-4 w-4" />
-                </div>
-                <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">
-                  {sentRate}%
-                </span>
-              </div>
-              <div>
-                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Initial Sent</p>
-                <p className="text-2xl font-bold text-slate-900 mt-0.5">{initialSentCount}</p>
-                <p className="text-[11px] text-slate-400 mt-0.5">Step 1 dispatches</p>
-              </div>
-            </div>
+          {/* Sections C & D: Top KPI Overview, Engagement Performance & Bot Classification */}
+          <CampaignEngagementOverview
+            analytics={analytics}
+            selectedStepNumber={selectedAnalyticsStepScope}
+            isLoading={isAnalyticsLoading}
+            onSelectEventType={(type) => {
+              setDrilldownEventType(type);
+              const el = document.getElementById("recipient-drilldown-section");
+              if (el) {
+                el.scrollIntoView({ behavior: "smooth" });
+              }
+            }}
+          />
 
-            {/* Follow-up Emails Sent */}
-            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
-                  <Mail className="h-4 w-4" />
-                </div>
-              </div>
-              <div>
-                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Follow-ups Sent</p>
-                <p className="text-2xl font-bold text-slate-900 mt-0.5">{followupSentCount}</p>
-                <p className="text-[11px] text-slate-400 mt-0.5">Step 2+ dispatches</p>
-              </div>
-            </div>
+          {/* Section E: Email Sequence Performance Table (Interactive Step Scope Selection) */}
+          <CampaignSequencePerformanceTable
+            steps={sequenceStepAnalytics}
+            selectedStepNumber={selectedAnalyticsStepScope}
+            onSelectStep={setSelectedAnalyticsStepScope}
+          />
 
-            {/* Total Emails Sent */}
-            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="w-8 h-8 rounded-lg bg-violet-50 text-violet-600 flex items-center justify-center">
-                  <TrendingUp className="h-4 w-4" />
-                </div>
-              </div>
-              <div>
-                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Total Sent</p>
-                <p className="text-2xl font-bold text-slate-900 mt-0.5">{totalSentCount}</p>
-                <p className="text-[11px] text-slate-400 mt-0.5">All sequence dispatches</p>
-              </div>
-            </div>
-
-            {/* Unique Replies */}
-            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
-                  <Reply className="h-4 w-4" />
-                </div>
-                <span className="text-xs font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full">
-                  {replyRate}%
-                </span>
-              </div>
-              <div>
-                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Unique Replies</p>
-                <p className="text-2xl font-bold text-slate-900 mt-0.5">{uniqueRepliedCount}</p>
-                <p className="text-[11px] text-slate-400 mt-0.5">Responding recipients</p>
-              </div>
-            </div>
-
-            {/* Bounced */}
-            <div className="bg-white p-4 rounded-xl border border-slate-200/90 shadow-2xs space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center">
-                  <AlertTriangle className="h-4 w-4" />
-                </div>
-                <span className="text-xs font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full">
-                  {bounceRate}%
-                </span>
-              </div>
-              <div>
-                <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Bounced</p>
-                <p className="text-2xl font-bold text-slate-900 mt-0.5">{bouncedCount}</p>
-                <p className="text-[11px] text-slate-400 mt-0.5">Hard / soft bounces</p>
-              </div>
-            </div>
+          {/* Section F: Recipient Engagement Drilldown Table (Filtered by Active Step Scope) */}
+          <div id="recipient-drilldown-section">
+            <CampaignRecipientEngagementTable
+              campaignId={campaignIdNum}
+              stepNumber={selectedAnalyticsStepScope}
+              eventType={drilldownEventType}
+              onEventTypeChange={setDrilldownEventType}
+            />
           </div>
 
-          {/* Row 2: Delivery Trend (Left) & Email Status Distribution (Right) */}
+          {/* Section G: Secondary Analytics (Delivery Trend Left & Email Status Donut Right) */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5 items-stretch">
             {/* Delivery Trend (Approx 60% on desktop) */}
             <div className="lg:col-span-7 bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-3 flex flex-col justify-between">
@@ -2419,261 +2480,31 @@ export const CampaignDetailPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Row 3: Full-Width Step Performance Table */}
-          <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-3">
-            <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100 flex-wrap">
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
-                  <BarChart2 className="h-3.5 w-3.5" />
-                </div>
-                <div>
-                  <h3 className="text-xs sm:text-sm font-bold text-slate-900">Step Performance</h3>
-                  <p className="text-[11px] text-slate-500">
-                    Delivery and engagement stats for each email in the sequence.
-                  </p>
-                </div>
+
+
+          {/* Top Performing Insights */}
+          <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-3.5">
+            <div className="flex items-center gap-2 pb-2.5 border-b border-slate-100">
+              <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                <Lightbulb className="h-3.5 w-3.5" />
               </div>
-
-              <span className="text-[11px] font-medium text-slate-500 flex items-center gap-1 px-2 py-1 rounded bg-slate-50 border border-slate-200/70" title="Cumulative step conversion outcomes across all campaign recipients">
-                <span>Campaign Lifetime</span>
-              </span>
-            </div>
-
-            {/* Step Performance Table */}
-            <div className="overflow-x-auto [scrollbar-width:thin]">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-slate-100 text-[11px] text-slate-400 uppercase font-semibold">
-                    <th className="py-2.5 px-3">Step</th>
-                    <th className="py-2.5 px-3">Email Name</th>
-                    <th className="py-2.5 px-3">Status</th>
-                    <th className="py-2.5 px-3 text-center">Recipients</th>
-                    <th className="py-2.5 px-3 text-center">Sent</th>
-                    <th className="py-2.5 px-3 text-center">Replies</th>
-                    <th className="py-2.5 px-3 text-center">Bounce Rate</th>
-                    <th className="py-2.5 px-3 text-center">Failure Rate</th>
-                    <th className="py-2.5 px-3" title="Estimated from successful SMTP dispatch minus detected bounces; actual mailbox receipt is not tracked.">Net Delivery Rate</th>
-                    <th className="py-2.5 px-3 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 text-slate-700">
-                  {(analytics?.steps && analytics.steps.length > 0 ? analytics.steps : [
-                    {
-                      step_number: 1,
-                      subject: step1Item?.subject || campaign.subject,
-                      delay_hours: 0,
-                      is_active: step1Item?.is_active ?? true,
-                      targeted_count: totalTarget,
-                      sent_count: sentCount,
-                      replied_count: repliedCount,
-                      bounced_count: bouncedCount,
-                      failed_count: failedCount,
-                      delivery_rate: sentRate,
-                      reply_rate: replyRate,
-                      bounce_rate: bounceRate,
-                    },
-                    ...followupSteps.map((s, idx) => ({
-                      step_number: s.step_number || idx + 2,
-                      subject: s.subject || `Step ${s.step_number || idx + 2}`,
-                      delay_hours: s.delay_hours,
-                      is_active: s.is_active ?? true,
-                      targeted_count: totalTarget,
-                      sent_count: 0,
-                      replied_count: 0,
-                      bounced_count: 0,
-                      failed_count: 0,
-                      delivery_rate: 0,
-                      reply_rate: 0,
-                      bounce_rate: 0,
-                    })),
-                  ]).map((stepItem: any, idx: number) => {
-                    const stepNum = stepItem.step_number || idx + 1;
-                    const stepName = stepNum === 1 ? "Initial Outreach" : `Follow-Up #${stepNum - 1}`;
-                    const stepActive =
-                      stepItem.is_active !== undefined
-                        ? stepItem.is_active !== false
-                        : stepNum === 1
-                        ? step1Item?.is_active !== false
-                        : followupSteps.find((f) => f.step_number === stepNum)?.is_active !== false;
-                    const sSent = stepItem.sent_count ?? 0;
-                    const sBnc = stepItem.bounced_count ?? 0;
-                    const sFail = stepItem.failed_count ?? 0;
-                    const sReplied = stepItem.replied_count ?? 0;
-                    const sDeliv = stepItem.delivered_count !== undefined ? stepItem.delivered_count : Math.max(0, sSent - sBnc);
-                    const delRate = stepItem.delivery_rate !== undefined ? Math.round(stepItem.delivery_rate) : (sSent > 0 ? Math.round((sDeliv / sSent) * 100) : 0);
-                    const bncRate = stepItem.bounce_rate !== undefined ? Math.round(stepItem.bounce_rate) : (sSent > 0 ? Math.round((sBnc / sSent) * 100) : 0);
-                    const failRate = sSent > 0 ? Math.round((sFail / sSent) * 100) : 0;
-                    const repRate = stepItem.reply_rate !== undefined ? Math.round(stepItem.reply_rate) : (sSent > 0 ? Math.round((sReplied / sSent) * 100) : 0);
-
-                    return (
-                      <tr key={stepNum} className="hover:bg-slate-50/70 transition-colors">
-                        <td className="py-3 px-3">
-                          <span className="w-5 h-5 rounded-full bg-indigo-600 text-white font-bold text-[10px] flex items-center justify-center">
-                            {stepNum}
-                          </span>
-                        </td>
-                        <td className="py-3 px-3">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="font-semibold text-slate-900">{stepName}</span>
-                            {stepNum === 1 ? (
-                              <span className="text-[10px] font-semibold text-emerald-600 flex items-center gap-0.5">
-                                <Zap className="h-2.5 w-2.5 fill-emerald-600" /> Immediate
-                              </span>
-                            ) : (
-                              <span className="text-[10px] text-slate-500 font-medium bg-slate-100 px-1.5 py-0.2 rounded">
-                                Waits {stepItem.delay_hours !== undefined ? `${stepItem.delay_hours}h` : "1h"}
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="py-3 px-3">
-                          {stepActive ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 select-none">
-                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                              <span>{campaign.status === "DRAFT" ? "Pending" : "Active"}</span>
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-neutral-100 text-neutral-600 border border-neutral-200 select-none">
-                              <span className="w-1.5 h-1.5 rounded-full bg-neutral-400" />
-                              <span>Inactive</span>
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-3 px-3 text-center font-medium">{stepItem.targeted_count ?? totalTarget}</td>
-                        <td className="py-3 px-3 text-center font-medium">{stepItem.sent_count ?? 0}</td>
-                        <td className="py-3 px-3 text-center font-medium">
-                          {stepItem.replied_count ?? 0} ({repRate}%)
-                        </td>
-                        <td className="py-3 px-3 text-center font-medium">
-                          {stepItem.bounced_count ?? 0} ({bncRate}%)
-                        </td>
-                        <td className="py-3 px-3 text-center font-medium">
-                          {stepItem.failed_count ?? 0} ({failRate}%)
-                        </td>
-                        <td className="py-3 px-3" title="Estimated from successful SMTP dispatch minus detected bounces; actual mailbox receipt is not tracked.">
-                          <div className="flex items-center gap-2">
-                            <span className="font-semibold text-slate-900 w-8">{delRate}%</span>
-                            <div className="w-16 bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                              <div
-                                className="bg-indigo-600 h-full rounded-full"
-                                style={{ width: `${delRate}%` }}
-                              />
-                            </div>
-                          </div>
-                        </td>
-                        <td className="py-3 px-3 text-right">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedStepNumber(stepNum);
-                              setActiveTab("sequence");
-                            }}
-                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 hover:underline cursor-pointer"
-                          >
-                            <span>View Details</span>
-                            <ArrowRight className="h-3 w-3" />
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Row 4: Recipient Engagement (Left) & Top Performing Insights (Right) */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-5 items-stretch">
-            {/* Recipient Engagement */}
-            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-3.5">
-              <div className="flex items-center gap-2 pb-2.5 border-b border-slate-100">
-                <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
-                  <Users className="h-3.5 w-3.5" />
-                </div>
-                <div>
-                  <h3 className="text-xs sm:text-sm font-bold text-slate-900">Recipient Engagement</h3>
-                  <p className="text-[11px] text-slate-500">How recipients are interacting with your emails.</p>
-                </div>
-              </div>
-
-              {/* 4 Engagement Tiles with honest tracking states */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100 text-center flex flex-col justify-between">
-                  <div>
-                    <Mail className="h-4 w-4 text-slate-400 mx-auto mb-1" />
-                    <p className="text-sm font-bold text-slate-400">—</p>
-                    <p className="text-[10px] text-slate-500 mt-0.5 font-medium">Opened</p>
-                  </div>
-                  <span className="inline-block mt-1 text-[9px] text-slate-400 font-semibold bg-slate-100 px-1.5 py-0.5 rounded">
-                    Not Tracked
-                  </span>
-                </div>
-
-                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100 text-center flex flex-col justify-between">
-                  <div>
-                    <ExternalLink className="h-4 w-4 text-slate-400 mx-auto mb-1" />
-                    <p className="text-sm font-bold text-slate-400">—</p>
-                    <p className="text-[10px] text-slate-500 mt-0.5 font-medium">Clicked</p>
-                  </div>
-                  <span className="inline-block mt-1 text-[9px] text-slate-400 font-semibold bg-slate-100 px-1.5 py-0.5 rounded">
-                    Not Tracked
-                  </span>
-                </div>
-
-                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100 text-center flex flex-col justify-between">
-                  <div>
-                    <Reply className="h-4 w-4 text-indigo-600 mx-auto mb-1" />
-                    <p className="text-sm font-bold text-slate-900">{repliedCount}</p>
-                    <p className="text-[10px] text-slate-600 mt-0.5 font-medium">Replied {replyRate}%</p>
-                  </div>
-                  <span className="inline-block mt-1 text-[9px] text-emerald-600 font-semibold bg-emerald-50 px-1.5 py-0.5 rounded">
-                    Active Signal
-                  </span>
-                </div>
-
-                <div className="bg-slate-50/70 p-2.5 rounded-lg border border-slate-100 text-center flex flex-col justify-between">
-                  <div>
-                    <XCircle className="h-4 w-4 text-slate-400 mx-auto mb-1" />
-                    <p className="text-sm font-bold text-slate-400">—</p>
-                    <p className="text-[10px] text-slate-500 mt-0.5 font-medium">Unsubscribed</p>
-                  </div>
-                  <span className="inline-block mt-1 text-[9px] text-slate-400 font-semibold bg-slate-100 px-1.5 py-0.5 rounded">
-                    Not Tracked
-                  </span>
-                </div>
-              </div>
-
-              <p className="text-[10px] text-slate-400 italic">
-                * Open, click, and direct unsubscribe tracking are omitted by design to maximize email deliverability and preserve recipient privacy.
-              </p>
-            </div>
-
-            {/* Top Performing Insights */}
-            <div className="bg-white rounded-xl p-4 sm:p-5 border border-slate-200/90 shadow-2xs space-y-3.5 flex flex-col justify-between">
               <div>
-                <div className="flex items-center gap-2 pb-2.5 border-b border-slate-100">
-                  <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
-                    <Lightbulb className="h-3.5 w-3.5" />
-                  </div>
-                  <div>
-                    <h3 className="text-xs sm:text-sm font-bold text-slate-900">Top Performing Insights</h3>
-                    <p className="text-[11px] text-slate-500">Key insights from your campaign performance.</p>
-                  </div>
-                </div>
+                <h3 className="text-xs sm:text-sm font-bold text-slate-900">Top Performing Insights</h3>
+                <p className="text-[11px] text-slate-500">Key insights from your campaign performance.</p>
+              </div>
+            </div>
 
-                <div className="mt-3 p-3.5 rounded-xl bg-indigo-50/40 border border-indigo-100 flex items-start gap-3">
-                  <Info className="h-4 w-4 text-indigo-600 shrink-0 mt-0.5" />
-                  <div className="space-y-0.5">
-                    <p className="text-xs font-semibold text-indigo-900">
-                      {sentCount === 0 ? "No data available yet" : "Campaign Performance Insight"}
-                    </p>
-                    <p className="text-[11px] text-indigo-700/90 leading-relaxed">
-                      {initialSentCount === 0
-                        ? "Your campaign hasn't been sent yet. Analytics will appear here after emails are dispatched."
-                        : `Step 1 (Initial Outreach) has recorded ${initialSentCount} sends with ${uniqueRepliedCount} positive replies detected.`}
-                    </p>
-                  </div>
-                </div>
+            <div className="p-3.5 rounded-xl bg-indigo-50/40 border border-indigo-100 flex items-start gap-3">
+              <Info className="h-4 w-4 text-indigo-600 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <p className="text-xs font-semibold text-indigo-900">
+                  {sentCount === 0 ? "No data available yet" : "Campaign Performance Insight"}
+                </p>
+                <p className="text-[11px] text-indigo-700/90 leading-relaxed">
+                  {initialSentCount === 0
+                    ? "Your campaign hasn't been sent yet. Analytics will appear here after emails are dispatched."
+                    : `Step 1 (Initial Outreach) has recorded ${initialSentCount} sends with ${uniqueRepliedCount} positive replies detected.`}
+                </p>
               </div>
             </div>
           </div>
