@@ -10,6 +10,12 @@ from app.modules.campaigns.models import (
     SuppressionReason,
 )
 from app.modules.campaigns.schemas import (
+    CampaignAnalyticsResponse,
+    CampaignDeliveryMetrics,
+    CampaignEngagementMetrics,
+    CampaignClassificationMetrics,
+    CampaignRecipientEngagementItem,
+    CampaignRecipientEngagementResponse,
     CampaignCreate,
     CampaignDetailRead,
     CampaignDispatchResponse,
@@ -42,6 +48,11 @@ from app.modules.campaigns.recipient_service import CampaignRecipientService
 from app.modules.campaigns.scheduling_service import CampaignSchedulingService
 from app.modules.campaigns.suppression_service import SuppressionService
 from app.modules.campaigns.unsubscribe_service import UnsubscribeService
+from app.modules.campaigns.tracking_sync_service import (
+    TrackingEventSyncService,
+    InteractionSyncLock,
+    TrackingEventQuarantine,
+)
 from app.modules.campaigns.suppression_routes import router as suppression_router
 from app.modules.campaigns.service import (
     CampaignService,
@@ -90,6 +101,9 @@ __all__ = [
     "CampaignSchedulingService",
     "SuppressionService",
     "UnsubscribeService",
+    "TrackingEventSyncService",
+    "InteractionSyncLock",
+    "TrackingEventQuarantine",
     "suppression_router",
     "VALID_TRANSITIONS",
     "TERMINAL_STATES",

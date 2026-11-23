@@ -3,7 +3,7 @@ from email.utils import parseaddr
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import func, select, or_, and_
+from sqlalchemy import and_, case, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -26,9 +26,14 @@ from app.modules.campaigns.models import (
 from app.modules.campaigns.schemas import (
     CampaignAnalyticsResponse,
     CampaignAttachmentRead,
+    CampaignClassificationMetrics,
     CampaignCreate,
+    CampaignDeliveryMetrics,
     CampaignDeliveryTrendPoint,
     CampaignDetailRead,
+    CampaignEngagementMetrics,
+    CampaignRecipientEngagementItem,
+    CampaignRecipientEngagementResponse,
     CampaignStepAnalytics,
     CampaignStepRead,
     CampaignUpdate,
@@ -36,8 +41,22 @@ from app.modules.campaigns.schemas import (
 )
 from app.modules.email_accounts.models import EmailAccount
 from app.modules.email_accounts.service import EmailAccountService
-from app.modules.emails.models import Email, EmailDirection, EmailThread
+from app.modules.emails.models import Email, EmailDirection, EmailThread, EmailTrackingEvent, TrackingEventType
 from app.modules.emails.thread_service import EmailThreadService
+
+
+def mask_email(email: Optional[str]) -> Optional[str]:
+    """Mask email address for privacy safeguarding: e.g. j***e@example.com."""
+    if not email or "@" not in email:
+        return None
+    local_part, domain = email.strip().split("@", 1)
+    if not local_part:
+        return f"***@{domain}"
+    if len(local_part) <= 2:
+        masked_local = f"{local_part[0]}***"
+    else:
+        masked_local = f"{local_part[0]}***{local_part[-1]}"
+    return f"{masked_local}@{domain}"
 
 
 # Backend-owned campaign lifecycle state machine transition graph
@@ -1435,6 +1454,97 @@ class CampaignService:
         )
         deliv_rows = (await db.execute(deliv_stmt)).all()
 
+        # 4. Fetch locally synchronized tracking events scoped strictly to campaign and company
+        tracking_events_stmt = (
+            select(
+                EmailTrackingEvent.id,
+                EmailTrackingEvent.recipient_id,
+                EmailTrackingEvent.delivery_id,
+                EmailTrackingEvent.event_type,
+                EmailTrackingEvent.is_bot,
+            )
+            .where(
+                EmailTrackingEvent.campaign_id == campaign.id,
+                EmailTrackingEvent.company_id == company_id,
+                EmailTrackingEvent.event_type.in_([
+                    TrackingEventType.OPEN.value,
+                    TrackingEventType.CLICK.value,
+                ]),
+            )
+        )
+        tracking_rows = (await db.execute(tracking_events_stmt)).all()
+
+        delivery_to_step: dict[int, int] = {
+            row[0]: row[1] for row in deliv_rows if row[0] is not None and row[1] is not None
+        }
+        step_opens: dict[int, int] = {s.id: 0 for s in steps}
+        step_clicks: dict[int, int] = {s.id: 0 for s in steps}
+        step_unique_opens: dict[int, set[int]] = {s.id: set() for s in steps}
+        step_unique_clicks: dict[int, set[int]] = {s.id: set() for s in steps}
+
+        raw_open_count = 0
+        raw_click_count = 0
+        open_recipient_ids: set[int] = set()
+        click_recipient_ids: set[int] = set()
+
+        bot_events_count = 0
+        non_bot_events_count = 0
+        unknown_events_count = 0
+
+        bot_open_count = 0
+        non_bot_open_count = 0
+        unknown_open_count = 0
+
+        bot_click_count = 0
+        non_bot_click_count = 0
+        unknown_click_count = 0
+
+        for ev_id, r_id, d_id, ev_type, is_bot_val in tracking_rows:
+            step_id = delivery_to_step.get(d_id) if d_id else None
+
+            # Classification breakdown across all engagement events
+            if is_bot_val is True:
+                bot_events_count += 1
+            elif is_bot_val is False:
+                non_bot_events_count += 1
+            else:
+                unknown_events_count += 1
+
+            if ev_type == TrackingEventType.OPEN.value:
+                raw_open_count += 1
+                if r_id is not None:
+                    open_recipient_ids.add(r_id)
+                if is_bot_val is True:
+                    bot_open_count += 1
+                elif is_bot_val is False:
+                    non_bot_open_count += 1
+                else:
+                    unknown_open_count += 1
+
+                if step_id and step_id in step_opens:
+                    step_opens[step_id] += 1
+                    if r_id is not None:
+                        step_unique_opens[step_id].add(r_id)
+
+            elif ev_type == TrackingEventType.CLICK.value:
+                raw_click_count += 1
+                if r_id is not None:
+                    click_recipient_ids.add(r_id)
+                if is_bot_val is True:
+                    bot_click_count += 1
+                elif is_bot_val is False:
+                    non_bot_click_count += 1
+                else:
+                    unknown_click_count += 1
+
+                if step_id and step_id in step_clicks:
+                    step_clicks[step_id] += 1
+                    if r_id is not None:
+                        step_unique_clicks[step_id].add(r_id)
+
+        unique_open_recipients = len(open_recipient_ids)
+        unique_click_recipients = len(click_recipient_ids)
+
         deliv_by_recipient_step: dict[tuple[int, int], dict] = {}
         deliv_by_step: dict[int, list[dict]] = {s.id: [] for s in steps}
         sent_steps_by_recipient: dict[int, list[dict]] = {r.id: [] for r in recipients}
@@ -1698,6 +1808,7 @@ class CampaignService:
             bounced_count = 0
             failed_count = 0
             skipped_count = 0
+            sent_recipient_ids: set[int] = set()
 
             for d in step_delivs:
                 st = d["status"]
@@ -1706,12 +1817,20 @@ class CampaignService:
                     bounced_count += 1
                 elif st == CampaignDeliveryStatus.SENT.value:
                     sent_count += 1
+                    sent_recipient_ids.add(d["recipient_id"])
                 elif st == CampaignDeliveryStatus.SENDING.value:
                     sending_count += 1
                 elif st == CampaignDeliveryStatus.FAILED.value:
                     failed_count += 1
                 elif st == CampaignDeliveryStatus.SKIPPED.value:
                     skipped_count += 1
+
+            unique_recipients_sent = len(sent_recipient_ids)
+            u_opens = len(step_unique_opens.get(step.id, set()))
+            u_clicks = len(step_unique_clicks.get(step.id, set()))
+            step_open_rate = round((u_opens / unique_recipients_sent * 100), 1) if unique_recipients_sent > 0 else 0.0
+            step_click_rate = round((u_clicks / unique_recipients_sent * 100), 1) if unique_recipients_sent > 0 else 0.0
+            step_ctor = round((u_clicks / u_opens * 100), 1) if u_opens > 0 else 0.0
 
             replied_count = sum(1 for r_id, step_nums in recipient_replied_steps.items() if step.step_number in step_nums)
             pending_count = sum(1 for p_step_id in recipient_pending_step_id.values() if p_step_id == step.id)
@@ -1730,6 +1849,7 @@ class CampaignService:
                     target_tags=target_tags,
                     targeted_count=targeted_count,
                     sent_count=sent_count,
+                    unique_recipients_sent=unique_recipients_sent,
                     sending_count=sending_count,
                     bounced_count=bounced_count,
                     failed_count=failed_count,
@@ -1740,6 +1860,13 @@ class CampaignService:
                     delivery_rate=delivery_rate,
                     reply_rate=reply_rate,
                     bounce_rate=bounce_rate,
+                    raw_open_count=step_opens.get(step.id, 0),
+                    unique_open_recipients=u_opens,
+                    open_rate=step_open_rate,
+                    raw_click_count=step_clicks.get(step.id, 0),
+                    unique_click_recipients=u_clicks,
+                    click_rate=step_click_rate,
+                    click_to_open_rate=step_ctor,
                 )
             )
 
@@ -1814,6 +1941,70 @@ class CampaignService:
         followup_sent = sum(s.sent_count for s in step_analytics_list if s.step_number >= 2)
         total_sent = initial_sent + followup_sent
 
+        # Distinct recipients with at least one successful SENT delivery across campaign steps
+        sent_recipient_ids = {
+            row[2] for row in deliv_rows
+            if row[2] is not None and row[3] == CampaignDeliveryStatus.SENT.value
+        }
+        unique_recipients_sent = len(sent_recipient_ids)
+
+        total_bounced = sum(s.bounced_count for s in step_analytics_list)
+        total_failed = sum(s.failed_count for s in step_analytics_list)
+        estimated_delivered = max(0, total_sent - total_bounced)
+        delivery_rate = round((estimated_delivered / total_sent) * 100, 2) if total_sent > 0 else 0.0
+
+        suppressed_count = sum(
+            1 for r in recipients
+            if r.status == CampaignRecipientStatus.SUPPRESSED.value
+            or getattr(r, "stop_reason", None) == CampaignRecipientStopReason.UNSUBSCRIBED.value
+        )
+
+        # Engagement rates with safe zero-division handling and recipient-level denominators:
+        # open_rate denominator: unique_recipients_sent (distinct recipients with at least one successful send)
+        open_rate = round((unique_open_recipients / unique_recipients_sent) * 100, 2) if unique_recipients_sent > 0 else 0.0
+
+        # click_rate denominator: unique_recipients_sent (distinct recipients with at least one successful send)
+        click_rate = round((unique_click_recipients / unique_recipients_sent) * 100, 2) if unique_recipients_sent > 0 else 0.0
+
+        # click_to_open_rate denominator: unique_open_recipients
+        click_to_open_rate = round((unique_click_recipients / unique_open_recipients) * 100, 2) if unique_open_recipients > 0 else 0.0
+
+        delivery_metrics = CampaignDeliveryMetrics(
+            total_recipients=total_recipients,
+            sent_count=total_sent,
+            unique_recipients_sent=unique_recipients_sent,
+            estimated_delivered_count=estimated_delivered,
+            delivered_count=estimated_delivered,
+            bounced_count=total_bounced,
+            failed_count=total_failed,
+            suppressed_count=suppressed_count,
+            delivery_rate=delivery_rate,
+        )
+
+        engagement_metrics = CampaignEngagementMetrics(
+            raw_open_count=raw_open_count,
+            unique_open_recipients=unique_open_recipients,
+            unique_recipients_sent=unique_recipients_sent,
+            open_rate=open_rate,
+            raw_click_count=raw_click_count,
+            unique_click_recipients=unique_click_recipients,
+            click_rate=click_rate,
+            click_to_open_rate=click_to_open_rate,
+            unique_clicked_destinations=None,
+        )
+
+        classification_metrics = CampaignClassificationMetrics(
+            bot_events_count=bot_events_count,
+            non_bot_events_count=non_bot_events_count,
+            unknown_events_count=unknown_events_count,
+            bot_open_count=bot_open_count,
+            non_bot_open_count=non_bot_open_count,
+            unknown_open_count=unknown_open_count,
+            bot_click_count=bot_click_count,
+            non_bot_click_count=non_bot_click_count,
+            unknown_click_count=unknown_click_count,
+        )
+
         return CampaignAnalyticsResponse(
             campaign_id=campaign.id,
             campaign_name=campaign.name,
@@ -1826,6 +2017,182 @@ class CampaignService:
             unique_replied_count=len(matched_reply_recipient_ids),
             steps=step_analytics_list,
             delivery_trend=delivery_trend_points,
+            omitted_metrics_notice=None,
+            # Extended flat delivery fields
+            estimated_delivered_count=estimated_delivered,
+            delivered_count=estimated_delivered,
+            bounced_count=total_bounced,
+            failed_count=total_failed,
+            suppressed_count=suppressed_count,
+            # Extended flat engagement fields
+            unique_recipients_sent=unique_recipients_sent,
+            raw_open_count=raw_open_count,
+            unique_open_recipients=unique_open_recipients,
+            open_rate=open_rate,
+            raw_click_count=raw_click_count,
+            unique_click_recipients=unique_click_recipients,
+            click_rate=click_rate,
+            unique_clicked_destinations=None,
+            # Extended flat classification fields
+            bot_events_count=bot_events_count,
+            non_bot_events_count=non_bot_events_count,
+            unknown_events_count=unknown_events_count,
+            # Structured metric groups
+            delivery=delivery_metrics,
+            engagement=engagement_metrics,
+            classification=classification_metrics,
+        )
+
+
+    @classmethod
+    async def get_campaign_recipient_engagement(
+        cls,
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+        event_type: str = "OPEN",
+        limit: int = 50,
+        offset: int = 0,
+        step_number: Optional[int] = None,
+    ) -> CampaignRecipientEngagementResponse:
+        """Retrieve paginated recipients who recorded at least one OPEN or CLICK event for a campaign.
+
+        Guarantees:
+        - Strict tenant isolation: verifies campaign belongs to company_id (raises 404 if not found).
+        - Excludes events with missing recipient_id or recipients belonging to other campaigns.
+        - Masks recipient email addresses for privacy protection.
+        - Excludes quarantine records and unsubscribe events.
+        - Optional step_number filter enforces step attribution via verified CampaignDelivery relationships.
+        - Groups by recipient_id with stable ordering (most recent event first, recipient_id tie-breaker).
+        - Distinct classification counts: bot, non-bot, and unknown bot status.
+        """
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+
+        norm_type = (event_type or "").strip().upper()
+        if norm_type not in (TrackingEventType.OPEN.value, TrackingEventType.CLICK.value):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid event_type '{event_type}'. Must be 'OPEN' or 'CLICK'.",
+            )
+
+        page_limit = min(max(1, limit), 100)
+        page_offset = max(0, offset)
+
+        step_obj = None
+        if step_number is not None:
+            step_stmt = select(CampaignStep).where(
+                CampaignStep.campaign_id == campaign.id,
+                CampaignStep.step_number == step_number,
+            )
+            step_obj = (await db.execute(step_stmt)).scalar_one_or_none()
+            if not step_obj:
+                return CampaignRecipientEngagementResponse(
+                    campaign_id=campaign.id,
+                    event_type=norm_type,
+                    total=0,
+                    limit=page_limit,
+                    offset=page_offset,
+                    items=[],
+                )
+
+        event_filters = [
+            EmailTrackingEvent.campaign_id == campaign.id,
+            EmailTrackingEvent.company_id == company_id,
+            EmailTrackingEvent.event_type == norm_type,
+            EmailTrackingEvent.recipient_id.isnot(None),
+            CampaignRecipient.campaign_id == campaign.id,
+        ]
+
+        if step_obj is not None:
+            event_filters.append(EmailTrackingEvent.delivery_id == CampaignDelivery.id)
+            event_filters.append(CampaignDelivery.step_id == step_obj.id)
+            event_filters.append(CampaignDelivery.campaign_id == campaign.id)
+
+            total_stmt = (
+                select(func.count(func.distinct(EmailTrackingEvent.recipient_id)))
+                .join(CampaignRecipient, EmailTrackingEvent.recipient_id == CampaignRecipient.id)
+                .join(CampaignDelivery, EmailTrackingEvent.delivery_id == CampaignDelivery.id)
+                .where(*event_filters)
+            )
+
+            items_stmt = (
+                select(
+                    EmailTrackingEvent.recipient_id,
+                    CampaignRecipient.email,
+                    func.min(EmailTrackingEvent.occurred_at).label("first_event_at"),
+                    func.max(EmailTrackingEvent.occurred_at).label("last_event_at"),
+                    func.count(EmailTrackingEvent.id).label("total_events_count"),
+                    func.count(case((EmailTrackingEvent.is_bot.is_(True), 1))).label("bot_events_count"),
+                    func.count(case((EmailTrackingEvent.is_bot.is_(False), 1))).label("non_bot_events_count"),
+                    func.count(case((EmailTrackingEvent.is_bot.is_(None), 1))).label("unknown_events_count"),
+                )
+                .join(CampaignRecipient, EmailTrackingEvent.recipient_id == CampaignRecipient.id)
+                .join(CampaignDelivery, EmailTrackingEvent.delivery_id == CampaignDelivery.id)
+                .where(*event_filters)
+                .group_by(EmailTrackingEvent.recipient_id, CampaignRecipient.email)
+                .order_by(
+                    desc(func.max(EmailTrackingEvent.occurred_at)),
+                    EmailTrackingEvent.recipient_id.desc(),
+                )
+                .limit(page_limit)
+                .offset(page_offset)
+            )
+        else:
+            # 1. Total count of distinct recipients with at least one event of this type across campaign
+            total_stmt = (
+                select(func.count(func.distinct(EmailTrackingEvent.recipient_id)))
+                .join(CampaignRecipient, EmailTrackingEvent.recipient_id == CampaignRecipient.id)
+                .where(*event_filters)
+            )
+
+            # 2. Aggregated recipient records with stable ordering
+            items_stmt = (
+                select(
+                    EmailTrackingEvent.recipient_id,
+                    CampaignRecipient.email,
+                    func.min(EmailTrackingEvent.occurred_at).label("first_event_at"),
+                    func.max(EmailTrackingEvent.occurred_at).label("last_event_at"),
+                    func.count(EmailTrackingEvent.id).label("total_events_count"),
+                    func.count(case((EmailTrackingEvent.is_bot.is_(True), 1))).label("bot_events_count"),
+                    func.count(case((EmailTrackingEvent.is_bot.is_(False), 1))).label("non_bot_events_count"),
+                    func.count(case((EmailTrackingEvent.is_bot.is_(None), 1))).label("unknown_events_count"),
+                )
+                .join(CampaignRecipient, EmailTrackingEvent.recipient_id == CampaignRecipient.id)
+                .where(*event_filters)
+                .group_by(EmailTrackingEvent.recipient_id, CampaignRecipient.email)
+                .order_by(
+                    desc(func.max(EmailTrackingEvent.occurred_at)),
+                    EmailTrackingEvent.recipient_id.desc(),
+                )
+                .limit(page_limit)
+                .offset(page_offset)
+            )
+
+        total_count = (await db.execute(total_stmt)).scalar() or 0
+        rows = (await db.execute(items_stmt)).all()
+
+        items = []
+        for r_id, r_email, first_at, last_at, total_ev, bot_ev, non_bot_ev, unknown_ev in rows:
+            items.append(
+                CampaignRecipientEngagementItem(
+                    recipient_id=r_id,
+                    masked_email=mask_email(r_email),
+                    first_event_at=first_at,
+                    last_event_at=last_at,
+                    total_events_count=total_ev,
+                    bot_events_count=bot_ev,
+                    non_bot_events_count=non_bot_ev,
+                    unknown_events_count=unknown_ev,
+                )
+            )
+
+        return CampaignRecipientEngagementResponse(
+            campaign_id=campaign.id,
+            event_type=norm_type,
+            total=total_count,
+            limit=page_limit,
+            offset=page_offset,
+            items=items,
         )
 
 

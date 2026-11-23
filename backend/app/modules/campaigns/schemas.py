@@ -637,6 +637,7 @@ class CampaignStepAnalytics(BaseModel):
     target_tags: List[str] = Field(default_factory=list, description="Target recipient tags configured for this step")
     targeted_count: int = Field(..., description="Number of campaign recipients targeted by this step's criteria")
     sent_count: int = Field(..., description="Number of deliveries dispatched with SENT status")
+    unique_recipients_sent: int = Field(default=0, description="Distinct recipients with at least one SENT delivery for this step")
     sending_count: int = Field(default=0, description="Number of deliveries currently in SENDING status")
     bounced_count: int = Field(..., description="Number of deliveries marked BOUNCED or with bounced_at timestamp")
     failed_count: int = Field(default=0, description="Number of deliveries marked FAILED")
@@ -647,6 +648,61 @@ class CampaignStepAnalytics(BaseModel):
     delivery_rate: float = Field(..., description="Estimated net delivery rate percentage ((sent_count - bounced_count) / sent_count * 100)")
     reply_rate: float = Field(..., description="Percentage of sent recipients who replied (replied_count / sent_count * 100)")
     bounce_rate: float = Field(..., description="Percentage of sent recipients who bounced (bounced_count / sent_count * 100)")
+    raw_open_count: int = Field(default=0, description="Total raw OPEN telemetry events recorded for this step")
+    unique_open_recipients: int = Field(default=0, description="Distinct recipients with at least one OPEN event for this step")
+    open_rate: float = Field(default=0.0, description="Percentage of unique sent recipients who opened (unique_open_recipients / unique_recipients_sent * 100)")
+    raw_click_count: int = Field(default=0, description="Total raw CLICK telemetry events recorded for this step")
+    unique_click_recipients: int = Field(default=0, description="Distinct recipients with at least one CLICK event for this step")
+    click_rate: float = Field(default=0.0, description="Percentage of unique sent recipients who clicked (unique_click_recipients / unique_recipients_sent * 100)")
+    click_to_open_rate: float = Field(default=0.0, description="Percentage of unique opened recipients who clicked (unique_click_recipients / unique_open_recipients * 100)")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignDeliveryMetrics(BaseModel):
+    """Delivery summary metrics for the campaign."""
+    total_recipients: int = Field(default=0, description="Total recipients attached to the campaign")
+    sent_count: int = Field(default=0, description="Total emails dispatched across all steps (initial + follow-up)")
+    unique_recipients_sent: int = Field(default=0, description="Distinct recipients with at least one successful SENT delivery")
+    estimated_delivered_count: int = Field(default=0, description="Estimated net delivered count (sent_count - bounced_count); estimate only, not confirmed mailbox delivery")
+    delivered_count: int = Field(default=0, description="Alias for estimated_delivered_count; estimate only, actual mailbox receipt is not tracked by SMTP")
+    bounced_count: int = Field(default=0, description="Total deliveries marked BOUNCED")
+    failed_count: int = Field(default=0, description="Total deliveries marked FAILED (excluding bounced)")
+    suppressed_count: int = Field(default=0, description="Total recipients in SUPPRESSED status")
+    delivery_rate: float = Field(default=0.0, description="Estimated net delivery rate percentage ((sent - bounced) / sent * 100; estimate only, not confirmed delivery)")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignEngagementMetrics(BaseModel):
+    """Campaign-level interaction engagement metrics derived from locally synchronized tracking events."""
+    raw_open_count: int = Field(default=0, description="Total raw OPEN interaction events recorded")
+    unique_open_recipients: int = Field(default=0, description="Distinct recipients with at least one OPEN event")
+    unique_recipients_sent: int = Field(default=0, description="Denominator for engagement rates: distinct recipients with at least one SENT delivery")
+    open_rate: float = Field(default=0.0, description="Recipient open rate percentage (unique_open_recipients / unique_recipients_sent * 100; denominator=unique_recipients_sent)")
+    raw_click_count: int = Field(default=0, description="Total raw CLICK interaction events recorded")
+    unique_click_recipients: int = Field(default=0, description="Distinct recipients with at least one CLICK event")
+    click_rate: float = Field(default=0.0, description="Recipient click rate percentage (unique_click_recipients / unique_recipients_sent * 100; denominator=unique_recipients_sent)")
+    click_to_open_rate: float = Field(default=0.0, description="Click-to-open rate percentage (unique_click_recipients / unique_open_recipients * 100; denominator=unique_open_recipients)")
+    unique_clicked_destinations: Optional[int] = Field(
+        default=None,
+        description="Unique clicked destination URLs; None because raw event telemetry omits destination URLs for privacy"
+    )
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignClassificationMetrics(BaseModel):
+    """Conservative bot and telemetry classification counts."""
+    bot_events_count: int = Field(default=0, description="Events classified as automated bots or proxies (is_bot = true)")
+    non_bot_events_count: int = Field(default=0, description="Events without automated bot signatures (is_bot = false; not guaranteed human)")
+    unknown_events_count: int = Field(default=0, description="Events with unclassified or unknown bot status (is_bot IS NULL)")
+    bot_open_count: int = Field(default=0, description="OPEN events classified as bot/scanner")
+    non_bot_open_count: int = Field(default=0, description="OPEN events classified as non-bot")
+    unknown_open_count: int = Field(default=0, description="OPEN events with unknown classification")
+    bot_click_count: int = Field(default=0, description="CLICK events classified as bot/scanner")
+    non_bot_click_count: int = Field(default=0, description="CLICK events classified as non-bot")
+    unknown_click_count: int = Field(default=0, description="CLICK events with unknown classification")
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -678,9 +734,39 @@ class CampaignAnalyticsResponse(BaseModel):
         description="Chronological daily delivery activity aggregated from persisted delivery records",
     )
     omitted_metrics_notice: Optional[str] = Field(
-        default="Open and click tracking metrics are omitted because the system does not record tracking pixels or link wraps.",
-        description="Explanation for why open and click tracking metrics cannot be derived from stored data",
+        default=None,
+        description="Notice if metrics cannot be derived; None when tracking metrics are active and populated",
     )
+
+    # Extended Delivery Metrics
+    estimated_delivered_count: int = Field(default=0, description="Estimated net delivered count (sent_count - bounced_count); estimate only, not confirmed mailbox delivery")
+    delivered_count: int = Field(default=0, description="Alias for estimated_delivered_count; estimate only, actual mailbox receipt is not tracked by SMTP")
+    bounced_count: int = Field(default=0, description="Total deliveries marked BOUNCED")
+    failed_count: int = Field(default=0, description="Total deliveries marked FAILED")
+    suppressed_count: int = Field(default=0, description="Total recipients in SUPPRESSED status")
+
+    # Extended Engagement Metrics
+    unique_recipients_sent: int = Field(default=0, description="Distinct recipients with at least one successful SENT delivery (denominator for recipient open and click rates)")
+    raw_open_count: int = Field(default=0, description="Total raw OPEN interaction events recorded")
+    unique_open_recipients: int = Field(default=0, description="Distinct recipients with at least one OPEN event")
+    open_rate: float = Field(default=0.0, description="Recipient open rate percentage (unique_open_recipients / unique_recipients_sent * 100; denominator=unique_recipients_sent)")
+    raw_click_count: int = Field(default=0, description="Total raw CLICK interaction events recorded")
+    unique_click_recipients: int = Field(default=0, description="Distinct recipients with at least one CLICK event")
+    click_rate: float = Field(default=0.0, description="Recipient click rate percentage (unique_click_recipients / unique_recipients_sent * 100; denominator=unique_recipients_sent)")
+    unique_clicked_destinations: Optional[int] = Field(
+        default=None,
+        description="Unique clicked destination URLs; None because raw event telemetry omits destination URLs for privacy"
+    )
+
+    # Extended Classification Metrics
+    bot_events_count: int = Field(default=0, description="Events classified as bots or proxies (is_bot = true)")
+    non_bot_events_count: int = Field(default=0, description="Events without bot signatures (is_bot = false; not guaranteed human)")
+    unknown_events_count: int = Field(default=0, description="Events with unknown bot classification (is_bot IS NULL)")
+
+    # Structured Metric Groups
+    delivery: Optional[CampaignDeliveryMetrics] = None
+    engagement: Optional[CampaignEngagementMetrics] = None
+    classification: Optional[CampaignClassificationMetrics] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -736,5 +822,31 @@ class CampaignEmailsDrilldownResponse(BaseModel):
     limit: int
     offset: int
     items: List[CampaignEmailsDrilldownItem]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignRecipientEngagementItem(BaseModel):
+    """Aggregated engagement drilldown record for a single campaign recipient."""
+    recipient_id: int = Field(..., description="ID of the campaign recipient")
+    masked_email: Optional[str] = Field(None, description="Masked email address safeguarding recipient PII")
+    first_event_at: datetime = Field(..., description="Timestamp of the earliest recorded interaction event")
+    last_event_at: datetime = Field(..., description="Timestamp of the most recent interaction event")
+    total_events_count: int = Field(..., description="Total raw interaction events recorded for this recipient")
+    bot_events_count: int = Field(default=0, description="Events classified as automated bots or proxies (is_bot = true)")
+    non_bot_events_count: int = Field(default=0, description="Events without automated bot signatures (is_bot = false; not guaranteed human)")
+    unknown_events_count: int = Field(default=0, description="Events with unclassified or unknown bot status (is_bot IS NULL)")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignRecipientEngagementResponse(BaseModel):
+    """Paginated engagement drilldown response for opened or clicked recipients."""
+    campaign_id: int = Field(..., description="ID of the campaign")
+    event_type: str = Field(..., description="Type of interaction queried: OPEN or CLICK")
+    total: int = Field(..., description="Total unique recipients matching the query")
+    limit: int = Field(..., description="Page limit")
+    offset: int = Field(..., description="Page offset")
+    items: List[CampaignRecipientEngagementItem] = Field(default_factory=list, description="Paginated unique recipient records")
 
     model_config = ConfigDict(from_attributes=True)

@@ -16,6 +16,7 @@ from app.modules.campaigns.preflight_service import CampaignPreflightService
 from app.modules.campaigns.recipient_service import CampaignRecipientService
 from app.modules.campaigns.schemas import (
     CampaignAnalyticsResponse,
+    CampaignRecipientEngagementResponse,
     CampaignAttachmentListResponse,
     CampaignAttachmentRead,
     CampaignCreate,
@@ -176,6 +177,88 @@ async def get_campaign_analytics(
         db=db,
         company_id=company_id,
         campaign_id=campaign_id,
+    )
+
+
+@router.get(
+    "/{campaign_id}/analytics/opens",
+    response_model=CampaignRecipientEngagementResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get campaign opened recipients drilldown",
+)
+async def get_campaign_opened_recipients(
+    company_id: int,
+    campaign_id: int,
+    limit: int = Query(50, ge=1, le=100, description="Page limit"),
+    offset: int = Query(0, ge=0, description="Page offset"),
+    step_number: Optional[int] = Query(None, ge=1, description="Optional 1-based sequence step filter"),
+    membership: CompanyUser = Depends(get_company_membership),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRecipientEngagementResponse:
+    """Retrieve paginated recipients who recorded at least one OPEN event for this campaign."""
+    return await CampaignService.get_campaign_recipient_engagement(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+        event_type="OPEN",
+        limit=limit,
+        offset=offset,
+        step_number=step_number,
+    )
+
+
+@router.get(
+    "/{campaign_id}/analytics/clicks",
+    response_model=CampaignRecipientEngagementResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get campaign clicked recipients drilldown",
+)
+async def get_campaign_clicked_recipients(
+    company_id: int,
+    campaign_id: int,
+    limit: int = Query(50, ge=1, le=100, description="Page limit"),
+    offset: int = Query(0, ge=0, description="Page offset"),
+    step_number: Optional[int] = Query(None, ge=1, description="Optional 1-based sequence step filter"),
+    membership: CompanyUser = Depends(get_company_membership),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRecipientEngagementResponse:
+    """Retrieve paginated recipients who recorded at least one CLICK event for this campaign."""
+    return await CampaignService.get_campaign_recipient_engagement(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+        event_type="CLICK",
+        limit=limit,
+        offset=offset,
+        step_number=step_number,
+    )
+
+
+@router.get(
+    "/{campaign_id}/analytics/recipients",
+    response_model=CampaignRecipientEngagementResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get campaign recipient engagement drilldown by event type",
+)
+async def get_campaign_recipient_engagement(
+    company_id: int,
+    campaign_id: int,
+    event_type: str = Query("OPEN", description="Event type filter: OPEN or CLICK"),
+    step_number: Optional[int] = Query(None, ge=1, description="Optional 1-based sequence step filter"),
+    limit: int = Query(50, ge=1, le=100, description="Page limit"),
+    offset: int = Query(0, ge=0, description="Page offset"),
+    membership: CompanyUser = Depends(get_company_membership),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRecipientEngagementResponse:
+    """Retrieve paginated recipient engagement records for a given event type (OPEN or CLICK)."""
+    return await CampaignService.get_campaign_recipient_engagement(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+        event_type=event_type,
+        step_number=step_number,
+        limit=limit,
+        offset=offset,
     )
 
 
