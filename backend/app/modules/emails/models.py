@@ -3,6 +3,7 @@ import enum
 from typing import TYPE_CHECKING, Any, List, Optional
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -456,6 +457,7 @@ class EmailTrackingToken(Base):
     )
     events: Mapped[List["EmailTrackingEvent"]] = relationship(
         "EmailTrackingEvent",
+        primaryjoin="foreign(EmailTrackingEvent.token_id) == EmailTrackingToken.id",
         back_populates="token",
         cascade="all, delete-orphan",
     )
@@ -474,14 +476,19 @@ class EmailTrackingEvent(Base):
     __tablename__ = "email_tracking_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
-    company_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    token_id: Mapped[int] = mapped_column(
-        Integer,
-        ForeignKey("email_tracking_tokens.id", ondelete="CASCADE"),
-        nullable=False,
+    remote_event_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        nullable=True,
+        unique=True,
         index=True,
     )
-    email_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    company_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    token_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        index=True,
+    )
+    email_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     campaign_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     recipient_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     delivery_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
@@ -511,7 +518,11 @@ class EmailTrackingEvent(Base):
     )
 
     # Relationships
-    token: Mapped["EmailTrackingToken"] = relationship("EmailTrackingToken", back_populates="events")
+    token: Mapped[Optional["EmailTrackingToken"]] = relationship(
+        "EmailTrackingToken",
+        primaryjoin="foreign(EmailTrackingEvent.token_id) == EmailTrackingToken.id",
+        back_populates="events",
+    )
     email: Mapped[Optional["Email"]] = relationship(
         "Email",
         primaryjoin="foreign(EmailTrackingEvent.email_id) == Email.id",
@@ -520,4 +531,40 @@ class EmailTrackingEvent(Base):
 
     def __repr__(self) -> str:
         return f"<EmailTrackingEvent id={self.id} type='{self.event_type}' email_id={self.email_id} occurred_at='{self.occurred_at}'>"
+
+
+class TrackingEventQuarantine(Base):
+    """Durable quarantine store for remote tracking events that failed tenant or integrity validation.
+
+    Guarantees:
+    - Retains sanitized payload and explicit rejection reason for investigation.
+    - Idempotency enforced via unique remote_event_id.
+    - Zero PII: does not store recipient emails, raw tokens, token hashes, or client IPs.
+    """
+    __tablename__ = "tracking_event_quarantine"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    remote_event_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
+    company_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload: Mapped[Any] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    replay_status: Mapped[str] = mapped_column(
+        String(50),
+        default="pending",
+        server_default=text("'pending'"),
+        nullable=False,
+        index=True,
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    def __repr__(self) -> str:
+        return f"<TrackingEventQuarantine remote_event_id={self.remote_event_id} status='{self.replay_status}' reason='{self.reason}'>"
 

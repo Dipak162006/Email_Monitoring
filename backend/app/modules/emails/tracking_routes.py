@@ -13,8 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.modules.emails.bot_classifier import BotClassifier
 from app.modules.emails.models import TrackingTokenType, TrackingEventType
 from app.modules.emails.tracking_schemas import (
+    TrackingEventItemResponse,
     TrackingTokenIssueRequest,
     TrackingTokenIssueResponse,
 )
@@ -165,6 +167,66 @@ async def list_internal_unsubscribes(
         }
         for e in events
     ]
+
+
+@router.get(
+    "/internal/tracking/events",
+    response_model=List[TrackingEventItemResponse],
+    summary="Retrieve recorded tracking events with classification for synchronization",
+    dependencies=[Depends(verify_tracking_internal_secret)],
+)
+async def list_internal_tracking_events(
+    since_id: int = Query(0, ge=0, description="Retrieve events with ID strictly greater than this cursor"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum number of events to return per batch"),
+    types: Optional[str] = Query(None, description="Comma-separated event types (e.g. OPEN,CLICK,UNSUBSCRIBE)"),
+    company_id: Optional[int] = Query(None, ge=1, description="Optional company tenant filter"),
+    db: AsyncSession = Depends(get_db),
+) -> List[TrackingEventItemResponse]:
+    """Internal server-to-server endpoint to stream tracking events with classification metadata.
+    
+    Security & Architecture Rules:
+    - Authenticated strictly via constant-time internal secret comparison.
+    - Zero PII: Does not return recipient email, raw tokens, token hashes, or client IPs.
+    - Strict ascending event ID order for cursor-based resumption.
+    - Multi-tenant isolation: Supports filtering by company_id.
+    - Validates token association: Every event includes token-associated campaign, recipient, and delivery IDs.
+    """
+    from app.modules.emails.models import EmailTrackingEvent
+
+    stmt = (
+        select(EmailTrackingEvent)
+        .where(EmailTrackingEvent.id > since_id)
+        .order_by(EmailTrackingEvent.id.asc())
+        .limit(limit)
+    )
+
+    if company_id is not None:
+        stmt = stmt.where(EmailTrackingEvent.company_id == company_id)
+
+    if types:
+        type_list = [t.strip().upper() for t in types.split(",") if t.strip()]
+        if type_list:
+            stmt = stmt.where(EmailTrackingEvent.event_type.in_(type_list))
+
+    result = await db.execute(stmt)
+    events = result.scalars().all()
+
+    return [
+        TrackingEventItemResponse(
+            event_id=e.id,
+            company_id=e.company_id,
+            campaign_id=e.campaign_id,
+            recipient_id=e.recipient_id,
+            delivery_id=e.delivery_id,
+            event_type=e.event_type,
+            occurred_at=e.occurred_at.isoformat() if e.occurred_at else "",
+            is_bot=e.is_bot,
+            bot_reason=e.bot_reason,
+            bot_confidence=e.bot_confidence,
+        )
+        for e in events
+    ]
+
 
 
 
@@ -322,6 +384,14 @@ async def track_click_and_redirect(
     user_agent = request.headers.get("user-agent")
     token_id = token_record.id
 
+    # Conservative bot and scanner classification
+    classification = BotClassifier.classify(
+        user_agent=user_agent,
+        event_type=TrackingEventType.CLICK,
+        token=token_record,
+        ip_address=client_ip,
+    )
+
     try:
         await EmailTrackingService.record_tracking_event(
             db=db,
@@ -329,7 +399,9 @@ async def track_click_and_redirect(
             event_type=TrackingEventType.CLICK,
             ip_address=client_ip,
             user_agent=user_agent,
-            is_bot=None,
+            is_bot=classification.is_bot,
+            bot_reason=classification.bot_reason,
+            bot_confidence=classification.bot_confidence,
         )
         await db.commit()
     except Exception as exc:
@@ -401,6 +473,14 @@ async def track_open_pixel(
     user_agent = request.headers.get("user-agent")
     token_id = token_record.id
 
+    # Conservative bot and scanner classification
+    classification = BotClassifier.classify(
+        user_agent=user_agent,
+        event_type=TrackingEventType.OPEN,
+        token=token_record,
+        ip_address=client_ip,
+    )
+
     try:
         await EmailTrackingService.record_tracking_event(
             db=db,
@@ -408,7 +488,9 @@ async def track_open_pixel(
             event_type=TrackingEventType.OPEN,
             ip_address=client_ip,
             user_agent=user_agent,
-            is_bot=None,
+            is_bot=classification.is_bot,
+            bot_reason=classification.bot_reason,
+            bot_confidence=classification.bot_confidence,
         )
         await db.commit()
     except Exception as exc:

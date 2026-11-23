@@ -9,6 +9,7 @@ from app.modules.emails.models import (
     EmailThread,
     EmailTrackingEvent,
     EmailTrackingToken,
+    TrackingEventQuarantine,
     TrackingEventType,
     TrackingTokenType,
 )
@@ -16,7 +17,9 @@ from app.modules.emails.tracking_service import EmailTrackingService
 from app.modules.emails.tracking_client import TrackingServiceClient
 from app.modules.emails.link_tracking_service import LinkTrackingService
 from app.modules.emails.open_tracking_service import OpenTrackingService
+from app.modules.emails.bot_classifier import BotClassifier, BotClassificationResult
 from app.modules.emails.tracking_schemas import (
+    TrackingEventItemResponse,
     TrackingTokenIssueRequest,
     TrackingTokenIssueResponse,
 )
@@ -95,14 +98,18 @@ __all__ = [
     "EmailThreadService",
     "EmailTrackingToken",
     "EmailTrackingEvent",
+    "TrackingEventQuarantine",
     "TrackingTokenType",
     "TrackingEventType",
     "EmailTrackingService",
     "TrackingServiceClient",
     "LinkTrackingService",
     "OpenTrackingService",
+    "BotClassifier",
+    "BotClassificationResult",
     "TrackingTokenIssueRequest",
     "TrackingTokenIssueResponse",
+    "TrackingEventItemResponse",
     "router",
 ]
 

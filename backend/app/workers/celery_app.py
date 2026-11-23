@@ -38,5 +38,11 @@ beat_schedule["sync-remote-unsubscribes-periodic"] = {
     "schedule": crontab(minute="*/5"),
 }
 
+# T5.2 periodic remote interaction tracking events synchronization (every 5 minutes)
+beat_schedule["sync-tracking-events-periodic"] = {
+    "task": "app.workers.campaign_tasks.sync_tracking_events_task",
+    "schedule": crontab(minute="*/5"),
+}
+
 celery_app.conf.beat_schedule = beat_schedule
 

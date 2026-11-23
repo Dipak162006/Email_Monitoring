@@ -157,4 +157,53 @@ class TrackingServiceClient:
             logger.debug("Failed to connect to tracking service for unsubscribes: %s", exc)
             return []
 
+    async def get_tracking_events(
+        self,
+        since_id: int = 0,
+        limit: int = 100,
+        types: Optional[Union[List[str], str]] = None,
+        company_id: Optional[int] = None,
+    ) -> List[dict]:
+        """Fetch recorded tracking events from the remote tracking backend with filtering and pagination.
+        
+        Security & Reliability Rules:
+        - Authenticated via X-Tracking-Internal-Secret.
+        - Fails safely on network/HTTP errors, returning an empty list without raising.
+        - Short timeout to prevent worker stalls.
+        """
+        if not self.is_configured:
+            return []
+
+        url = f"{self._service_url}/api/v1/internal/tracking/events"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Tracking-Internal-Secret": self._internal_secret,
+        }
+        params: dict = {
+            "since_id": max(0, since_id),
+            "limit": min(max(1, limit), 1000),
+        }
+        if types:
+            if isinstance(types, (list, tuple, set)):
+                params["types"] = ",".join(str(t).strip().upper() for t in types if t)
+            else:
+                params["types"] = str(types).strip().upper()
+        if company_id is not None:
+            params["company_id"] = company_id
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+                response = await client.get(url, params=params, headers=headers)
+                if response.status_code == 200:
+                    data = response.json()
+                    if isinstance(data, list):
+                        return data
+                    return []
+                logger.warning("Failed to fetch tracking events (status=%d)", response.status_code)
+                return []
+        except Exception as exc:
+            logger.debug("Failed to connect to tracking service for tracking events: %s", exc)
+            return []
+
+
 

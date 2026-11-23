@@ -50,3 +50,20 @@ class TrackingTokenIssueResponse(BaseModel):
     expires_at: Optional[datetime] = None
     created_at: datetime
 
+
+class TrackingEventItemResponse(BaseModel):
+    """Schema for individual tracking event returned by internal event retrieval API."""
+    model_config = ConfigDict(from_attributes=True)
+
+    event_id: int = Field(..., description="Unique sequential event identifier")
+    company_id: int = Field(..., description="Multi-tenant company identifier")
+    campaign_id: Optional[int] = Field(None, description="Associated campaign identifier")
+    recipient_id: Optional[int] = Field(None, description="Associated recipient identifier")
+    delivery_id: Optional[int] = Field(None, description="Associated delivery identifier")
+    event_type: str = Field(..., description="Event type (OPEN, CLICK, UNSUBSCRIBE)")
+    occurred_at: str = Field(..., description="Timestamp of interaction in ISO 8601 format")
+    is_bot: Optional[bool] = Field(None, description="True if classified as bot/scanner; None if unclassified/uncertain")
+    bot_reason: Optional[str] = Field(None, description="Classification reason if is_bot is True")
+    bot_confidence: Optional[float] = Field(None, description="Confidence score in [0.0, 1.0] if is_bot is True")
+
+

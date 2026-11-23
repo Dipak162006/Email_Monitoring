@@ -136,3 +136,28 @@ def sync_remote_unsubscribes_task(self) -> Dict[str, Any]:
     return run_async(_async_sync_remote_unsubscribes_task())
 
 
+async def _async_sync_tracking_events_task() -> Dict[str, Any]:
+    """Asynchronous core of the interaction tracking events periodic synchronization task."""
+    logger.info("Executing periodic remote interaction tracking events synchronization task.")
+    try:
+        from app.modules.campaigns.tracking_sync_service import TrackingEventSyncService
+        from app.workers.tasks import get_worker_db
+        async with get_worker_db() as db:
+            synced_count = await TrackingEventSyncService.sync_tracking_events(db=db)
+            return {"status": "SUCCESS", "synced_count": synced_count}
+    except Exception as exc:
+        logger.exception("Error in periodic interaction tracking events synchronization: %s", exc)
+        return {"status": "FAILED", "error": str(exc)}
+
+
+@celery_app.task(
+    bind=True,
+    name="app.workers.campaign_tasks.sync_tracking_events_task",
+    acks_late=True,
+)
+def sync_tracking_events_task(self) -> Dict[str, Any]:
+    """Celery periodic task synchronizing remote OPEN and CLICK tracking events into local database."""
+    return run_async(_async_sync_tracking_events_task())
+
+
+
