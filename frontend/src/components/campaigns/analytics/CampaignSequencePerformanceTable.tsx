@@ -67,26 +67,31 @@ export const CampaignSequencePerformanceTable: React.FC<CampaignSequencePerforma
               const uniqueSent = step.unique_recipients_sent ?? 0;
               const uniqueOpens = step.unique_open_recipients ?? 0;
               const rawOpens = step.raw_open_count ?? 0;
-              const openRate =
-                step.open_rate !== undefined
+              const rawOpenRate =
+                step.open_rate !== undefined && step.open_rate !== null
                   ? step.open_rate
                   : uniqueSent > 0
                   ? roundVal((uniqueOpens / uniqueSent) * 100)
                   : 0.0;
+              const openRate = Number.isFinite(Number(rawOpenRate)) ? Number(rawOpenRate) : 0.0;
 
               const uniqueClicks = step.unique_click_recipients ?? 0;
               const rawClicks = step.raw_click_count ?? 0;
-              const clickRate =
-                step.click_rate !== undefined
+              const rawClickRate =
+                step.click_rate !== undefined && step.click_rate !== null
                   ? step.click_rate
                   : uniqueSent > 0
                   ? roundVal((uniqueClicks / uniqueSent) * 100)
                   : 0.0;
+              const clickRate = Number.isFinite(Number(rawClickRate)) ? Number(rawClickRate) : 0.0;
 
               const bounced = step.bounced_count ?? 0;
               const failed = step.failed_count ?? 0;
               const replies = step.replied_count ?? 0;
-              const replyRate = step.reply_rate ?? (sent > 0 ? roundVal((replies / sent) * 100) : 0.0);
+              const rawReplyRate = step.reply_rate !== undefined && step.reply_rate !== null
+                ? step.reply_rate
+                : (sent > 0 ? roundVal((replies / sent) * 100) : 0.0);
+              const replyRate = Number.isFinite(Number(rawReplyRate)) ? Number(rawReplyRate) : 0.0;
 
               return (
                 <tr
@@ -143,7 +148,7 @@ export const CampaignSequencePerformanceTable: React.FC<CampaignSequencePerforma
 
                   {/* Recipients */}
                   <td className="py-3 px-3 text-center font-medium">
-                    {step.targeted_count.toLocaleString()}
+                    {(step.targeted_count ?? 0).toLocaleString()}
                   </td>
 
                   {/* Sent Deliveries */}

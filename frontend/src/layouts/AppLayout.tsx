@@ -37,6 +37,7 @@ import { emailsApi } from "../services/api";
 import { useWorkspace } from "../hooks/useWorkspace";
 import { usePermissions } from "../hooks/usePermissions";
 import { WorkspaceSwitcher } from "../components/workspace/WorkspaceSwitcher";
+import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 
 interface NavLinkItem {
   label: string;
@@ -614,7 +615,9 @@ export function AppLayout() {
 
         {/* Scrollable Page Outlet Content */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto pb-10 min-w-0">
-          <Outlet />
+          <ErrorBoundary>
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

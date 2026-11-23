@@ -786,7 +786,7 @@ export const CampaignDetailPage: React.FC = () => {
                 )}
                 <CampaignStatusBadge status={campaign.status} />
                 <span className="px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 font-semibold text-xs border border-indigo-100">
-                  {campaign.recipient_count.toLocaleString()} {campaign.recipient_count === 1 ? "recipient" : "recipients"}
+                  {(campaign.recipient_count ?? 0).toLocaleString()} {(campaign.recipient_count ?? 0) === 1 ? "recipient" : "recipients"}
                 </span>
               </div>
 
@@ -1174,7 +1174,7 @@ export const CampaignDetailPage: React.FC = () => {
                 </div>
                 <div className="mt-2.5 space-y-1">
                   <p className="text-xl sm:text-2xl font-bold text-slate-900 leading-none">
-                    {campaign.recipient_count.toLocaleString()}
+                    {(campaign.recipient_count ?? 0).toLocaleString()}
                   </p>
                   <p className="text-[11px] text-slate-500">Total recipients</p>
                   <div className="pt-2 flex items-center justify-between text-xs text-slate-500">
@@ -1877,7 +1877,7 @@ export const CampaignDetailPage: React.FC = () => {
                 </span>
               </div>
               <p className="text-xl font-bold text-slate-900 leading-none">
-                {campaign.recipient_count.toLocaleString()}
+                {(campaign.recipient_count ?? 0).toLocaleString()}
               </p>
               <p className="text-xs text-slate-500">Total recipients</p>
               <div className="pt-1 flex items-center justify-between text-xs text-slate-500">
@@ -2279,7 +2279,7 @@ export const CampaignDetailPage: React.FC = () => {
                   </div>
                   <div className="flex-1 flex items-end justify-around gap-2 pt-2 pb-1">
                     {analytics.delivery_trend.map((pt) => {
-                      const maxVal = Math.max(1, ...analytics.delivery_trend!.map((p) => Math.max(p.sent_count, p.replied_count)));
+                      const maxVal = Math.max(1, ...(analytics.delivery_trend || []).map((p) => Math.max(p.sent_count ?? 0, p.replied_count ?? 0)));
                       const sentH = Math.round((pt.sent_count / maxVal) * 85);
                       const repH = Math.round((pt.replied_count / maxVal) * 85);
                       return (
