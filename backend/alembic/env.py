@@ -3,6 +3,7 @@ import sys
 from logging.config import fileConfig
 from pathlib import Path
 from alembic import context
+import sqlalchemy as sa
 from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import make_url
 
@@ -110,6 +111,13 @@ def run_migrations_online() -> None:
             )
 
             with context.begin_transaction():
+                if connection.dialect.name == "postgresql":
+                    # Lock key 4697312383870814787 = 0x414C454D424943 ('ALEMBIC' in ASCII)
+                    # Serializes concurrent migration execution across multiple container instances
+                    connection.execute(
+                        sa.text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                        {"lock_key": 4697312383870814787},
+                    )
                 context.run_migrations()
     finally:
         connectable.dispose()

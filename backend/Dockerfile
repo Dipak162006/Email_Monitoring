@@ -29,5 +29,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD sh -c "curl -f http://localhost:${PORT:-8000}/api/v1/ping || exit 1"
 
-# Default command supporting dynamic $PORT on Render with localhost fallback
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Run pending database migrations up to the target revision before starting the application server
+CMD ["sh", "-c", "alembic upgrade \"${ALEMBIC_TARGET_REVISION:-head}\" && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
