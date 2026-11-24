@@ -18,6 +18,8 @@ if str(backend_dir) not in sys.path:
 
 from alembic.config import Config
 from sqlalchemy.engine import make_url
+import urllib.parse
+from app.core import redis as core_redis
 
 from app.core.config import settings
 from app.core.database import Base, get_db
@@ -30,6 +32,59 @@ PROTECTED_DATABASE_NAMES = {
     "postgres",
     "default",
 }
+
+PROTECTED_REDIS_DBS = {0}
+TEST_REDIS_DB = 15
+
+
+def derive_safe_test_redis_url(base_url: str, target_db: int = TEST_REDIS_DB) -> str:
+    """Derive and validate an isolated test Redis URL from a base URL.
+    
+    Guarantees fail-closed safety by rejecting DB 0 and protected databases.
+    """
+    if not base_url:
+        raise RuntimeError("FATAL SAFETY INTERLOCK: Base Redis URL is empty.")
+
+    if target_db in PROTECTED_REDIS_DBS or target_db == 0:
+        raise RuntimeError(
+            f"FATAL SAFETY INTERLOCK: Target test Redis DB cannot be in protected DBs {PROTECTED_REDIS_DBS}!"
+        )
+
+    parsed = urllib.parse.urlparse(base_url)
+    new_url = urllib.parse.urlunparse(parsed._replace(path=f"/{target_db}"))
+    return new_url
+
+
+def validate_test_redis_url(redis_url: str) -> int:
+    """Validate that a Redis URL points strictly to an isolated test database (not DB 0)."""
+    parsed = urllib.parse.urlparse(redis_url)
+    db_str = parsed.path.lstrip("/")
+    db_num = int(db_str) if db_str.isdigit() else 0
+    if db_num in PROTECTED_REDIS_DBS or db_num == 0:
+        raise RuntimeError(
+            f"FATAL SAFETY INTERLOCK: Test Redis URL '{redis_url}' points to protected Redis DB {db_num}! "
+            "Tests must strictly run against isolated Redis DB 15."
+        )
+    if db_num != TEST_REDIS_DB:
+        raise RuntimeError(
+            f"FATAL SAFETY INTERLOCK: Test Redis URL must use DB {TEST_REDIS_DB}, got DB {db_num}."
+        )
+    return db_num
+
+
+# Derive and enforce test Redis configuration at pytest initialization
+TEST_REDIS_URL = derive_safe_test_redis_url(settings.REDIS_URL, target_db=TEST_REDIS_DB)
+validate_test_redis_url(TEST_REDIS_URL)
+
+settings.REDIS_URL = TEST_REDIS_URL
+settings.REDIS_DB = TEST_REDIS_DB
+settings.CELERY_BROKER_URL = TEST_REDIS_URL
+settings.CELERY_RESULT_BACKEND = TEST_REDIS_URL
+
+# Reset global redis_client so any future get_redis_client() uses TEST_REDIS_URL
+if core_redis.redis_client is not None:
+    core_redis.redis_client = None
+
 
 
 def derive_safe_test_db_url(base_url: str) -> str:
@@ -178,3 +233,43 @@ async def async_client() -> AsyncGenerator[AsyncClient, None]:
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+async def clean_redis():
+    """Ensure clean Redis state on isolated test database (DB 15) only.
+    
+    Guarantees fail-closed safety by verifying exclusive test ownership before cleanup.
+    """
+    validate_test_redis_url(settings.REDIS_URL)
+    client = core_redis.get_redis_client()
+    conn_db = client.connection_pool.connection_kwargs.get("db", 0)
+    if conn_db != TEST_REDIS_DB or conn_db in PROTECTED_REDIS_DBS:
+        raise RuntimeError(
+            f"FATAL SAFETY INTERLOCK: Redis client connection is bound to DB {conn_db}, expected {TEST_REDIS_DB}!"
+        )
+
+    try:
+        await client.flushdb()
+    except Exception:
+        pass
+
+    yield client
+
+    try:
+        if client.connection_pool.connection_kwargs.get("db", 0) == TEST_REDIS_DB:
+            await client.flushdb()
+    except Exception:
+        pass
+    try:
+        await client.aclose()
+    except Exception:
+        pass
+    core_redis.redis_client = None
+
+
+@pytest.fixture
+def test_redis_client(clean_redis):
+    """Provide the verified test Redis client bound strictly to DB 15."""
+    return clean_redis
+

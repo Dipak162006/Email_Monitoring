@@ -357,8 +357,8 @@ async def test_alembic_025_migration_cycle(test_alembic_config: Config):
     # Downgrade 025 -> 024 (re-adds foreign keys, drops idempotency_key)
     command.downgrade(test_alembic_config, "024_email_tracking_tables")
 
-    # Upgrade 024 -> 025 (drops foreign keys, re-adds idempotency_key)
-    command.upgrade(test_alembic_config, "025_decouple_tracking_fkeys")
+    # Upgrade 024 -> head (drops foreign keys, re-adds idempotency_key, and restores full schema up to head)
+    command.upgrade(test_alembic_config, "head")
 
     await test_async_engine.dispose()
 
