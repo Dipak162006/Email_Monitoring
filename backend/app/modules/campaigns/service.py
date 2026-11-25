@@ -1637,6 +1637,7 @@ class CampaignService:
         # 4. Attribute replies to the exact referenced step using actual message headers & records
         from email.utils import parseaddr
         camp_sender_email = (campaign.email_account.email_address if campaign.email_account else "").strip().lower()
+        recipient_emails = {r.email.strip().lower() for r in recipients if r.email}
 
         recipient_replied_steps: dict[int, set[int]] = {r.id: set() for r in recipients}
         matched_reply_recipient_ids: set[int] = set()
@@ -1657,8 +1658,8 @@ class CampaignService:
             inc_sender_clean = parseaddr(inc_sender)[1].strip().lower() if inc_sender else ""
             if not inc_sender_clean:
                 continue
-            # Exclude emails originating from the campaign's own sending account
-            if camp_sender_email and inc_sender_clean == camp_sender_email:
+            # Exclude emails originating from the campaign's own sending account unless enrolled as a recipient
+            if camp_sender_email and inc_sender_clean == camp_sender_email and camp_sender_email not in recipient_emails:
                 continue
 
             candidate_ids = []
@@ -1787,7 +1788,8 @@ class CampaignService:
                 ):
                     continue
 
-                if r.id in step_targeted_recipient_ids.get(step.id, set()):
+                target_tags = step.target_tags or []
+                if not target_tags or any(t.strip().lower() in {x.strip().lower() for x in target_tags} for t in (r.tags or [])):
                     recipient_pending_step_id[r.id] = step.id
                     break
 
@@ -1795,12 +1797,27 @@ class CampaignService:
         step_analytics_list: List[CampaignStepAnalytics] = []
 
         for step in steps:
-            targeted_ids = step_targeted_recipient_ids.get(step.id, set())
-            targeted_count = len(targeted_ids)
             target_tags = step.target_tags or []
+            step_delivs = deliv_by_step.get(step.id, [])
+            step_deliv_recipients = {d["recipient_id"] for d in step_delivs}
 
-            # Only deliveries of targeted recipients belong to this step's funnel
-            step_delivs = [d for d in deliv_by_step.get(step.id, []) if d["recipient_id"] in targeted_ids]
+            if step.step_number == 1:
+                if not target_tags:
+                    targeted_ids = {r.id for r in recipients}
+                else:
+                    tag_set = {t.strip().lower() for t in target_tags if t and t.strip()}
+                    targeted_ids = {
+                        r.id for r in recipients
+                        if any(t.strip().lower() in tag_set for t in (r.tags or []))
+                    }
+            else:
+                targeted_ids = set(step_deliv_recipients)
+                for r_id, p_step_id in recipient_pending_step_id.items():
+                    if p_step_id == step.id:
+                        targeted_ids.add(r_id)
+
+            step_targeted_recipient_ids[step.id] = targeted_ids
+            targeted_count = len(targeted_ids)
             recipient_ids_with_deliv = {d["recipient_id"] for d in step_delivs}
 
             sent_count = 0
@@ -1904,7 +1921,7 @@ class CampaignService:
         for inc_row in incoming_reply_emails:
             inc_sender = inc_row[5]
             inc_sender_clean = parseaddr(inc_sender)[1].strip().lower() if inc_sender else ""
-            if not inc_sender_clean or (camp_sender_email and inc_sender_clean == camp_sender_email):
+            if not inc_sender_clean or (camp_sender_email and inc_sender_clean == camp_sender_email and camp_sender_email not in recipient_emails):
                 continue
 
             inc_date = inc_row[7] or inc_row[6]
@@ -2267,6 +2284,7 @@ class CampaignService:
 
         all_matched_replies = []
         seen_reply_ids = set()
+        recipient_emails = {(r.email or "").strip().lower() for _, r, _, _ in deliv_res if r and r.email}
         if inc_conditions:
             inc_stmt = (
                 select(Email)
@@ -2283,7 +2301,7 @@ class CampaignService:
                 if email_obj.id in seen_reply_ids:
                     continue
                 inc_sender_clean = parseaddr(email_obj.sender)[1].strip().lower() if email_obj.sender else ""
-                if not inc_sender_clean or (camp_sender and inc_sender_clean == camp_sender):
+                if not inc_sender_clean or (camp_sender and inc_sender_clean == camp_sender and camp_sender not in recipient_emails):
                     continue
 
                 cids = []

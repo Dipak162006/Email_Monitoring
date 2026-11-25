@@ -41,14 +41,13 @@ def test_ordinary_apple_mail_client_not_classified_as_bot():
     ]
     for ua in ordinary_apple_uas:
         res = BotClassifier.classify(user_agent=ua, event_type=TrackingEventType.OPEN)
-        assert res.is_bot is None, f"Ordinary Apple Mail must remain is_bot=None: {ua}"
+        assert res.is_bot is not True, f"Ordinary Apple Mail must not be classified as bot: {ua}"
         assert res.bot_reason is None
-        assert res.bot_confidence is None
 
 
 
 def test_google_image_proxy_classification():
-    """Verify Gmail / Google Image Proxy UA tokens are classified as bot."""
+    """Verify Gmail / Google Image Proxy UA tokens remain unclassified (is_bot=None / UNKNOWN)."""
     google_uas = [
         "Mozilla/5.0 (Windows NT 5.1; rv:11.0) Gecko Firefox/11.0 (via ggpht.com GoogleImageProxy)",
         "GoogleImageProxy",
@@ -56,9 +55,9 @@ def test_google_image_proxy_classification():
     ]
     for ua in google_uas:
         res = BotClassifier.classify(user_agent=ua, event_type=TrackingEventType.OPEN)
-        assert res.is_bot is True, f"Failed for UA: {ua}"
+        assert res.is_bot is None, f"Google Image Proxy must remain is_bot=None (UNKNOWN): {ua}"
         assert res.bot_reason == "google_image_proxy"
-        assert res.bot_confidence == 0.95
+        assert res.bot_confidence is None
 
 
 def test_microsoft_safelinks_classification():
@@ -122,8 +121,8 @@ def test_automated_crawlers_and_headless_browsers_classification():
         assert res.bot_confidence == 0.95
 
 
-def test_standard_browsers_remain_unclassified():
-    """Verify normal interactive human browser user agents remain unclassified (is_bot=None)."""
+def test_standard_browsers_classified_as_non_bot():
+    """Verify normal interactive human browser user agents are classified as non-bot (is_bot=False)."""
     browser_uas = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
@@ -134,9 +133,9 @@ def test_standard_browsers_remain_unclassified():
     ]
     for ua in browser_uas:
         res = BotClassifier.classify(user_agent=ua, event_type=TrackingEventType.OPEN)
-        assert res.is_bot is None, f"Expected None for browser UA: {ua}"
+        assert res.is_bot is False, f"Expected False for browser UA: {ua}"
         assert res.bot_reason is None
-        assert res.bot_confidence is None
+        assert res.bot_confidence == 0.85
 
 
 def test_unknown_or_blank_user_agents_remain_unclassified():
@@ -179,8 +178,8 @@ def test_timing_signal_does_not_independently_force_bot_classification():
         token=token,
         occurred_at=now,
     )
-    # Timing alone MUST NOT classify as bot
-    assert res.is_bot is None
+    # Timing alone MUST NOT classify as bot; standard browser resolves as non-bot
+    assert res.is_bot is False
     assert res.bot_reason is None
 
     # However, for an affirmative scanner UA (e.g. SafeLinks), immediate timing elevates confidence

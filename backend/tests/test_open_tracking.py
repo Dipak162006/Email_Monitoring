@@ -104,7 +104,7 @@ async def test_open_pixel_valid_token_and_event_persistence(async_client: AsyncC
     await db_session.commit()
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "X-Forwarded-For": "198.51.100.25, 10.0.0.1",
     }
 
@@ -128,7 +128,7 @@ async def test_open_pixel_valid_token_and_event_persistence(async_client: AsyncC
     assert event_row.campaign_id == 12
     assert event_row.recipient_id == 34
     assert event_row.delivery_id == 56
-    assert event_row.is_bot is None  # Unclassified raw open
+    assert event_row.is_bot is False  # Standard interactive browser open classified as non-bot
     assert event_row.ip_address == "198.51.100.25"
     assert "Mozilla/5.0" in event_row.user_agent
 

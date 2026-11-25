@@ -66,6 +66,8 @@ class BotClassifier:
     # 2. Google Image Proxy
     # Gmail web and mobile clients load email images through Google's caching proxy.
     # Standard UA contains "GoogleImageProxy" or "via ggpht.com".
+    # Provider image proxies represent standard human opens routed via mail provider proxies
+    # and MUST NOT be affirmatively classified as bots (is_bot=None / UNKNOWN).
     _GOOGLE_PROXY_PATTERN = re.compile(
         r"(?:GoogleImageProxy|via\s+ggpht\.com)",
         re.IGNORECASE,
@@ -95,6 +97,14 @@ class BotClassifier:
         re.IGNORECASE,
     )
 
+    # 6. Standard Interactive Human Browsers / Mail Clients
+    # Authentic browser engines (Chrome, Firefox, Safari, Edge, Outlook)
+    # beginning with Mozilla/5.0 without automated scanners, proxies, or crawlers
+    _HUMAN_CLIENT_PATTERN = re.compile(
+        r"^Mozilla/5\.0\b.*(?:Chrome/\d+|Firefox/\d+|Version/\d+.*Safari/\d+|Edg/\d+|Outlook/\d+)",
+        re.IGNORECASE,
+    )
+
     @classmethod
     def classify(
         cls,
@@ -110,7 +120,9 @@ class BotClassifier:
         - UNSUBSCRIBE requests are unsubscription actions and are never classified as engagement.
         - Missing or blank user-agents are treated as uncertain (is_bot=None).
         - Specific affirmative patterns set is_bot=True with corresponding reason and confidence.
-        - Standard browser or unrecognized user-agents remain is_bot=None.
+        - Google Image Proxy (standard Gmail web/mobile proxy opens) remains unclassified (is_bot=None, bot_reason='google_image_proxy').
+        - Authentic Mozilla/5.0 human clients without crawler/scanner tokens are classified as non-bot (is_bot=False, bot_confidence=0.85).
+        - Ambiguous, unfamiliar, or blank user-agents remain unclassified (is_bot=None).
         - Timing relative to token creation is evaluated as a corroborating signal only.
         """
         type_str = event_type.value if hasattr(event_type, "value") else str(event_type).strip().upper()
@@ -136,11 +148,14 @@ class BotClassifier:
             )
 
         # 2. Google Image Proxy
+        # Gmail loads images when the human user opens an email.
+        # It is a provider caching proxy, not an automated scanner.
+        # Must remain unclassified (is_bot=None / UNKNOWN) with bot_reason="google_image_proxy".
         if cls._GOOGLE_PROXY_PATTERN.search(ua):
             return BotClassificationResult(
-                is_bot=True,
+                is_bot=None,
                 bot_reason="google_image_proxy",
-                bot_confidence=0.95,
+                bot_confidence=None,
             )
 
         # 3. Microsoft SafeLinks / Defender
@@ -178,5 +193,14 @@ class BotClassifier:
                 bot_confidence=0.95,
             )
 
-        # Standard browsers, unrecognized mail clients, or ambiguous UAs remain unclassified
+        # 6. Standard Interactive Human Browsers / Mail Clients
+        # Authentic Mozilla/5.0 clients without scanner/crawler tokens are classified as non-bot
+        if cls._HUMAN_CLIENT_PATTERN.search(ua):
+            return BotClassificationResult(
+                is_bot=False,
+                bot_reason=None,
+                bot_confidence=0.85,
+            )
+
+        # Unrecognized mail clients, unfamiliar or ambiguous UAs remain unclassified
         return BotClassificationResult(is_bot=None, bot_reason=None, bot_confidence=None)

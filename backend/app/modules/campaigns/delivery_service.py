@@ -1956,6 +1956,35 @@ class CampaignDeliveryService:
 
                 next_step_number = next_step.step_number
 
+                # Guard against concurrent workers or task retries creating duplicate deliveries
+                existing_fu_stmt = select(CampaignDelivery).where(
+                    CampaignDelivery.campaign_id == campaign.id,
+                    CampaignDelivery.recipient_id == recipient.id,
+                    CampaignDelivery.step_id == next_step.id,
+                )
+                existing_fu_deliv = (await db.execute(existing_fu_stmt)).scalar_one_or_none()
+                if existing_fu_deliv is not None:
+                    logger.info(
+                        "Follow-up delivery already exists for recipient %d step %d (status=%s). Skipping duplicate dispatch.",
+                        recipient.id,
+                        next_step.id,
+                        existing_fu_deliv.status,
+                    )
+                    if existing_fu_deliv.status in (
+                        CampaignDeliveryStatus.SENT.value,
+                        CampaignDeliveryStatus.SKIPPED.value,
+                        CampaignDeliveryStatus.BOUNCED.value,
+                        CampaignDeliveryStatus.FAILED.value,
+                    ) and recipient.current_step_number < next_step_number:
+                        recipient.current_step_number = next_step_number
+                    if existing_fu_deliv.status != CampaignDeliveryStatus.SENDING.value:
+                        recipient.next_step_due_at = None
+                    await db.commit()
+                    continue
+
+                # Clear next_step_due_at while SENDING so concurrent polls do not re-select this recipient
+                recipient.next_step_due_at = None
+
                 # Create follow-up CampaignDelivery in SENDING state
                 followup_delivery = CampaignDelivery(
                     campaign_id=campaign.id,

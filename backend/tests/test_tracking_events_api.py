@@ -276,11 +276,11 @@ async def test_end_to_end_public_tracking_classification_integration(
     events = (await db_session.execute(stmt)).scalars().all()
     assert len(events) == 3
 
-    # Event 1: Google Image Proxy Open
+    # Event 1: Google Image Proxy Open (Provider proxy remains unclassified UNKNOWN)
     assert events[0].event_type == "OPEN"
-    assert events[0].is_bot is True
+    assert events[0].is_bot is None
     assert events[0].bot_reason == "google_image_proxy"
-    assert events[0].bot_confidence == 0.95
+    assert events[0].bot_confidence is None
 
     # Event 2: SafeLinks Click
     assert events[1].event_type == "CLICK"
@@ -288,11 +288,11 @@ async def test_end_to_end_public_tracking_classification_integration(
     assert events[1].bot_reason == "microsoft_safelinks"
     assert events[1].bot_confidence >= 0.90
 
-    # Event 3: Human / Standard Browser Open (Conservative: is_bot remains None)
+    # Event 3: Human / Standard Browser Open (Authentic Mozilla/5.0 classified as non-bot)
     assert events[2].event_type == "OPEN"
-    assert events[2].is_bot is None
+    assert events[2].is_bot is False
     assert events[2].bot_reason is None
-    assert events[2].bot_confidence is None
+    assert events[2].bot_confidence == 0.85
 
 
 @pytest.mark.asyncio

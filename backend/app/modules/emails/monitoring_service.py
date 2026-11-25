@@ -197,9 +197,20 @@ class EmailMonitoringService:
             return 0
 
         # An incoming email originating from the company's own mailbox or campaign sender cannot be a recipient reply
+        # UNLESS the sender is explicitly enrolled as a recipient in a campaign of this company (e.g. self-testing)
         acc_email = (account.email_address or "").strip().lower()
         if sender_email == acc_email:
-            return 0
+            recip_check = await db.execute(
+                select(CampaignRecipient.id)
+                .join(Campaign, CampaignRecipient.campaign_id == Campaign.id)
+                .where(
+                    Campaign.company_id == account.company_id,
+                    func.lower(CampaignRecipient.email) == sender_email,
+                )
+                .limit(1)
+            )
+            if not recip_check.scalar_one_or_none():
+                return 0
 
         conditions = []
         if candidate_ids:
@@ -219,7 +230,10 @@ class EmailMonitoringService:
             .where(
                 Campaign.company_id == account.company_id,
                 func.lower(CampaignRecipient.email) == sender_email,
-                func.lower(EmailAccount.email_address) != sender_email,
+                or_(
+                    func.lower(EmailAccount.email_address) != sender_email,
+                    func.lower(CampaignRecipient.email) == sender_email,
+                ),
                 or_(*conditions),
             )
         )
