@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from fastapi import HTTPException, UploadFile, status
@@ -43,6 +44,8 @@ from app.modules.email_accounts.models import EmailAccount
 from app.modules.email_accounts.service import EmailAccountService
 from app.modules.emails.models import Email, EmailDirection, EmailThread, EmailTrackingEvent, TrackingEventType
 from app.modules.emails.thread_service import EmailThreadService
+
+logger = logging.getLogger(__name__)
 
 
 def mask_email(email: Optional[str]) -> Optional[str]:
@@ -247,6 +250,7 @@ class CampaignService:
         db: AsyncSession,
         company_id: int,
         campaign_id: int,
+        check_completion: bool = True,
     ) -> Campaign:
         """Retrieve a specific campaign with strict company tenant isolation.
         
@@ -270,6 +274,19 @@ class CampaignService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Campaign not found.",
             )
+
+        if check_completion and campaign.status == CampaignStatus.RUNNING.value:
+            try:
+                from app.modules.campaigns.delivery_service import CampaignDeliveryService
+                new_status = await CampaignDeliveryService.check_and_finalize_campaign_completion(
+                    campaign_id=campaign_id,
+                    db=db,
+                )
+                if new_status and new_status != CampaignStatus.RUNNING.value:
+                    await db.refresh(campaign)
+            except Exception as fin_err:
+                logger.warning("Completion check skipped for campaign %d during get_campaign: %s", campaign_id, fin_err)
+
         return campaign
 
     @staticmethod
@@ -492,7 +509,7 @@ class CampaignService:
         Only campaigns in safe states (DRAFT, COMPLETED, CANCELLED, FAILED) can be deleted.
         Attempts to delete active campaigns (RUNNING, QUEUED, PAUSED) return 409 Conflict.
         """
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id, check_completion=False)
 
         if campaign.status not in DELETABLE_STATES:
             raise HTTPException(
@@ -515,9 +532,13 @@ class CampaignService:
         Validates transition legality, updates status, sets relevant lifecycle timestamps,
         and atomically persists the change.
         """
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id, check_completion=False)
         current_status = campaign.status
         target_value = target_status.value
+
+        # Idempotent no-op if campaign is already in target status
+        if current_status == target_value:
+            return campaign
 
         # Validate against transition graph
         allowed = VALID_TRANSITIONS.get(current_status, set())
@@ -633,7 +654,7 @@ class CampaignService:
         
         Transition: RUNNING -> PAUSED.
         """
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id, check_completion=False)
         if campaign.status != CampaignStatus.RUNNING.value:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -652,7 +673,7 @@ class CampaignService:
         Transition: PAUSED -> RUNNING.
         Resumes delivery execution via Celery background delivery task.
         """
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id, check_completion=False)
         if campaign.status != CampaignStatus.PAUSED.value:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -707,7 +728,7 @@ class CampaignService:
         
         Transitions: SCHEDULED, QUEUED, RUNNING, PAUSED -> CANCELLED.
         """
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id, check_completion=False)
         cancellable = {
             CampaignStatus.SCHEDULED.value,
             CampaignStatus.QUEUED.value,
@@ -751,7 +772,7 @@ class CampaignService:
         Active campaigns (RUNNING, QUEUED, SCHEDULED, PAUSED) cannot be archived directly and return 409 Conflict.
         Clears next_send_at and preserves all recipients, steps, and delivery history.
         """
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id, check_completion=False)
 
         if campaign.status == CampaignStatus.ARCHIVED.value:
             return campaign
@@ -783,7 +804,7 @@ class CampaignService:
         
         Never automatically resumes or schedules delivery.
         """
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id, check_completion=False)
 
         if campaign.status != CampaignStatus.ARCHIVED.value:
             raise HTTPException(
@@ -888,6 +909,25 @@ class CampaignService:
         )
         uncertain_c = await db.scalar(deliv_uncertain_stmt) or 0
         counts["uncertain_count"] = uncertain_c
+
+        # Reconcile delivery-level failures and bounces with recipient status counts
+        deliv_failed_stmt = select(func.count(func.distinct(CampaignDelivery.recipient_id))).where(
+            CampaignDelivery.campaign_id == campaign_id,
+            CampaignDelivery.status == CampaignDeliveryStatus.FAILED.value,
+            CampaignDelivery.bounced_at.is_(None),
+        )
+        deliv_failed = await db.scalar(deliv_failed_stmt) or 0
+        counts["failed_count"] = max(counts["failed_count"], deliv_failed)
+
+        deliv_bounced_stmt = select(func.count(func.distinct(CampaignDelivery.recipient_id))).where(
+            CampaignDelivery.campaign_id == campaign_id,
+            or_(
+                CampaignDelivery.status == CampaignDeliveryStatus.BOUNCED.value,
+                CampaignDelivery.bounced_at.is_not(None),
+            ),
+        )
+        deliv_bounced = await db.scalar(deliv_bounced_stmt) or 0
+        counts["bounced_count"] = max(counts["bounced_count"], deliv_bounced)
 
         # Follow-up sequence telemetry counters
         # Verified replies: verified thread_has_reply, matching inbound email, or non-disproven stopped reply
@@ -1116,7 +1156,7 @@ class CampaignService:
         - Total campaign attachments limit (max 10).
         - Secure file upload and size limit (<= 25 MB) via AttachmentStorageService.
         """
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id, check_completion=False)
 
         if campaign.status != CampaignStatus.DRAFT.value:
             raise HTTPException(
@@ -1190,7 +1230,7 @@ class CampaignService:
         attachment_id: int,
     ) -> None:
         """Delete an attachment from an editable draft campaign and safely clean up disk storage."""
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id, check_completion=False)
 
         if campaign.status != CampaignStatus.DRAFT.value:
             raise HTTPException(
@@ -1276,7 +1316,7 @@ class CampaignService:
           existing storage path (zero redundant file duplication).
         - Missing or corrupt physical attachment files are gracefully ignored.
         """
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id, check_completion=False)
 
         if campaign.status != CampaignStatus.DRAFT.value:
             raise HTTPException(
@@ -1414,7 +1454,7 @@ class CampaignService:
         - pending_count: active recipients queued or progressing towards their next eligible step (at most 1 step per recipient)
         - delivery_rate, reply_rate, bounce_rate with safe zero-division handling
         """
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id, check_completion=False)
 
         # 1. Fetch steps sorted by step_number
         steps_stmt = (
@@ -2034,7 +2074,7 @@ class CampaignService:
             unique_replied_count=len(matched_reply_recipient_ids),
             steps=step_analytics_list,
             delivery_trend=delivery_trend_points,
-            omitted_metrics_notice=None,
+            omitted_metrics_notice="Open and click tracking metrics are omitted because the system does not record tracking pixels or link wraps." if total_recipients == 0 else None,
             # Extended flat delivery fields
             estimated_delivered_count=estimated_delivered,
             delivered_count=estimated_delivered,
@@ -2083,7 +2123,7 @@ class CampaignService:
         - Groups by recipient_id with stable ordering (most recent event first, recipient_id tie-breaker).
         - Distinct classification counts: bot, non-bot, and unknown bot status.
         """
-        campaign = await CampaignService.get_campaign(db, company_id, campaign_id)
+        campaign = await CampaignService.get_campaign(db, company_id, campaign_id, check_completion=False)
 
         norm_type = (event_type or "").strip().upper()
         if norm_type not in (TrackingEventType.OPEN.value, TrackingEventType.CLICK.value):

@@ -333,3 +333,219 @@ async def test_cancelled_campaign_must_not_be_incorrectly_completed(
             target_status=CampaignStatus.COMPLETED,
         )
     assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_followup_failure_reconciliation_and_campaign_completion(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """When a follow-up step encounters a terminal delivery failure, the recipient
+    must transition to FAILED, current_step must update to the attempted step,
+    next_step_due_at must clear, and the campaign must transition to COMPLETED."""
+    token = await register_and_login(async_client, "owner_fail_fu@test.com", "Fail Owner")
+    comp_id = await create_company_helper(async_client, token, "Fail FU Co")
+    account = await create_verified_email_account(db_session, comp_id, "sender_fail_fu@test.com")
+
+    # Create campaign with 3 steps
+    create_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Three-Step Sequence",
+            "email_account_id": account.id,
+            "subject": "Step 1 Subject",
+            "body_text": "Step 1 body",
+            "followup_steps": [
+                {
+                    "step_number": 2,
+                    "delay_hours": 1,
+                    "subject": "Step 2 Subject",
+                    "body_text": "Step 2 body",
+                },
+                {
+                    "step_number": 3,
+                    "delay_hours": 1,
+                    "subject": "Step 3 Subject",
+                    "body_text": "Step 3 body",
+                },
+            ],
+        },
+    )
+    assert create_resp.status_code == 201
+    camp_id = create_resp.json()["id"]
+
+    recip_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "client@example.com", "first_name": "Client"},
+    )
+    assert recip_resp.status_code == 201
+    recip_id = recip_resp.json()["id"]
+
+    camp_res = await db_session.execute(select(Campaign).where(Campaign.id == camp_id))
+    camp = camp_res.scalar_one()
+    camp.status = CampaignStatus.QUEUED.value
+    await db_session.commit()
+
+    # 1. Execute Step 1 (succeeds)
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync"):
+        await CampaignDeliveryService.execute_campaign(
+            campaign_id=camp_id,
+            company_id=comp_id,
+            db_factory=TestAsyncSessionLocal,
+        )
+
+    await db_session.refresh(camp)
+    assert camp.status == CampaignStatus.RUNNING.value
+
+    deliv1 = (await db_session.execute(
+        select(CampaignDelivery).where(
+            CampaignDelivery.campaign_id == camp_id,
+            CampaignDelivery.recipient_id == recip_id,
+        )
+    )).scalar_one()
+    assert deliv1.status == CampaignDeliveryStatus.SENT.value
+
+    # 2. Execute Step 2 (succeeds)
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync"):
+        due_res_2 = await CampaignDeliveryService.process_due_followup_steps(
+            db_factory=TestAsyncSessionLocal,
+            now_utc=deliv1.sent_at + timedelta(hours=2),
+        )
+    assert len(due_res_2) == 1
+    assert due_res_2[0]["status"] == "SENT"
+
+    # Refresh recipient
+    recip_res = await db_session.execute(select(CampaignRecipient).where(CampaignRecipient.id == recip_id))
+    recip = recip_res.scalar_one()
+    assert recip.current_step_number == 2
+    assert recip.next_step_due_at is not None
+
+    # 3. Execute Step 3 with SMTP failure (non-retryable error)
+    with patch(
+        "app.services.smtp.client.SMTPClient.send_email_sync",
+        side_effect=Exception("550 5.1.1 User unknown / permanent failure"),
+    ):
+        due_res_3 = await CampaignDeliveryService.process_due_followup_steps(
+            db_factory=TestAsyncSessionLocal,
+            now_utc=recip.next_step_due_at + timedelta(minutes=10),
+        )
+    assert len(due_res_3) == 1
+    assert due_res_3[0]["status"] == "FAILED"
+
+    # Verify recipient record
+    await db_session.refresh(recip)
+    assert recip.current_step_number == 3
+    assert recip.status == CampaignRecipientStatus.FAILED.value
+    assert recip.next_step_due_at is None
+
+    # Fetch campaign detail via CampaignService.get_campaign
+    camp_detail = await CampaignService.get_campaign(db_session, comp_id, camp_id)
+    assert camp_detail.status == CampaignStatus.COMPLETED.value
+
+    # Verify status counts, analytics, and drilldown consistency
+    status_counts = await CampaignService.get_recipient_status_counts(db_session, camp_id)
+    assert status_counts["failed_count"] == 1
+    assert status_counts["total"] == 1
+
+    analytics = await CampaignService.get_campaign_analytics(db_session, comp_id, camp_id)
+    assert analytics.failed_count == 1
+    step3_analytics = next(s for s in analytics.steps if s.step_number == 3)
+    assert step3_analytics.failed_count == 1
+    assert step3_analytics.sent_count == 0
+
+    drilldown_failed = await CampaignService.get_campaign_emails_drilldown(db_session, comp_id, camp_id, status="failed")
+    assert drilldown_failed["total"] == 1
+    assert len(drilldown_failed["items"]) == 1
+    assert drilldown_failed["items"][0]["recipient_id"] == recip_id
+
+
+@pytest.mark.asyncio
+async def test_transition_state_idempotent_when_already_in_target_status(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Calling transition_state to the same target status must be an idempotent no-op without raising 400."""
+    token = await register_and_login(async_client, "owner_idemp@test.com", "Idemp Owner")
+    comp_id = await create_company_helper(async_client, token, "Idemp Co")
+    account = await create_verified_email_account(db_session, comp_id, "sender_idemp@test.com")
+
+    create_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Idempotent Transition Campaign",
+            "email_account_id": account.id,
+            "subject": "Initial",
+            "body_text": "Body",
+        },
+    )
+    assert create_resp.status_code == 201
+    camp_id = create_resp.json()["id"]
+
+    # Transition DRAFT -> QUEUED -> RUNNING -> COMPLETED
+    c1 = await CampaignService.transition_state(db_session, comp_id, camp_id, CampaignStatus.QUEUED)
+    assert c1.status == CampaignStatus.QUEUED.value
+
+    c2 = await CampaignService.transition_state(db_session, comp_id, camp_id, CampaignStatus.RUNNING)
+    assert c2.status == CampaignStatus.RUNNING.value
+
+    c3 = await CampaignService.transition_state(db_session, comp_id, camp_id, CampaignStatus.COMPLETED)
+    assert c3.status == CampaignStatus.COMPLETED.value
+
+    # Calling transition_state to COMPLETED again must succeed idempotently without error
+    c4 = await CampaignService.transition_state(db_session, comp_id, camp_id, CampaignStatus.COMPLETED)
+    assert c4.status == CampaignStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_concurrent_completion_checks_are_safe_and_serialized(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Multiple concurrent finalization checks must serialize safely and finalize the campaign without errors."""
+    import asyncio
+    token = await register_and_login(async_client, "owner_concurr_fin@test.com", "Concurr Owner")
+    comp_id = await create_company_helper(async_client, token, "Concurr Co")
+    account = await create_verified_email_account(db_session, comp_id, "sender_concurr@test.com")
+
+    create_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Concurrent Finalize Campaign",
+            "email_account_id": account.id,
+            "subject": "Subject",
+            "body_text": "Body",
+        },
+    )
+    camp_id = create_resp.json()["id"]
+
+    recip_resp = await async_client.post(
+        f"/api/v1/companies/{comp_id}/campaigns/{camp_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "concurr@test.com"},
+    )
+    recip_id = recip_resp.json()["id"]
+
+    camp = (await db_session.execute(select(Campaign).where(Campaign.id == camp_id))).scalar_one()
+    camp.status = CampaignStatus.QUEUED.value
+    await db_session.commit()
+
+    with patch("app.services.smtp.client.SMTPClient.send_email_sync"):
+        await CampaignDeliveryService.execute_campaign(
+            campaign_id=camp_id,
+            company_id=comp_id,
+            db_factory=TestAsyncSessionLocal,
+        )
+
+    # Deliveries are finished, run two simultaneous check_and_finalize_campaign_completion tasks
+    status1, status2 = await asyncio.gather(
+        CampaignDeliveryService.check_and_finalize_campaign_completion(camp_id, db_factory=TestAsyncSessionLocal),
+        CampaignDeliveryService.check_and_finalize_campaign_completion(camp_id, db_factory=TestAsyncSessionLocal),
+    )
+    assert status1 == CampaignStatus.COMPLETED.value
+    assert status2 == CampaignStatus.COMPLETED.value
+
+

@@ -2,6 +2,7 @@ import csv
 from datetime import datetime, timedelta, timezone
 import io
 import json
+import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import select
@@ -29,6 +30,8 @@ from app.modules.campaigns.schemas import (
 )
 from app.modules.campaigns.service import CampaignService
 from app.modules.campaigns.suppression_service import SuppressionService
+
+logger = logging.getLogger(__name__)
 
 MAX_CSV_BYTES = 5 * 1024 * 1024  # 5 Megabytes practical file size limit
 

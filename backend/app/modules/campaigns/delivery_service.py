@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 from html import escape
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -119,8 +119,8 @@ def render_content_for_recipient(
     return rendered
 
 
-def is_retryable_delivery_error(exc: Optional[Exception]) -> bool:
-    """Classify whether a delivery exception is retryable based on the existing
+def is_retryable_delivery_error(exc: Optional[Union[Exception, str]]) -> bool:
+    """Classify whether a delivery exception or error message string is retryable based on the existing
     SMTP and EmailTransport exception taxonomy.
     
     Retryable:
@@ -137,6 +137,14 @@ def is_retryable_delivery_error(exc: Optional[Exception]) -> bool:
     - Generic permanent client errors
     """
     if not exc:
+        return False
+
+    if isinstance(exc, str):
+        lower_msg = exc.lower()
+        if any(perm in lower_msg for perm in ["authentication", "recipient rejected", "550", "551", "552", "553", "554", "user unknown", "mailbox unavailable"]):
+            return False
+        if any(term in lower_msg for term in ["connection refused", "timed out", "timeout", "network", "reset by peer", "temporarily unavailable", "connection reset", "broken pipe", "421", "450", "451", "452"]):
+            return True
         return False
 
     # Unpack original exception from HTTPException wrapper if attached
@@ -1157,6 +1165,7 @@ class CampaignDeliveryService:
                     selectinload(CampaignDelivery.campaign).selectinload(Campaign.company),
                     selectinload(CampaignDelivery.campaign).selectinload(Campaign.attachments),
                     selectinload(CampaignDelivery.recipient),
+                    selectinload(CampaignDelivery.step),
                 )
                 .where(CampaignDelivery.id == delivery_id)
                 .with_for_update(skip_locked=True)
@@ -1248,13 +1257,21 @@ class CampaignDeliveryService:
             await db.commit()
 
             # Prepare send data
-            camp_subject = campaign.subject
-            camp_body_text = campaign.body_text
-            camp_body_html = campaign.body_html
+            step = delivery.step
+            if step and step.step_number >= 2:
+                camp_subject = step.subject or f"Re: {campaign.subject}"
+                camp_body_text = step.body_text
+                camp_body_html = step.body_html
+            else:
+                camp_subject = campaign.subject
+                camp_body_text = campaign.body_text
+                camp_body_html = campaign.body_html
             camp_attachment_ids = [att.id for att in campaign.attachments]
             recip_email = recipient.email
             attempt_number = delivery.attempt_count
             camp_company_name = (campaign.company.name if campaign.company and campaign.company.name else "") or (sender_account.name if sender_account and sender_account.name else "")
+            delivery_thread_id = delivery.thread_id
+            delivery_msg_id = delivery.message_id
 
         # ---------------------------------------------------------------------
         # Step 2: Render Content & Transmit (NO DB LOCK HELD)
@@ -1305,6 +1322,8 @@ class CampaignDeliveryService:
             body_html=rendered_body_html,
             campaign_attachment_ids=camp_attachment_ids if camp_attachment_ids else None,
             unsubscribe_url=unsub_url,
+            thread_id=delivery_thread_id,
+            in_reply_to=delivery_msg_id,
         )
 
         send_success = False
@@ -1364,18 +1383,36 @@ class CampaignDeliveryService:
                         recip.current_step_number = step_num
                         recip.status = CampaignRecipientStatus.SENT.value
 
-                        next_step_stmt = select(CampaignStep).where(
-                            CampaignStep.campaign_id == delivery.campaign_id,
-                            CampaignStep.step_number == step_num + 1,
-                            CampaignStep.is_active == True,
+                        subseq_stmt = (
+                            select(CampaignStep)
+                            .where(
+                                CampaignStep.campaign_id == delivery.campaign_id,
+                                CampaignStep.step_number > step_num,
+                                CampaignStep.is_active == True,
+                            )
+                            .order_by(CampaignStep.step_number.asc())
                         )
-                        next_step = (await db.execute(next_step_stmt)).scalar_one_or_none()
-                        if next_step:
-                            recip.next_step_due_at = delivery.sent_at + timedelta(hours=next_step.delay_hours)
+                        subseq_steps = (await db.execute(subseq_stmt)).scalars().all()
+                        recip_tags = set(t.strip().lower() for t in (recip.tags or []))
+                        next_matching_subseq = None
+                        for candidate_subseq in subseq_steps:
+                            s_tags = [t.strip().lower() for t in (candidate_subseq.target_tags or []) if t.strip()]
+                            if len(s_tags) == 0 or any(t in recip_tags for t in s_tags):
+                                next_matching_subseq = candidate_subseq
+                                break
+
+                        if next_matching_subseq:
+                            recip.next_step_due_at = delivery.sent_at + timedelta(hours=next_matching_subseq.delay_hours)
                         else:
                             recip.next_step_due_at = None
+                            recip.status = CampaignRecipientStatus.COMPLETED.value
 
                 await db.commit()
+
+                try:
+                    await cls.check_and_finalize_campaign_completion(campaign_id=delivery.campaign_id, db_factory=db_factory)
+                except Exception as fin_err:
+                    logger.warning("Failed to check campaign completion after retry success: %s", fin_err)
 
                 logger.info("Successfully retried delivery %d (attempt %d).", delivery_id, attempt_number)
                 return {
@@ -1392,10 +1429,26 @@ class CampaignDeliveryService:
                     delivery.email_id = failed_email_record.id
                     delivery.thread_id = failed_email_record.thread_id
                     delivery.message_id = failed_email_record.message_id
+
+                max_retries = getattr(settings, "MAX_CAMPAIGN_DELIVERY_RETRIES", 3)
+                is_retryable = is_retryable_delivery_error(caught_exc) and delivery.attempt_count < max_retries
+
+                if delivery.recipient_id:
+                    recip_stmt = select(CampaignRecipient).where(CampaignRecipient.id == delivery.recipient_id)
+                    recip_res = await db.execute(recip_stmt)
+                    recip = recip_res.scalar_one_or_none()
+                    if recip:
+                        step_stmt = select(CampaignStep).where(CampaignStep.id == delivery.step_id)
+                        deliv_step = (await db.execute(step_stmt)).scalar_one_or_none()
+                        step_num = deliv_step.step_number if deliv_step else 1
+                        recip.current_step_number = step_num
+                        recip.next_step_due_at = None
+                        if not is_retryable:
+                            recip.status = CampaignRecipientStatus.FAILED.value
                 await db.commit()
 
                 # If still retryable and below max attempts, schedule subsequent retry
-                if is_retryable_delivery_error(caught_exc) and delivery.attempt_count < max_retries:
+                if is_retryable:
                     try:
                         cls.schedule_delivery_retry(
                             delivery_id=delivery_id,
@@ -1404,6 +1457,11 @@ class CampaignDeliveryService:
                         )
                     except Exception as sched_err:
                         logger.warning("Failed to schedule subsequent retry: %s", sched_err)
+                else:
+                    try:
+                        await cls.check_and_finalize_campaign_completion(campaign_id=delivery.campaign_id, db_factory=db_factory)
+                    except Exception as fin_err:
+                        logger.warning("Failed to check campaign completion after terminal retry failure: %s", fin_err)
 
                 return {
                     "status": "FAILED",
@@ -1750,6 +1808,7 @@ class CampaignDeliveryService:
             next_step_number = 1
             sender_account = None
             send_req = None
+            camp_company_id = None
 
             async with db_factory() as db:
                 recip_stmt = (
@@ -1768,6 +1827,7 @@ class CampaignDeliveryService:
                     continue
 
                 campaign = recipient.campaign
+                camp_company_id = campaign.company_id
 
                 # Re-verify eligibility under lock
                 if (
@@ -1993,6 +2053,8 @@ class CampaignDeliveryService:
                     status=CampaignDeliveryStatus.SENDING.value,
                     attempt_count=1,
                     last_attempt_at=current_time,
+                    thread_id=prev_delivery.thread_id,
+                    message_id=prev_delivery.message_id,
                 )
                 db.add(followup_delivery)
                 await db.commit()
@@ -2057,6 +2119,7 @@ class CampaignDeliveryService:
             # d. Transmit email outside of the DB lock
             send_success = False
             sent_email_record: Optional[Email] = None
+            failed_email_record: Optional[Email] = None
             caught_exc: Optional[Exception] = None
             error_detail: Optional[str] = None
 
@@ -2073,6 +2136,7 @@ class CampaignDeliveryService:
                     send_success = False
                     caught_exc = exc
                     error_detail = getattr(exc, "detail", str(exc))
+                    failed_email_record = getattr(exc, "email_record", None)
                     logger.warning("Follow-up send failed for delivery %d: %s", delivery_id, error_detail)
 
             # e. Update delivery and recipient status
@@ -2136,9 +2200,34 @@ class CampaignDeliveryService:
                     else:
                         deliv_obj.status = CampaignDeliveryStatus.FAILED.value
                         deliv_obj.error_message = str(error_detail or "Follow-up send failure")
+                        if failed_email_record:
+                            deliv_obj.email_id = failed_email_record.id
+                            deliv_obj.thread_id = failed_email_record.thread_id
+                            deliv_obj.message_id = failed_email_record.message_id
+                        elif prev_delivery and prev_delivery.thread_id:
+                            deliv_obj.thread_id = prev_delivery.thread_id
+
+                        max_retries = getattr(settings, "MAX_CAMPAIGN_DELIVERY_RETRIES", 3)
+                        is_retryable = is_retryable_delivery_error(caught_exc) and deliv_obj.attempt_count < max_retries
+
                         if recip_obj:
+                            recip_obj.current_step_number = next_step_number
                             recip_obj.next_step_due_at = None
+                            if not is_retryable:
+                                recip_obj.status = CampaignRecipientStatus.FAILED.value
+
                         await db.commit()
+
+                        if is_retryable:
+                            try:
+                                cls.schedule_delivery_retry(
+                                    delivery_id=delivery_id,
+                                    company_id=camp_company_id,
+                                    attempt_count=deliv_obj.attempt_count,
+                                )
+                            except Exception as sched_err:
+                                logger.warning("Failed to schedule retry for follow-up delivery %d: %s", delivery_id, sched_err)
+
                         results.append({
                             "delivery_id": delivery_id,
                             "recipient_id": recip_id,
@@ -2193,13 +2282,78 @@ class CampaignDeliveryService:
         db: AsyncSession,
         campaign_id: int,
     ) -> Optional[str]:
-        campaign = await db.get(Campaign, campaign_id)
+        # Row-level lock on campaign so concurrent completion checks serialize safely
+        stmt = select(Campaign).where(Campaign.id == campaign_id).with_for_update()
+        res = await db.execute(stmt)
+        campaign = res.scalar_one_or_none()
         if not campaign:
             return None
 
         # Only RUNNING campaigns can naturally complete
         if campaign.status != CampaignStatus.RUNNING.value:
             return campaign.status
+
+        max_retries = getattr(settings, "MAX_CAMPAIGN_DELIVERY_RETRIES", 3)
+        base_backoff = getattr(settings, "CAMPAIGN_RETRY_BACKOFF_SECONDS", 60)
+        max_retry_window_sec = int(base_backoff * (2 ** max(0, max_retries - 1))) + 120
+        now_utc = datetime.now(timezone.utc)
+        recent_threshold = now_utc - timedelta(seconds=max_retry_window_sec)
+
+        # 0a. Check for active retries in progress or scheduled
+        active_retry_stmt = (
+            select(CampaignDelivery)
+            .where(
+                CampaignDelivery.campaign_id == campaign_id,
+                CampaignDelivery.status == CampaignDeliveryStatus.FAILED.value,
+                CampaignDelivery.attempt_count < max_retries,
+                CampaignDelivery.last_attempt_at >= recent_threshold,
+            )
+        )
+        active_retries = (await db.execute(active_retry_stmt)).scalars().all()
+        has_pending_retries = any(is_retryable_delivery_error(d.error_message) for d in active_retries)
+        if has_pending_retries:
+            logger.info("Campaign %d has active/scheduled delivery retries. Preserving RUNNING state.", campaign_id)
+            return campaign.status
+
+        # 0b. Reconcile recipients whose latest delivery failed or bounced
+        deliv_stmt = (
+            select(CampaignDelivery)
+            .join(CampaignStep, CampaignDelivery.step_id == CampaignStep.id)
+            .where(CampaignDelivery.campaign_id == campaign_id)
+            .order_by(CampaignDelivery.recipient_id, CampaignStep.step_number.desc(), CampaignDelivery.id.desc())
+        )
+        deliv_res = await db.execute(deliv_stmt)
+        all_delivs = deliv_res.scalars().all()
+
+        latest_deliv_by_recip = {}
+        for d in all_delivs:
+            if d.recipient_id not in latest_deliv_by_recip:
+                latest_deliv_by_recip[d.recipient_id] = d
+
+        for recip_id, latest_deliv in latest_deliv_by_recip.items():
+            if latest_deliv.status == CampaignDeliveryStatus.FAILED.value:
+                is_active_retry = (
+                    latest_deliv.attempt_count < max_retries
+                    and latest_deliv.last_attempt_at is not None
+                    and latest_deliv.last_attempt_at >= recent_threshold
+                    and is_retryable_delivery_error(latest_deliv.error_message)
+                )
+                if not is_active_retry:
+                    recip = await db.get(CampaignRecipient, recip_id)
+                    if recip and recip.status not in (
+                        CampaignRecipientStatus.STOPPED.value,
+                        CampaignRecipientStatus.BOUNCED.value,
+                    ):
+                        recip.status = CampaignRecipientStatus.FAILED.value
+                        deliv_step = await db.get(CampaignStep, latest_deliv.step_id)
+                        if deliv_step:
+                            recip.current_step_number = deliv_step.step_number
+                        recip.next_step_due_at = None
+            elif latest_deliv.status == CampaignDeliveryStatus.BOUNCED.value:
+                recip = await db.get(CampaignRecipient, recip_id)
+                if recip and recip.status != CampaignRecipientStatus.BOUNCED.value:
+                    recip.status = CampaignRecipientStatus.BOUNCED.value
+                    recip.next_step_due_at = None
 
         # 1. Check for remaining initial recipients
         remaining_pending = await db.scalar(
@@ -2245,19 +2399,46 @@ class CampaignDeliveryService:
         ) or 1
 
         if max_step >= 2:
-            eligible_for_followups = await db.scalar(
-                select(func.count(CampaignRecipient.id)).where(
-                    CampaignRecipient.campaign_id == campaign_id,
-                    CampaignRecipient.status.in_([
-                        CampaignRecipientStatus.SENT.value,
-                        CampaignRecipientStatus.ACTIVE.value,
-                    ]),
-                    CampaignRecipient.stopped_reason.is_(None),
-                    CampaignRecipient.replied_at.is_(None),
-                    CampaignRecipient.current_step_number < max_step,
+            candidate_recips_stmt = select(CampaignRecipient).where(
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.status.in_([
+                    CampaignRecipientStatus.SENT.value,
+                    CampaignRecipientStatus.ACTIVE.value,
+                ]),
+                CampaignRecipient.stopped_reason.is_(None),
+                CampaignRecipient.replied_at.is_(None),
+                CampaignRecipient.current_step_number < max_step,
+            )
+            candidate_recips = (await db.execute(candidate_recips_stmt)).scalars().all()
+            eligible_count = 0
+            for r in candidate_recips:
+                future_steps_stmt = select(CampaignStep).where(
+                    CampaignStep.campaign_id == campaign_id,
+                    CampaignStep.step_number > r.current_step_number,
+                    CampaignStep.is_active == True,
                 )
-            ) or 0
-            if eligible_for_followups > 0:
+                future_steps = (await db.execute(future_steps_stmt)).scalars().all()
+                r_tags = set(t.strip().lower() for t in (r.tags or []))
+                for fs in future_steps:
+                    fs_tags = [t.strip().lower() for t in (fs.target_tags or []) if t.strip()]
+                    if len(fs_tags) == 0 or any(t in r_tags for t in fs_tags):
+                        existing_d = await db.scalar(
+                            select(func.count(CampaignDelivery.id)).where(
+                                CampaignDelivery.campaign_id == campaign_id,
+                                CampaignDelivery.recipient_id == r.id,
+                                CampaignDelivery.step_id == fs.id,
+                            )
+                        )
+                        if not existing_d:
+                            eligible_count += 1
+                            break
+
+            if eligible_count > 0:
+                logger.info(
+                    "Campaign %d has %d recipients eligible for future follow-up steps. Preserving RUNNING state.",
+                    campaign_id,
+                    eligible_count,
+                )
                 return campaign.status
 
         # Check if any sends succeeded
@@ -2270,7 +2451,7 @@ class CampaignDeliveryService:
 
         target_status = CampaignStatus.COMPLETED if total_sent > 0 else CampaignStatus.FAILED
 
-        # Mark finished recipients as COMPLETED
+        # Mark finished recipients as COMPLETED or FAILED based on delivery history
         if target_status == CampaignStatus.COMPLETED:
             recip_stmt = select(CampaignRecipient).where(
                 CampaignRecipient.campaign_id == campaign_id,
@@ -2283,7 +2464,19 @@ class CampaignDeliveryService:
             )
             recips_res = await db.execute(recip_stmt)
             for recip in recips_res.scalars().all():
-                recip.status = CampaignRecipientStatus.COMPLETED.value
+                has_bad_deliv = await db.scalar(
+                    select(func.count(CampaignDelivery.id)).where(
+                        CampaignDelivery.recipient_id == recip.id,
+                        CampaignDelivery.status.in_([
+                            CampaignDeliveryStatus.FAILED.value,
+                            CampaignDeliveryStatus.BOUNCED.value,
+                        ]),
+                    )
+                )
+                if has_bad_deliv:
+                    recip.status = CampaignRecipientStatus.FAILED.value
+                else:
+                    recip.status = CampaignRecipientStatus.COMPLETED.value
 
         campaign = await CampaignService.transition_state(
             db=db,

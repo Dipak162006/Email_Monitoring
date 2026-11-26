@@ -683,8 +683,8 @@ export const CampaignDetailPage: React.FC = () => {
   const totalTarget = campaign.recipient_count || 0;
   const sentCount = campaign.sent_count ?? 0;
   const repliedCount = campaign.replied_count ?? 0;
-  const bouncedCount = campaign.bounced_count ?? 0;
-  const failedCount = campaign.failed_count ?? 0;
+  const bouncedCount = analytics?.bounced_count ?? campaign.bounced_count ?? 0;
+  const failedCount = analytics?.failed_count ?? campaign.failed_count ?? 0;
   const suppressedCount = campaign.suppressed_count ?? 0;
   const pendingCount =
     campaign.pending_count !== undefined
@@ -1784,6 +1784,12 @@ export const CampaignDetailPage: React.FC = () => {
                             <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
                             <span>Bounced {bncRate}%</span>
                           </span>
+                          {stepItem.failed_count > 0 && (
+                            <span className="flex items-center gap-1 font-medium text-amber-700">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                              <span>Failed {stepItem.failed_count}</span>
+                            </span>
+                          )}
                         </div>
                       </div>
                     );
