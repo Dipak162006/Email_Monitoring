@@ -30,6 +30,8 @@ from app.modules.campaigns.schemas import (
     CampaignRecipientBulkCreateResponse,
     CampaignRecipientCreate,
     CampaignRecipientImportResponse,
+    CampaignRecipientListImportRequest,
+    CampaignRecipientListImportResponse,
     CampaignRecipientRead,
     CampaignRecipientRescheduleRequest,
     CampaignRecipientStopRequest,
@@ -890,6 +892,39 @@ async def import_recipients_csv(
         company_id=company_id,
         campaign_id=campaign_id,
         file=file,
+    )
+
+
+@router.post(
+    "/{campaign_id}/recipients/import-lists",
+    response_model=CampaignRecipientListImportResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Import contacts from reusable recipient lists into a draft campaign (Admin/Owner only)",
+)
+@router.post(
+    "/{campaign_id}/recipients/import-lists/",
+    response_model=CampaignRecipientListImportResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def import_recipients_from_lists(
+    company_id: int,
+    campaign_id: int,
+    import_in: CampaignRecipientListImportRequest,
+    membership: CompanyUser = Depends(require_company_admin_or_owner),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignRecipientListImportResponse:
+    """Import contacts from one or more authorized reusable recipient lists into a DRAFT campaign.
+    
+    Copies contact data (snapshot copy) into CampaignRecipient records with deduplication across
+    selected lists and existing campaign audience.
+    Requires OWNER or ADMIN role in the company.
+    """
+    return await CampaignRecipientService.import_from_recipient_lists(
+        db=db,
+        company_id=company_id,
+        campaign_id=campaign_id,
+        list_ids=import_in.list_ids,
     )
 
 

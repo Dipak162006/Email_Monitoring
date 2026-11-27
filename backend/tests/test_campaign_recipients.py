@@ -623,3 +623,184 @@ async def test_recipient_status_is_read_only_via_crud(async_client: AsyncClient)
         json={"status": "SENT"},
     )
     assert resp_patch.status_code == 422
+
+
+# =============================================================================
+# 9. Recipient List Integration Tests (Milestone R4)
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_import_recipients_from_multiple_lists_and_snapshot(async_client: AsyncClient):
+    """Test importing contacts from multiple recipient lists with deduplication and snapshot independence."""
+    token = await register_and_login(async_client, "owner_list_import@test.com")
+    company_id = await create_company_helper(async_client, token, "List Import Co")
+    account_id = await create_email_account_helper(async_client, token, company_id)
+    campaign_id = await create_draft_campaign_helper(async_client, token, company_id, account_id)
+
+    # 1. Create Recipient List A
+    l1_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/recipient-lists",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Audience A", "description": "Key accounts"},
+    )
+    assert l1_resp.status_code == 201
+    l1_id = l1_resp.json()["id"]
+
+    await async_client.post(
+        f"/api/v1/companies/{company_id}/recipient-lists/{l1_id}/members",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "alice@company.org", "first_name": "Alice", "last_name": "A"},
+    )
+    await async_client.post(
+        f"/api/v1/companies/{company_id}/recipient-lists/{l1_id}/members",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "bob@company.org", "first_name": "Bob", "last_name": "B"},
+    )
+
+    # 2. Create Recipient List B (shares bob@company.org with List A, has charlie@company.org)
+    l2_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/recipient-lists",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Audience B", "description": "Growth contacts"},
+    )
+    assert l2_resp.status_code == 201
+    l2_id = l2_resp.json()["id"]
+
+    await async_client.post(
+        f"/api/v1/companies/{company_id}/recipient-lists/{l2_id}/members",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "BOB@COMPANY.ORG", "first_name": "Bob", "last_name": "DuplicateInList"},
+    )
+    await async_client.post(
+        f"/api/v1/companies/{company_id}/recipient-lists/{l2_id}/members",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "charlie@company.org", "first_name": "Charlie", "last_name": "C"},
+    )
+
+    # 3. Pre-add alice@company.org to Campaign directly (simulating pre-existing manual recipient)
+    pre_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{campaign_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": "alice@company.org", "first_name": "Alice", "last_name": "Existing"},
+    )
+    assert pre_resp.status_code == 201
+
+    # 4. Import from List A and List B simultaneously
+    import_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{campaign_id}/recipients/import-lists",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"list_ids": [l1_id, l2_id]},
+    )
+    assert import_resp.status_code == 200
+    res_data = import_resp.json()
+
+    # Total members across both lists: 4 (2 in A + 2 in B)
+    assert res_data["total_contacts_processed"] == 4
+    # Cross-list duplicate: bob@company.org was in both List A and B -> 1 skipped
+    assert res_data["skipped_list_duplicates_count"] == 1
+    # Existing in campaign: alice@company.org was already in campaign -> 1 skipped
+    assert res_data["skipped_existing_count"] == 1
+    # Successfully inserted: bob@company.org and charlie@company.org -> 2 inserted
+    assert res_data["inserted_count"] == 2
+
+    # 5. Verify total recipients in campaign is now 3 (alice + bob + charlie)
+    camp_recipients_resp = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns/{campaign_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert camp_recipients_resp.status_code == 200
+    camp_recipients = camp_recipients_resp.json()
+    emails = {r["email"] for r in camp_recipients}
+    assert emails == {"alice@company.org", "bob@company.org", "charlie@company.org"}
+
+    # 6. Verify snapshot independence: delete List A and verify campaign recipients remain intact
+    del_l1 = await async_client.delete(
+        f"/api/v1/companies/{company_id}/recipient-lists/{l1_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert del_l1.status_code == 204
+
+    # Campaign recipients must still be 3
+    camp_recipients_resp2 = await async_client.get(
+        f"/api/v1/companies/{company_id}/campaigns/{campaign_id}/recipients",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert len(camp_recipients_resp2.json()) == 3
+
+
+@pytest.mark.asyncio
+async def test_import_recipients_from_lists_security_and_isolation(async_client: AsyncClient):
+    """Test cross-company list import rejection and role authorization."""
+    token_c1 = await register_and_login(async_client, "owner_sec_c1@test.com")
+    c1_id = await create_company_helper(async_client, token_c1, "Sec Co 1")
+    acc1_id = await create_email_account_helper(async_client, token_c1, c1_id)
+    camp1_id = await create_draft_campaign_helper(async_client, token_c1, c1_id, acc1_id)
+
+    token_c2 = await register_and_login(async_client, "owner_sec_c2@test.com")
+    c2_id = await create_company_helper(async_client, token_c2, "Sec Co 2")
+
+    # Create list in Company 2
+    l_c2_resp = await async_client.post(
+        f"/api/v1/companies/{c2_id}/recipient-lists",
+        headers={"Authorization": f"Bearer {token_c2}"},
+        json={"name": "Co 2 Secret List"},
+    )
+    l_c2_id = l_c2_resp.json()["id"]
+
+    # Attempting to import Company 2's list into Company 1's campaign must return 404
+    resp_cross = await async_client.post(
+        f"/api/v1/companies/{c1_id}/campaigns/{camp1_id}/recipients/import-lists",
+        headers={"Authorization": f"Bearer {token_c1}"},
+        json={"list_ids": [l_c2_id]},
+    )
+    assert resp_cross.status_code == 404
+
+    # Member role check: Member in Co 1 must receive 403 Forbidden
+    token_member = await register_and_login(async_client, "member_sec_c1@test.com")
+    await add_company_member_helper(async_client, token_c1, c1_id, "member_sec_c1@test.com", "MEMBER")
+
+    # Create legitimate list in Co 1
+    l_c1_resp = await async_client.post(
+        f"/api/v1/companies/{c1_id}/recipient-lists",
+        headers={"Authorization": f"Bearer {token_c1}"},
+        json={"name": "Co 1 Valid List"},
+    )
+    l_c1_id = l_c1_resp.json()["id"]
+
+    resp_forbidden = await async_client.post(
+        f"/api/v1/companies/{c1_id}/campaigns/{camp1_id}/recipients/import-lists",
+        headers={"Authorization": f"Bearer {token_member}"},
+        json={"list_ids": [l_c1_id]},
+    )
+    assert resp_forbidden.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_import_recipients_from_lists_status_restriction(async_client: AsyncClient, db_session: AsyncSession):
+    """Test that recipient lists can only be imported when campaign is in DRAFT status."""
+    token = await register_and_login(async_client, "owner_status_rest@test.com")
+    company_id = await create_company_helper(async_client, token, "Status Rest Co")
+    account_id = await create_email_account_helper(async_client, token, company_id)
+    campaign_id = await create_draft_campaign_helper(async_client, token, company_id, account_id)
+
+    # Create a recipient list
+    l_resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/recipient-lists",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Audience Test"},
+    )
+    list_id = l_resp.json()["id"]
+
+    # Transition campaign to RUNNING directly in DB
+    camp = await db_session.get(Campaign, campaign_id)
+    camp.status = CampaignStatus.RUNNING.value
+    await db_session.commit()
+
+    # Attempt to import into RUNNING campaign must return 400 Bad Request
+    resp = await async_client.post(
+        f"/api/v1/companies/{company_id}/campaigns/{campaign_id}/recipients/import-lists",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"list_ids": [list_id]},
+    )
+    assert resp.status_code == 400
+    assert "DRAFT" in resp.json()["detail"]

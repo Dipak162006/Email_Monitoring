@@ -26,6 +26,8 @@ import { CreateCampaignPage } from "../pages/CreateCampaignPage";
 import { CampaignDetailPage } from "../pages/CampaignDetailPage";
 import { CampaignRecipientsPage } from "../pages/CampaignRecipientsPage";
 import { CampaignEmailsPage } from "../pages/CampaignEmailsPage";
+import { RecipientListsPage } from "../pages/RecipientListsPage";
+import { RecipientListDetailPage } from "../pages/RecipientListDetailPage";
 import { NotFoundPage } from "../pages/NotFoundPage";
 
 export function AppRoutes() {
@@ -57,6 +59,8 @@ export function AppRoutes() {
             <Route path="/campaigns/:campaignId/edit" element={<CreateCampaignPage />} />
             <Route path="/campaigns/:campaignId/recipients" element={<CampaignRecipientsPage />} />
             <Route path="/campaigns/:campaignId/emails" element={<CampaignEmailsPage />} />
+            <Route path="/recipient-lists" element={<RecipientListsPage />} />
+            <Route path="/recipient-lists/:id" element={<RecipientListDetailPage />} />
 
             {/* Role-Protected Admin / Owner Routes */}
             <Route element={<RoleRequiredRoute allowedRoles={["OWNER", "ADMIN"]} />}>

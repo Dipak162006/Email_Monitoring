@@ -514,6 +514,22 @@ class CampaignRecipientImportResponse(BaseModel):
     invalid_rows: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class CampaignRecipientListImportRequest(BaseModel):
+    """Payload to import contacts from one or more reusable recipient lists."""
+    list_ids: List[int] = Field(..., min_length=1, description="List of recipient list IDs to import")
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CampaignRecipientListImportResponse(BaseModel):
+    """Response schema for importing contacts from recipient lists into a campaign."""
+    total_contacts_processed: int
+    inserted_count: int
+    skipped_existing_count: int
+    skipped_list_duplicates_count: int
+    recipients: List[CampaignRecipientRead] = Field(default_factory=list)
+
+
 # =============================================================================
 # Campaign Suppression Schemas (C4)
 # =============================================================================

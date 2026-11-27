@@ -22,6 +22,7 @@ from app.modules.campaigns.schemas import (
     CampaignRecipientBulkCreateResponse,
     CampaignRecipientCreate,
     CampaignRecipientImportResponse,
+    CampaignRecipientListImportResponse,
     CampaignRecipientRead,
     CampaignRecipientUpdate,
     normalize_and_validate_email,
@@ -30,6 +31,7 @@ from app.modules.campaigns.schemas import (
 )
 from app.modules.campaigns.service import CampaignService
 from app.modules.campaigns.suppression_service import SuppressionService
+from app.modules.recipient_lists.models import RecipientList, RecipientListMember
 
 logger = logging.getLogger(__name__)
 
@@ -945,3 +947,103 @@ class CampaignRecipientService:
                         unique_tags.add(t.strip().lower())
 
         return sorted(list(unique_tags))
+
+    @staticmethod
+    async def import_from_recipient_lists(
+        db: AsyncSession,
+        company_id: int,
+        campaign_id: int,
+        list_ids: List[int],
+    ) -> CampaignRecipientListImportResponse:
+        """Import contacts from one or more authorized reusable recipient lists into a DRAFT campaign.
+        
+        Copies contact data (snapshot copy) into CampaignRecipient records with deduplication across
+        selected lists and existing campaign audience.
+        Requires campaign to be in DRAFT status and verifies company ownership on campaign and all lists.
+        """
+        await CampaignRecipientService.get_draft_campaign(db, company_id, campaign_id)
+
+        unique_list_ids = list(dict.fromkeys(list_ids))
+        if not unique_list_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="At least one recipient list ID must be provided.",
+            )
+
+        # Verify all requested lists exist and belong to the same authorized company
+        stmt_lists = select(RecipientList).where(
+            RecipientList.id.in_(unique_list_ids),
+            RecipientList.company_id == company_id,
+        )
+        found_lists = (await db.scalars(stmt_lists)).all()
+        found_ids = {l.id for l in found_lists}
+        missing_ids = set(unique_list_ids) - found_ids
+        if missing_ids:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"One or more recipient lists not found or access denied: {sorted(missing_ids)}",
+            )
+
+        # Query all members of these lists ordered by list_id and creation time
+        stmt_members = select(RecipientListMember).where(
+            RecipientListMember.list_id.in_(unique_list_ids)
+        ).order_by(RecipientListMember.list_id, RecipientListMember.created_at)
+        members = (await db.scalars(stmt_members)).all()
+
+        total_contacts_processed = len(members)
+        seen_in_import: Set[str] = set()
+        candidates: List[Tuple[str, Optional[str], Optional[str]]] = []
+        skipped_list_duplicates_count = 0
+
+        for m in members:
+            try:
+                norm_email = normalize_and_validate_email(m.email)
+            except ValueError:
+                continue
+
+            if norm_email in seen_in_import:
+                skipped_list_duplicates_count += 1
+            else:
+                seen_in_import.add(norm_email)
+                candidates.append((norm_email, m.first_name, m.last_name))
+
+        # Check existing recipients already in this campaign
+        existing_in_campaign: Set[str] = set()
+        if seen_in_import:
+            stmt_exist = select(CampaignRecipient.email).where(
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.email.in_(seen_in_import),
+            )
+            existing_in_campaign = set((await db.scalars(stmt_exist)).all())
+
+        new_recipients: List[CampaignRecipient] = []
+        skipped_existing_count = 0
+
+        for norm_email, fn, ln in candidates:
+            if norm_email in existing_in_campaign:
+                skipped_existing_count += 1
+            else:
+                new_recipients.append(
+                    CampaignRecipient(
+                        campaign_id=campaign_id,
+                        email=norm_email,
+                        first_name=fn,
+                        last_name=ln,
+                        status=CampaignRecipientStatus.PENDING.value,
+                        custom_variables={},
+                    )
+                )
+
+        if new_recipients:
+            db.add_all(new_recipients)
+            await db.commit()
+            for r in new_recipients:
+                await db.refresh(r)
+
+        return CampaignRecipientListImportResponse(
+            total_contacts_processed=total_contacts_processed,
+            inserted_count=len(new_recipients),
+            skipped_existing_count=skipped_existing_count,
+            skipped_list_duplicates_count=skipped_list_duplicates_count,
+            recipients=[CampaignRecipientRead.model_validate(r) for r in new_recipients],
+        )

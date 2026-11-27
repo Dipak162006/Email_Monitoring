@@ -187,10 +187,10 @@ async def clean_database():
         ]:
             await conn.execute(text(f"ALTER TABLE email_tracking_tokens DROP CONSTRAINT IF EXISTS {fk};"))
             await conn.execute(text(f"ALTER TABLE email_tracking_events DROP CONSTRAINT IF EXISTS {fk};"))
-        await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments, campaigns, campaign_steps, campaign_recipients, campaign_deliveries, suppression_list, campaign_attachments, email_tracking_tokens, email_tracking_events, tracking_event_quarantine RESTART IDENTITY CASCADE;"))
+        await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments, campaigns, campaign_steps, campaign_recipients, campaign_deliveries, suppression_list, campaign_attachments, email_tracking_tokens, email_tracking_events, tracking_event_quarantine, recipient_lists, recipient_list_members RESTART IDENTITY CASCADE;"))
     yield
     async with test_async_engine.begin() as conn:
-        await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments, campaigns, campaign_steps, campaign_recipients, campaign_deliveries, suppression_list, campaign_attachments, email_tracking_tokens, email_tracking_events, tracking_event_quarantine RESTART IDENTITY CASCADE;"))
+        await conn.execute(text("TRUNCATE TABLE users, companies, company_users, company_invitations, domains, email_accounts, email_account_access, emails, email_templates, email_signatures, email_attachments, campaigns, campaign_steps, campaign_recipients, campaign_deliveries, suppression_list, campaign_attachments, email_tracking_tokens, email_tracking_events, tracking_event_quarantine, recipient_lists, recipient_list_members RESTART IDENTITY CASCADE;"))
     await test_async_engine.dispose()
 
 

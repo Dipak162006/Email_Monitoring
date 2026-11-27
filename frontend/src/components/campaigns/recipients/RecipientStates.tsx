@@ -1,5 +1,5 @@
 import React from "react";
-import { UserX, SearchX, AlertCircle, RefreshCw, Plus, UploadCloud } from "lucide-react";
+import { UserX, Users, SearchX, AlertCircle, RefreshCw, Plus, UploadCloud } from "lucide-react";
 
 export const RecipientSkeleton: React.FC = () => {
   return (
@@ -16,7 +16,7 @@ export const RecipientSkeleton: React.FC = () => {
 
 interface RecipientEmptyAudienceProps {
   isEditable: boolean;
-  onSelectTab: (tab: "manual" | "csv") => void;
+  onSelectTab: (tab: "lists" | "manual" | "csv") => void;
 }
 
 export const RecipientEmptyAudience: React.FC<RecipientEmptyAudienceProps> = ({
@@ -30,17 +30,25 @@ export const RecipientEmptyAudience: React.FC<RecipientEmptyAudienceProps> = ({
       </div>
       <h3 className="text-sm font-bold text-slate-900">No recipients in campaign audience</h3>
       <p className="text-xs text-slate-500 mt-1 max-w-sm leading-relaxed">
-        This campaign audience list is currently empty. Add individual contacts or bulk-import a CSV to populate records.
+        This campaign audience list is currently empty. Import reusable recipient lists, add individual contacts, or bulk-import a CSV to populate records.
       </p>
 
       {isEditable && (
-        <div className="mt-5 flex items-center gap-2.5">
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => onSelectTab("lists")}
+            className="px-3.5 py-2 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors shadow-2xs flex items-center gap-1.5"
+          >
+            <Users className="h-4 w-4" />
+            <span>Select Recipient Lists</span>
+          </button>
           <button
             type="button"
             onClick={() => onSelectTab("csv")}
-            className="px-3.5 py-2 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors shadow-2xs flex items-center gap-1.5"
+            className="px-3.5 py-2 rounded-lg bg-white border border-slate-200 text-slate-700 text-xs font-medium hover:bg-slate-50 transition-colors shadow-2xs flex items-center gap-1.5"
           >
-            <UploadCloud className="h-4 w-4" />
+            <UploadCloud className="h-4 w-4 text-slate-500" />
             <span>Import CSV</span>
           </button>
           <button

@@ -217,6 +217,18 @@ export interface CampaignRecipientImportResponse {
   }>;
 }
 
+export interface CampaignRecipientListImportRequest {
+  list_ids: number[];
+}
+
+export interface CampaignRecipientListImportResponse {
+  total_contacts_processed: number;
+  inserted_count: number;
+  skipped_existing_count: number;
+  skipped_list_duplicates_count: number;
+  recipients?: CampaignRecipient[];
+}
+
 export interface CampaignRecipientListParams {
   status?: string;
   search?: string;

@@ -20,6 +20,7 @@ import app.modules.email_accounts.models  # noqa: F401 - ensure models are regis
 import app.modules.emails.models  # noqa: F401 - ensure models are registered
 import app.modules.domains.models  # noqa: F401 - ensure models are registered
 import app.modules.campaigns.models  # noqa: F401 - ensure models are registered
+import app.modules.recipient_lists.models  # noqa: F401 - ensure models are registered
 
 config = context.config
 

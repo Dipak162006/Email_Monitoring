@@ -138,6 +138,7 @@ export function AppLayout() {
     if (path.startsWith("/emails/")) return "Email Detail";
     if (path.startsWith("/compose")) return "Compose Email";
     if (path.startsWith("/campaigns")) return "Campaigns";
+    if (path.startsWith("/recipient-lists")) return "Recipient Lists";
     if (path.startsWith("/domains")) return "Settings / Domains";
     if (path.startsWith("/email-accounts")) return "Connected Accounts";
     if (path.startsWith("/templates")) return "Templates";
@@ -220,6 +221,11 @@ export function AppLayout() {
       label: "Campaigns",
       href: "/campaigns",
       icon: Megaphone,
+    },
+    {
+      label: "Recipient Lists",
+      href: "/recipient-lists",
+      icon: Users,
     },
   ];
 

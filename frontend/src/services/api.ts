@@ -66,6 +66,8 @@ import type {
   CampaignRecipientBulkCreateRequest,
   CampaignRecipientBulkCreateResponse,
   CampaignRecipientImportResponse,
+  CampaignRecipientListImportRequest,
+  CampaignRecipientListImportResponse,
   CampaignRecipientListParams,
   CampaignRecipientReschedulePayload,
   CampaignRecipientStopPayload,
@@ -77,6 +79,32 @@ import type {
   SuppressionBulkCreatePayload,
   SuppressionBulkCreateResponse,
 } from "../types/campaign";
+import type {
+  RecipientList,
+  RecipientListPaginationResponse,
+  RecipientListCreatePayload,
+  RecipientListUpdatePayload,
+  RecipientListQueryParams,
+  RecipientListMember,
+  RecipientListMemberPaginationResponse,
+  RecipientListMemberCreatePayload,
+  RecipientListMemberUpdatePayload,
+  RecipientListMemberQueryParams,
+  RecipientListMemberImportResponse,
+} from "../types/recipientList";
+export type {
+  RecipientList,
+  RecipientListPaginationResponse,
+  RecipientListCreatePayload,
+  RecipientListUpdatePayload,
+  RecipientListQueryParams,
+  RecipientListMember,
+  RecipientListMemberPaginationResponse,
+  RecipientListMemberCreatePayload,
+  RecipientListMemberUpdatePayload,
+  RecipientListMemberQueryParams,
+  RecipientListMemberImportResponse,
+} from "../types/recipientList";
 export type {
   SuppressionReason,
   SuppressionEntry,
@@ -1323,6 +1351,17 @@ export const campaignsApi = {
     );
   },
 
+  importRecipientsFromLists: async (
+    companyId: number,
+    campaignId: number,
+    payload: CampaignRecipientListImportRequest
+  ): Promise<CampaignRecipientListImportResponse> => {
+    return apiClient.post<CampaignRecipientListImportResponse>(
+      `/api/v1/companies/${companyId}/campaigns/${campaignId}/recipients/import-lists`,
+      payload
+    );
+  },
+
   uploadAttachment: async (
     companyId: number,
     campaignId: number,
@@ -1454,6 +1493,132 @@ export const suppressionsApi = {
   ): Promise<void> => {
     return apiClient.delete<void>(
       `/api/v1/companies/${companyId}/suppressions/${suppressionId}`
+    );
+  },
+};
+
+export const recipientListsApi = {
+  listRecipientLists: async (
+    companyId: number,
+    params?: RecipientListQueryParams
+  ): Promise<RecipientListPaginationResponse> => {
+    const searchParams = new URLSearchParams();
+    if (params?.search) searchParams.set("search", params.search);
+    if (params?.limit !== undefined) searchParams.set("limit", String(params.limit));
+    if (params?.offset !== undefined) searchParams.set("offset", String(params.offset));
+    const qs = searchParams.toString();
+    return apiClient.get<RecipientListPaginationResponse>(
+      `/api/v1/companies/${companyId}/recipient-lists${qs ? `?${qs}` : ""}`
+    );
+  },
+
+  getRecipientList: async (
+    companyId: number,
+    listId: number
+  ): Promise<RecipientList> => {
+    return apiClient.get<RecipientList>(
+      `/api/v1/companies/${companyId}/recipient-lists/${listId}`
+    );
+  },
+
+  createRecipientList: async (
+    companyId: number,
+    payload: RecipientListCreatePayload
+  ): Promise<RecipientList> => {
+    return apiClient.post<RecipientList>(
+      `/api/v1/companies/${companyId}/recipient-lists`,
+      payload
+    );
+  },
+
+  updateRecipientList: async (
+    companyId: number,
+    listId: number,
+    payload: RecipientListUpdatePayload
+  ): Promise<RecipientList> => {
+    return apiClient.patch<RecipientList>(
+      `/api/v1/companies/${companyId}/recipient-lists/${listId}`,
+      payload
+    );
+  },
+
+  deleteRecipientList: async (
+    companyId: number,
+    listId: number
+  ): Promise<void> => {
+    return apiClient.delete<void>(
+      `/api/v1/companies/${companyId}/recipient-lists/${listId}`
+    );
+  },
+
+  listMembers: async (
+    companyId: number,
+    listId: number,
+    params?: RecipientListMemberQueryParams
+  ): Promise<RecipientListMemberPaginationResponse> => {
+    const searchParams = new URLSearchParams();
+    if (params?.search) searchParams.set("search", params.search);
+    if (params?.limit !== undefined) searchParams.set("limit", String(params.limit));
+    if (params?.offset !== undefined) searchParams.set("offset", String(params.offset));
+    const qs = searchParams.toString();
+    return apiClient.get<RecipientListMemberPaginationResponse>(
+      `/api/v1/companies/${companyId}/recipient-lists/${listId}/members${qs ? `?${qs}` : ""}`
+    );
+  },
+
+  getMember: async (
+    companyId: number,
+    listId: number,
+    memberId: number
+  ): Promise<RecipientListMember> => {
+    return apiClient.get<RecipientListMember>(
+      `/api/v1/companies/${companyId}/recipient-lists/${listId}/members/${memberId}`
+    );
+  },
+
+  addMember: async (
+    companyId: number,
+    listId: number,
+    payload: RecipientListMemberCreatePayload
+  ): Promise<RecipientListMember> => {
+    return apiClient.post<RecipientListMember>(
+      `/api/v1/companies/${companyId}/recipient-lists/${listId}/members`,
+      payload
+    );
+  },
+
+  updateMember: async (
+    companyId: number,
+    listId: number,
+    memberId: number,
+    payload: RecipientListMemberUpdatePayload
+  ): Promise<RecipientListMember> => {
+    return apiClient.patch<RecipientListMember>(
+      `/api/v1/companies/${companyId}/recipient-lists/${listId}/members/${memberId}`,
+      payload
+    );
+  },
+
+  removeMember: async (
+    companyId: number,
+    listId: number,
+    memberId: number
+  ): Promise<void> => {
+    return apiClient.delete<void>(
+      `/api/v1/companies/${companyId}/recipient-lists/${listId}/members/${memberId}`
+    );
+  },
+
+  importMembersCsv: async (
+    companyId: number,
+    listId: number,
+    file: File
+  ): Promise<RecipientListMemberImportResponse> => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiClient.post<RecipientListMemberImportResponse>(
+      `/api/v1/companies/${companyId}/recipient-lists/${listId}/members/import`,
+      formData
     );
   },
 };
