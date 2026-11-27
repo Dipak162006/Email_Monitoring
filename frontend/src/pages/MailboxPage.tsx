@@ -96,14 +96,13 @@ export function MailboxPage() {
   const { data: mailboxCounts, refetch: refetchCounts } = useQuery({
     queryKey: ["mailbox-counts", currentCompanyId, selectedAccountId],
     queryFn: () => emailsApi.getMailboxCounts(currentCompanyId ?? undefined, selectedAccountId),
-    staleTime: 30000,
+    refetchInterval: 30000,
   });
 
   // Fetch Authorized Accounts for filter dropdown
   const { data: authorizedAccounts = [] } = useQuery({
     queryKey: ["authorized-accounts"],
     queryFn: () => emailAccountsApi.getAuthorizedAccounts(),
-    staleTime: 60000,
   });
 
   // Filter authorized accounts strictly to the active company workspace
@@ -137,7 +136,7 @@ export function MailboxPage() {
     queryKey: ["emails", listParams],
     queryFn: () => emailsApi.listEmails(listParams),
     placeholderData: keepPreviousData,
-    staleTime: 15000,
+    refetchInterval: 25000,
   });
 
   const emails = emailListData?.emails || [];

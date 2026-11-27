@@ -60,7 +60,6 @@ export function EmailAccountsPage() {
     queryKey: ["company-email-accounts", activeCompany?.id],
     queryFn: () => emailAccountsApi.listCompanyAccounts(activeCompany!.id),
     enabled: !!activeCompany?.id,
-    staleTime: 30000,
   });
 
   // 3. Delete mutation
@@ -80,6 +79,10 @@ export function EmailAccountsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["company-email-accounts"] });
       queryClient.invalidateQueries({ queryKey: ["authorized-accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["authorizedEmailAccounts"] });
+      queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-account-health"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-stats"] });
       setAccountToDelete(null);
       setAlertBanner({
         type: "success",
@@ -474,7 +477,10 @@ export function EmailAccountsPage() {
           onSuccess={() => {
             queryClient.invalidateQueries({ queryKey: ["company-email-accounts"] });
             queryClient.invalidateQueries({ queryKey: ["authorized-accounts"] });
+            queryClient.invalidateQueries({ queryKey: ["authorizedEmailAccounts"] });
             queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+            queryClient.invalidateQueries({ queryKey: ["dashboard-account-health"] });
+            queryClient.invalidateQueries({ queryKey: ["dashboard-stats"] });
             setAlertBanner({
               type: "success",
               message: selectedAccountForEdit

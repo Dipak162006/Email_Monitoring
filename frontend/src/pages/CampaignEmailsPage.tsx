@@ -237,6 +237,11 @@ export const CampaignEmailsPage: React.FC = () => {
 
     enabled: Boolean(currentCompanyId && campaignIdNum),
 
+    refetchInterval: () => {
+      const status = campaign?.status;
+      return (status === "QUEUED" || status === "RUNNING") ? 5000 : false;
+    },
+
   });
 
 
@@ -245,7 +250,7 @@ export const CampaignEmailsPage: React.FC = () => {
 
   const { data: campaign } = useQuery({
 
-    queryKey: ["campaign", currentCompanyId, campaignIdNum],
+    queryKey: ["campaigns", currentCompanyId, "detail", campaignIdNum],
 
     queryFn: () => {
 
@@ -256,6 +261,11 @@ export const CampaignEmailsPage: React.FC = () => {
     },
 
     enabled: Boolean(currentCompanyId && campaignIdNum),
+
+    refetchInterval: (query) => {
+      const status = (query.state.data as { status?: string } | null | undefined)?.status;
+      return (status === "QUEUED" || status === "RUNNING") ? 5000 : false;
+    },
 
   });
 

@@ -154,6 +154,10 @@ export const CampaignDetailPage: React.FC = () => {
     },
     enabled: Boolean(currentCompanyId && campaignIdNum),
     staleTime: 0,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return (status === "QUEUED" || status === "RUNNING") ? 5000 : false;
+    },
   });
 
   // Query Campaign Analytics (M7 & T5)
@@ -164,6 +168,10 @@ export const CampaignDetailPage: React.FC = () => {
       return campaignsApi.getCampaignAnalytics(currentCompanyId, campaignIdNum);
     },
     enabled: Boolean(currentCompanyId && campaignIdNum),
+    refetchInterval: () => {
+      const status = campaign?.status;
+      return (status === "QUEUED" || status === "RUNNING") ? 5000 : false;
+    },
   });
 
   const invalidateQueries = () => {
@@ -174,7 +182,19 @@ export const CampaignDetailPage: React.FC = () => {
       queryKey: ["campaigns", currentCompanyId, "analytics", campaignIdNum],
     });
     queryClient.invalidateQueries({
+      queryKey: ["campaigns", currentCompanyId, campaignIdNum, "recipients"],
+    });
+    queryClient.invalidateQueries({
       queryKey: ["campaigns", currentCompanyId],
+    });
+    queryClient.invalidateQueries({
+      queryKey: ["campaignsSummary", currentCompanyId],
+    });
+    queryClient.invalidateQueries({
+      queryKey: ["dashboard-stats"],
+    });
+    queryClient.invalidateQueries({
+      queryKey: ["dashboard-activity"],
     });
   };
 

@@ -78,7 +78,6 @@ export function CampaignsPage() {
   const { data: emailAccounts = [] } = useQuery({
     queryKey: ["authorizedEmailAccounts"],
     queryFn: () => emailAccountsApi.getAuthorizedAccounts(),
-    staleTime: 60000,
   });
 
   // 1b. Fetch company-wide status summary for KPI cards (independent of pagination/filter)
@@ -89,6 +88,13 @@ export function CampaignsPage() {
       return campaignsApi.getCampaignsSummary(currentCompanyId);
     },
     enabled: Boolean(currentCompanyId),
+    refetchInterval: (query) => {
+      const summary = query.state.data;
+      if (summary && (summary.active_count ?? 0) > 0) {
+        return 6000;
+      }
+      return false;
+    },
   });
 
   // 2. Fetch company campaigns using backend pagination & status filter
@@ -115,6 +121,16 @@ export function CampaignsPage() {
       });
     },
     enabled: Boolean(currentCompanyId),
+    refetchInterval: (query) => {
+      const campaigns = query.state.data;
+      if (Array.isArray(campaigns)) {
+        const hasActive = campaigns.some(
+          (c) => c.status === "QUEUED" || c.status === "RUNNING"
+        );
+        if (hasActive) return 6000;
+      }
+      return false;
+    },
   });
 
   // Client-side filtering of the currently loaded page by keyword and sender
@@ -172,6 +188,8 @@ export function CampaignsPage() {
   const invalidateCampaigns = () => {
     queryClient.invalidateQueries({ queryKey: ["campaigns", currentCompanyId] });
     queryClient.invalidateQueries({ queryKey: ["campaignsSummary", currentCompanyId] });
+    queryClient.invalidateQueries({ queryKey: ["dashboard-stats"] });
+    queryClient.invalidateQueries({ queryKey: ["dashboard-activity"] });
   };
 
   // 1. Pause Campaign

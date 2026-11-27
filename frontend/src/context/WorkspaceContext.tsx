@@ -150,13 +150,20 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         } catch {
           // Ignore storage errors
         }
+        queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+        queryClient.invalidateQueries({ queryKey: ["dashboard-stats"] });
+        queryClient.invalidateQueries({ queryKey: ["dashboard-activity"] });
+        queryClient.invalidateQueries({ queryKey: ["dashboard-recent-emails"] });
+        queryClient.invalidateQueries({ queryKey: ["dashboard-account-health"] });
+        queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+        queryClient.invalidateQueries({ queryKey: ["campaignsSummary"] });
       } else {
         console.warn(
           `Cannot switch to company ${companyId}: User is not an authorized member of this workspace.`
         );
       }
     },
-    [companies]
+    [companies, queryClient]
   );
 
   // Method to refresh memberships after creation, invitation acceptance, or role change

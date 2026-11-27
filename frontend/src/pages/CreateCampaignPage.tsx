@@ -469,6 +469,15 @@ export function CreateCampaignPage({
         queryClient.invalidateQueries({
           queryKey: ["campaigns", currentCompanyId],
         });
+        queryClient.invalidateQueries({
+          queryKey: ["campaignsSummary", currentCompanyId],
+        });
+        queryClient.invalidateQueries({
+          queryKey: ["dashboard-stats"],
+        });
+        queryClient.invalidateQueries({
+          queryKey: ["dashboard-activity"],
+        });
       }
 
       setIsDirty(false);

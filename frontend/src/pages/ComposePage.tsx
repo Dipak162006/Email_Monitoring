@@ -836,6 +836,9 @@ export function ComposePage() {
 
       queryClient.invalidateQueries({ queryKey: ["emails"] });
       queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-recent-emails"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-activity"] });
       navigate("/mailbox?folder=sent");
     } catch (err: unknown) {
       const msg =

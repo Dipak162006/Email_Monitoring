@@ -95,6 +95,7 @@ export function DashboardPage() {
         dateTo,
         allTime,
       }),
+    refetchInterval: 45000,
   });
 
   // 2. Activity Trends Query
@@ -107,18 +108,21 @@ export function DashboardPage() {
         dateTo,
         allTime,
       }),
+    refetchInterval: 45000,
   });
 
   // 3. Account Health Query
   const { data: accountHealth, isLoading: isHealthLoading } = useQuery({
     queryKey: ["dashboard-account-health", currentCompanyId],
     queryFn: () => dashboardApi.getAccountHealth(currentCompanyId ?? undefined),
+    refetchInterval: 45000,
   });
 
   // 4. Recent Emails Query
   const { data: recentEmailsData, isLoading: isRecentLoading } = useQuery({
     queryKey: ["dashboard-recent-emails", currentCompanyId],
     queryFn: () => emailsApi.getRecentEmails(7, currentCompanyId ?? undefined),
+    refetchInterval: 30000,
   });
 
   // Map email accounts for quick provider lookup

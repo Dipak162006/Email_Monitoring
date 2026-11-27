@@ -90,16 +90,19 @@ export function EmailDetailPage() {
   const markReadMutation = useMutation({
     mutationFn: (isRead: boolean) => emailsApi.markRead(id, isRead),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["email-detail", id] });
+      queryClient.invalidateQueries({ queryKey: ["email-detail", currentCompanyId, id] });
+      queryClient.invalidateQueries({ queryKey: ["email-detail"] });
       queryClient.invalidateQueries({ queryKey: ["emails"] });
       queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-stats"] });
     },
   });
 
   const markStarMutation = useMutation({
     mutationFn: (isStarred: boolean) => emailsApi.markStarred(id, isStarred),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["email-detail", id] });
+      queryClient.invalidateQueries({ queryKey: ["email-detail", currentCompanyId, id] });
+      queryClient.invalidateQueries({ queryKey: ["email-detail"] });
       queryClient.invalidateQueries({ queryKey: ["emails"] });
     },
   });
@@ -107,8 +110,12 @@ export function EmailDetailPage() {
   const deleteMutation = useMutation({
     mutationFn: () => emailsApi.softDelete(id),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["email-detail", currentCompanyId, id] });
+      queryClient.invalidateQueries({ queryKey: ["email-detail"] });
       queryClient.invalidateQueries({ queryKey: ["emails"] });
       queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-recent-emails"] });
       navigate("/mailbox");
     },
     onError: () => {
@@ -119,9 +126,12 @@ export function EmailDetailPage() {
   const restoreMutation = useMutation({
     mutationFn: () => emailsApi.restore(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["email-detail", id] });
+      queryClient.invalidateQueries({ queryKey: ["email-detail", currentCompanyId, id] });
+      queryClient.invalidateQueries({ queryKey: ["email-detail"] });
       queryClient.invalidateQueries({ queryKey: ["emails"] });
       queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-recent-emails"] });
       setIsRestoreModalOpen(false);
       setAlertBanner({ type: "success", message: "Email successfully restored to Inbox." });
     },
@@ -134,8 +144,12 @@ export function EmailDetailPage() {
   const permanentDeleteMutation = useMutation({
     mutationFn: () => emailsApi.permanentDelete(id),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["email-detail", currentCompanyId, id] });
+      queryClient.invalidateQueries({ queryKey: ["email-detail"] });
       queryClient.invalidateQueries({ queryKey: ["emails"] });
       queryClient.invalidateQueries({ queryKey: ["mailbox-counts"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-recent-emails"] });
       setIsPermanentDeleteModalOpen(false);
       navigate("/mailbox?folder=trash");
     },

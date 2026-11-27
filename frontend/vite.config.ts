@@ -28,8 +28,9 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5173,
       host: "0.0.0.0",
+      allowedHosts: ["singing-unfilled-consoling.ngrok-free.dev"],
       watch: {
-        usePolling,
+        usePolling: true,
         interval: 100,
       },
       proxy: {
